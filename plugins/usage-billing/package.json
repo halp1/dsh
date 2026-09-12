@@ -1,7 +1,7 @@
 {
   "name": "@kenz1117/dsh-ui-usage-billing",
   "description": "Usage billing dashboard for DeepSeek Harness: sidebar cost metrics plus a full dashboard modal, priced from a current multi-provider catalog with real usage aggregated from session logs.",
-  "version": "1.2.6",
+  "version": "1.2.6-fork.halp1.1",
   "keywords": [
     "deepseek-harness",
     "deepseek",
@@ -14,12 +14,9 @@
     "llm",
     "dashboard"
   ],
-  "publishConfig": {
-    "access": "public"
-  },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kenz1117/dsh-ui-usage-billing.git"
+    "url": "git+https://github.com/halp1/dsh-ui-usage-billing-fork.git"
   },
   "type": "module",
   "main": "lib/index.js",
@@ -152,5 +149,17 @@
     "lib/client.js",
     "lib/types/**/*.d.ts",
     "cordis.patch.yml"
-  ]
+  ],
+  "homepage": "https://github.com/kenz1117/dsh-ui-usage-billing#readme",
+  "fork": {
+    "upstreamPackage": "@kenz1117/dsh-ui-usage-billing",
+    "upstreamRepository": "https://github.com/kenz1117/dsh-ui-usage-billing",
+    "upstreamReadme": "https://github.com/kenz1117/dsh-ui-usage-billing#readme",
+    "forkedAtTag": "v1.2.6",
+    "forkedAtCommit": "4acffb5fb952fcf4b2eb5fb4b37ffc70a2545215",
+    "divergence": [
+      "src/client/UsageBilling.tsx: currency default 'cny' -> 'usd'"
+    ]
+  },
+  "private": true
 }

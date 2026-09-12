@@ -3500,7 +3500,11 @@ export function UsageBilling(props: UsageBillingProps): React.ReactNode {
   // 订阅刷新是否失败：失败时保留上次成功快照并标记 stale（展示「缓存」）。
   const [quotasStale, setQuotasStale] = useState(false)
   const [relayQuotas, setRelayQuotas] = useState<readonly RelayQuota[]>([])
-  const [currency, setCurrency] = useState<CostCurrency>('cny')
+  // FORK PATCH (halp1): default the dashboard to USD instead of CNY.
+  // Upstream keeps this as plain, non-persisted component state with no config
+  // or settings seam, so a USD default is unreachable without changing code.
+  // Kept as a one-line divergence so `git merge upstream/main` stays trivial.
+  const [currency, setCurrency] = useState<CostCurrency>('usd')
   // 模型用量悬浮窗偏好：localStorage 持久化（修改即写回，仅 client 侧）。
   const [floatPrefs, setFloatPrefs] = useState<FloatWindowPrefs>(() => loadFloatWindowPrefs())
   const updateFloatPrefs = useCallback((next: FloatWindowPrefs): void => {
