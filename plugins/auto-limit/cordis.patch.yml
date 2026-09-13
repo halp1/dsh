@@ -1,0 +1,14 @@
+# Bundle self-activation patch: mounts this plugin's node half when the package
+# is installed into a profile via
+#   dsh plugin --profile web add file:~/code/dsh-plugin-auto-limit
+#
+# Configure it by overriding this id from the profile's own cordis.patch.yml:
+#
+#   - id: auto-limit
+#     config:
+#       threshold: 95
+#       providers: [claude]
+#
+- insert:
+    - id: auto-limit
+      name: dsh-plugin-auto-limit
