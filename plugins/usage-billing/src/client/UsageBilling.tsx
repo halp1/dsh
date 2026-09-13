@@ -19,10 +19,13 @@ import { IconChevronDownOutline14, Menu, Modal } from '@deepseek-ai/dsh-client-u
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import {
   type BillingCardPrefs,
+  CURRENCY_PREF_EVENT,
   DEFAULT_ENABLE_USAGE_STATS_TOOL,
   type LiveCostBarPrefs,
   LIVE_COST_BAR_PREF_EVENT,
   loadBillingCardPrefs,
+  loadDisplayCurrency,
+  saveDisplayCurrency,
   type FloatWindowPrefs,
   loadFloatWindowPrefs,
   loadLiveCostBarPrefs,
@@ -1031,12 +1034,22 @@ function UsageBillingTrigger(
   floatPrefs: FloatWindowPrefs
   /** 订阅配额列表（「指定订阅卡」模式的数据来源）。 */
   subscriptions: readonly SubscriptionQuota[]
+  /** FORK PATCH (halp1): 展示币种，由 UsageBilling 下传，与 dashboard 同源。 */
+  currency: CostCurrency
   },
 ): React.ReactNode {
   const {
     wide, t, onOpen, monthCost, todayCost, weekCost, days, vendorStatus, dash,
     floatPrefs, subscriptions, cardPrefs, monthTokens, todayTokens, weekTokens,
+    currency,
   } = props
+
+  // FORK PATCH (halp1): the trigger chip called bare `formatMoney(x)`, which
+  // defaults to CNY — so it stayed ¥ even while the dashboard showed USD.
+  // Convert through the same rate the dashboard uses, then format in the
+  // active currency, so the chip and the dashboard can never disagree.
+  const money = (cny: number): string =>
+    formatMoney(currency === 'usd' ? cnyToUsd(cny) : cny, currency)
 
   // 「指定订阅卡」浮窗：可用订阅列表 + 当前展示索引（每次一张，可前后切换）。
   const targetSubs = useMemo(
@@ -1107,7 +1120,7 @@ function UsageBillingTrigger(
         className={css.railButton}
         data-testid="billing-rail-button"
         onClick={onOpen}
-        title={`${t('title')} · ${formatMoney(monthCost)}`}
+        title={`${t('title')} · ${money(monthCost)}`}
       >
         {cardIcon}
       </button>
@@ -1134,7 +1147,7 @@ function UsageBillingTrigger(
         className={css.trigger}
         data-testid="billing-trigger"
         onClick={onOpen}
-        title={`${t('title')} · ${formatMoney(monthCost)}`}
+        title={`${t('title')} · ${money(monthCost)}`}
       >
         <span className={css.triggerIcon} data-testid="billing-trigger-icon">{cardIcon}</span>
         {/* 设计 trigger-card：当月 = 标签 + ¥ + 数字(分离)，下方一行 今日/本周 副行。
@@ -1148,15 +1161,15 @@ function UsageBillingTrigger(
               <span className={css.triggerMetric} data-testid="billing-trigger-month-tokens">{formatTokens(monthTokens)}</span>
             ) : (
               <>
-                <span className={css.triggerYen} aria-hidden="true">{formatMoney(monthCost).charAt(0)}</span>
-                <span className={css.triggerMetric}>{formatMoney(monthCost).slice(1)}</span>
+                <span className={css.triggerYen} aria-hidden="true">{money(monthCost).charAt(0)}</span>
+                <span className={css.triggerMetric}>{money(monthCost).slice(1)}</span>
               </>
             )}
           </span>
           <span className={css.triggerSub} data-testid="billing-trigger-today">
             {tokenView
               ? `${t('triggerToday')} ${formatTokens(todayTokens)} · ${t('weekCost')} ${formatTokens(weekTokens)}`
-              : `${t('triggerToday')} ${formatMoney(todayCost)} · ${t('weekCost')} ${formatMoney(weekCost)}`}
+              : `${t('triggerToday')} ${money(todayCost)} · ${t('weekCost')} ${money(weekCost)}`}
           </span>
         </span>
         <span className={css.triggerSpark} data-testid="billing-trigger-spark" aria-hidden="true">
@@ -1247,7 +1260,7 @@ function UsageBillingTrigger(
             <span className={css.metricGrid}>
               <span className={css.metricCell}>
                 <span className={css.metricLabel}>{t('monthCost')}</span>
-                <span className={clsx(css.metricValue, css.metricValuePrimary)}>{formatMoney(monthCost)}</span>
+                <span className={clsx(css.metricValue, css.metricValuePrimary)}>{money(monthCost)}</span>
               </span>
               <span className={css.metricCell}>
                 <span className={css.metricLabel}>{t('tokenTotal')}</span>
@@ -3500,11 +3513,26 @@ export function UsageBilling(props: UsageBillingProps): React.ReactNode {
   // 订阅刷新是否失败：失败时保留上次成功快照并标记 stale（展示「缓存」）。
   const [quotasStale, setQuotasStale] = useState(false)
   const [relayQuotas, setRelayQuotas] = useState<readonly RelayQuota[]>([])
-  // FORK PATCH (halp1): default the dashboard to USD instead of CNY.
-  // Upstream keeps this as plain, non-persisted component state with no config
-  // or settings seam, so a USD default is unreachable without changing code.
-  // Kept as a one-line divergence so `git merge upstream/main` stays trivial.
-  const [currency, setCurrency] = useState<CostCurrency>('usd')
+  // FORK PATCH (halp1): display currency now defaults to USD *and* persists.
+  // Upstream kept this in throwaway component state, so it reset to CNY on
+  // every reload and the chip/ticker (separate slot React trees) could never
+  // see it. Back it with localStorage + a CustomEvent so every surface agrees
+  // and the choice survives a refresh.
+  const [currency, setCurrencyState] = useState<CostCurrency>(() => loadDisplayCurrency())
+  const setCurrency = useCallback((next: CostCurrency): void => {
+    setCurrencyState(next)
+    saveDisplayCurrency(next)
+  }, [])
+  // 跨树同步：ticker / chip 或另一标签页改币种时，dashboard 立即跟随。
+  useEffect(() => {
+    const sync = (): void => { setCurrencyState(loadDisplayCurrency()) }
+    window.addEventListener(CURRENCY_PREF_EVENT, sync)
+    window.addEventListener('storage', sync)
+    return () => {
+      window.removeEventListener(CURRENCY_PREF_EVENT, sync)
+      window.removeEventListener('storage', sync)
+    }
+  }, [])
   // 模型用量悬浮窗偏好：localStorage 持久化（修改即写回，仅 client 侧）。
   const [floatPrefs, setFloatPrefs] = useState<FloatWindowPrefs>(() => loadFloatWindowPrefs())
   const updateFloatPrefs = useCallback((next: FloatWindowPrefs): void => {
@@ -3881,6 +3909,7 @@ export function UsageBilling(props: UsageBillingProps): React.ReactNode {
         weekTokens={weekTokens}
         floatPrefs={floatPrefs}
         subscriptions={quotas}
+        currency={currency}
       />
       {open && (
         <BillingDashboard

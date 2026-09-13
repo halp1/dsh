@@ -197,6 +197,58 @@ export function saveLiveCostBarPrefs(prefs: LiveCostBarPrefs): void {
   }
 }
 
+/*
+ * FORK PATCH (halp1): persisted display-currency preference.
+ *
+ * Upstream keeps the dashboard currency in plain component state and never
+ * persists it, and the chip/ticker surfaces don't receive it at all — they
+ * live in separate slot React trees (composer.dock / input.right), so they
+ * cannot read the dashboard's state. That's why the chip stayed ¥ while the
+ * dashboard showed $.
+ *
+ * Follow the existing LIVE_COST_BAR pref pattern exactly: localStorage for
+ * durability + a CustomEvent for same-document cross-tree sync. Default is
+ * 'usd' (the whole point of this fork); upstream's CNY behaviour is one
+ * toggle click away and now actually survives a reload.
+ */
+
+/** 展示币种：与 client/pricing.ts 的 `CostCurrency` 同形（避免运行时依赖，故就地声明）。 */
+export type DisplayCurrency = 'cny' | 'usd'
+
+/** FORK PATCH (halp1): 默认展示币种 = USD。 */
+export const DEFAULT_DISPLAY_CURRENCY: DisplayCurrency = 'usd'
+
+/** localStorage key（与其他 `dsh.ui-usage-billing.*` 偏好同命名空间）。 */
+export const CURRENCY_STORAGE_KEY = 'dsh.ui-usage-billing.currency'
+
+/** 币种切换后派发的 CustomEvent 名（chip / ticker / dashboard 跨树即时同步）。 */
+export const CURRENCY_PREF_EVENT = 'dsh.ui-usage-billing.currency-pref'
+
+/** 读取展示币种（含损坏/缺失回退到默认）。仅在浏览器半区调用。 */
+export function loadDisplayCurrency(): DisplayCurrency {
+  try {
+    const raw = localStorage.getItem(CURRENCY_STORAGE_KEY)
+    // 只有显式 'cny' 才回到人民币，其余（缺失/损坏/非法值）一律按默认兜底。
+    return raw === '"cny"' || raw === 'cny' ? 'cny' : DEFAULT_DISPLAY_CURRENCY
+  } catch {
+    return DEFAULT_DISPLAY_CURRENCY
+  }
+}
+
+/** 写入展示币种并广播（同文档即时生效）。失败静默（展示偏好非关键）。 */
+export function saveDisplayCurrency(currency: DisplayCurrency): void {
+  try {
+    localStorage.setItem(CURRENCY_STORAGE_KEY, JSON.stringify(currency))
+  } catch {
+    // ignore: storage full / unavailable — display preference is non-critical.
+  }
+  try {
+    window.dispatchEvent(new CustomEvent(CURRENCY_PREF_EVENT))
+  } catch {
+    // ignore: non-browser / detached document.
+  }
+}
+
 /** 用户自定义单价（与 client/pricing.ts 的 `UserPriceEntry` 同形；type import，无运行时依赖）。 */
 export type StoredUserPrice = UserPriceEntry
 

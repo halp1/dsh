@@ -20,9 +20,14 @@ import { useEffect, useMemo, useState } from 'react'
 import clsx from 'clsx'
 import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
-import { formatMoney, formatSwitchCountdown, tierCountdown } from './pricing.ts'
-import { LIVE_COST_BAR_PREF_EVENT, loadLiveCostBarPrefs } from './usage-billing-settings.ts'
-import type { LiveCostBarPrefs } from './usage-billing-settings.ts'
+import { cnyToUsd, formatMoney, formatSwitchCountdown, tierCountdown } from './pricing.ts'
+import {
+  CURRENCY_PREF_EVENT,
+  LIVE_COST_BAR_PREF_EVENT,
+  loadDisplayCurrency,
+  loadLiveCostBarPrefs,
+} from './usage-billing-settings.ts'
+import type { DisplayCurrency, LiveCostBarPrefs } from './usage-billing-settings.ts'
 import type { UsageBillingKey } from './locales.ts'
 import css from './UsageBilling.module.css'
 
@@ -176,6 +181,27 @@ function useLiveCostPrefs(): { visible: boolean; position: CapsulePosition } {
   return { visible, position }
 }
 
+/**
+ * FORK PATCH (halp1): shared display-currency subscription.
+ * The ticker and the inline chip render in their own slot React trees, so they
+ * cannot read the dashboard's currency state — upstream simply hardcoded 'cny'
+ * here. Read the persisted preference and re-read on the same events the other
+ * prefs use, so every billing surface shows one currency.
+ */
+function useDisplayCurrency(): DisplayCurrency {
+  const [currency, setCurrency] = useState<DisplayCurrency>(() => loadDisplayCurrency())
+  useEffect(() => {
+    const reread = (): void => { setCurrency(loadDisplayCurrency()) }
+    window.addEventListener(CURRENCY_PREF_EVENT, reread)
+    window.addEventListener('storage', reread)
+    return () => {
+      window.removeEventListener(CURRENCY_PREF_EVENT, reread)
+      window.removeEventListener('storage', reread)
+    }
+  }, [])
+  return currency
+}
+
 /** 即时代费数据：挂载/会话切换时拉取 + 周期刷新，派生会话/本轮费用、峰谷档与额度预警。 */
 function useLiveCostData(sessionId: SessionId): {
   sessionCost: number
@@ -222,7 +248,11 @@ export function LiveCostBar({ sessionId, t }: LiveCostBarProps): React.ReactNode
   const { visible, position } = useLiveCostPrefs()
   const { sessionCost, turnCost, tier, chips } = useLiveCostData(sessionId)
 
-  const money = (cny: number): string => formatMoney(cny, 'cny')
+  // FORK PATCH (halp1): follow the shared currency preference instead of
+  // hardcoding CNY, converting through the same rate the dashboard uses.
+  const currency = useDisplayCurrency()
+  const money = (cny: number): string =>
+    formatMoney(currency === 'usd' ? cnyToUsd(cny) : cny, currency)
 
   const hasCost = sessionCost > 0 || turnCost > 0
   const isPeak = tier.tier === 'peak'
@@ -279,6 +309,11 @@ export function LiveCostBar({ sessionId, t }: LiveCostBarProps): React.ReactNode
 export function LiveCostChip({ sessionId, t }: LiveCostBarProps): React.ReactNode {
   const { visible, position } = useLiveCostPrefs()
   const { sessionCost, turnCost, tier, chips } = useLiveCostData(sessionId)
+  // FORK PATCH (halp1): follow the shared currency preference (see LiveCostBar).
+  // Hook call must precede the early return below to satisfy rules-of-hooks.
+  const currency = useDisplayCurrency()
+  const money = (cny: number): string =>
+    formatMoney(currency === 'usd' ? cnyToUsd(cny) : cny, currency)
   // 非工具行位置时 chip 让位给 bar（同 id 双槽互斥由位置偏好门控）。
   if (!visible || position !== 'toolbar') return null
   const isPeak = tier.tier === 'peak'
@@ -287,8 +322,8 @@ export function LiveCostChip({ sessionId, t }: LiveCostBarProps): React.ReactNod
   const cls = worst <= 10 ? css.feeInlineError : worst <= 20 ? css.feeInlineAlert : css.feeInline
   const title = [
     `${formatSwitchCountdown(tier.nextSwitchInMs)} ${isPeak ? t('tierToOff') : t('tierToPeak')}`,
-    `${t('liveTurn')} ${formatMoney(turnCost, 'cny')}`,
-    `${t('liveSession')} ${formatMoney(sessionCost, 'cny')}`,
+    `${t('liveTurn')} ${money(turnCost)}`,
+    `${t('liveSession')} ${money(sessionCost)}`,
     ...chips.map(chip => `${chip.name} ${t(windowLabelKey(chip.kind))} ${chip.pct}%`),
   ].join(' · ')
   return (
@@ -297,7 +332,7 @@ export function LiveCostChip({ sessionId, t }: LiveCostBarProps): React.ReactNod
         <span className={isPeak ? css.feeChipPrimary : css.feeChipOff} data-testid="billing-live-tier">
           {isPeak ? t('tierPeak') : t('tierOff')}
         </span>
-        {sessionCost > 0 && <span className={css.feeInlineNum}>{formatMoney(sessionCost, 'cny')}</span>}
+        {sessionCost > 0 && <span className={css.feeInlineNum}>{money(sessionCost)}</span>}
       </span>
     </Tooltip>
   )

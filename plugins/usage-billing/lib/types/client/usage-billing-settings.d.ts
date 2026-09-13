@@ -95,6 +95,18 @@ export declare const LIVE_COST_BAR_PREF_EVENT = "dsh.ui-usage-billing.livecost-p
 export declare function loadLiveCostBarPrefs(): LiveCostBarPrefs;
 /** 写入即时代费条偏好。失败静默（展示偏好非关键）。 */
 export declare function saveLiveCostBarPrefs(prefs: LiveCostBarPrefs): void;
+/** 展示币种：与 client/pricing.ts 的 `CostCurrency` 同形（避免运行时依赖，故就地声明）。 */
+export type DisplayCurrency = 'cny' | 'usd';
+/** FORK PATCH (halp1): 默认展示币种 = USD。 */
+export declare const DEFAULT_DISPLAY_CURRENCY: DisplayCurrency;
+/** localStorage key（与其他 `dsh.ui-usage-billing.*` 偏好同命名空间）。 */
+export declare const CURRENCY_STORAGE_KEY = "dsh.ui-usage-billing.currency";
+/** 币种切换后派发的 CustomEvent 名（chip / ticker / dashboard 跨树即时同步）。 */
+export declare const CURRENCY_PREF_EVENT = "dsh.ui-usage-billing.currency-pref";
+/** 读取展示币种（含损坏/缺失回退到默认）。仅在浏览器半区调用。 */
+export declare function loadDisplayCurrency(): DisplayCurrency;
+/** 写入展示币种并广播（同文档即时生效）。失败静默（展示偏好非关键）。 */
+export declare function saveDisplayCurrency(currency: DisplayCurrency): void;
 /** 用户自定义单价（与 client/pricing.ts 的 `UserPriceEntry` 同形；type import，无运行时依赖）。 */
 export type StoredUserPrice = UserPriceEntry;
 /** 自定义价表：模型（+可选来源）→ 单价，条目列表（支持同名模型绑定不同中转站 origin）。 */

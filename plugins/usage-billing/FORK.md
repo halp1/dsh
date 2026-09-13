@@ -36,11 +36,46 @@ locale:
 
 ## Divergence from upstream
 
-Exactly one line of source, deliberately kept minimal so merges stay trivial:
-
 | File | Change |
 | --- | --- |
-| `src/client/UsageBilling.tsx` | currency default `'cny'` → `'usd'` |
+| `src/client/usage-billing-settings.ts` | **new**: persisted display-currency pref (`dsh.ui-usage-billing.currency` + `…currency-pref` event), default `'usd'` |
+| `src/client/UsageBilling.tsx` | currency state loads/saves that pref; `currency` threaded into `UsageBillingTrigger` |
+| `src/client/live-cost.tsx` | `LiveCostBar` + `LiveCostChip` follow the shared pref instead of hardcoded `'cny'` |
+| `src/client/UsageBilling.module.css` | amount never shrinks or clips; label yields first; breakpoints `200/170` → `230/190` |
+
+### Why it grew past one line
+
+The first cut only flipped `BillingDashboard`'s `useState`. That left the sidebar
+chip still showing `¥`, because **the billing UI is three independent React
+trees**, not one:
+
+| Surface | Component | Slot |
+| --- | --- | --- |
+| Sidebar chip | `UsageBillingTrigger` | `sidebar.footer.action` |
+| Composer ticker | `LiveCostBar` | `conversation.composer.dock` |
+| Toolbar chip | `LiveCostChip` | `conversation.input.right` |
+
+The trigger never received `currency` as a prop and called bare
+`formatMoney(x)` (which defaults to CNY); the two live-cost surfaces mount in
+*separate slots* and cannot read the dashboard's state at all — upstream just
+hardcoded `'cny'` in them. A prop could fix the trigger, but not the slot-mounted
+ones, so the currency moved into a module-level persisted preference following
+the existing `LIVE_COST_BAR_PREF_EVENT` pattern (localStorage for durability,
+`CustomEvent` + `storage` for cross-tree and cross-tab sync).
+
+Useful side effect: the currency choice now **survives a reload**, which it never
+did upstream.
+
+### The layout fix
+
+Setting the host to `locale.preference: en` swapped short CJK labels for much
+wider English ones (`当月` → `This month`, `今日 ¥452.8 · 本周` →
+`Today $66.7 · This week`) inside a chip whose CSS was tuned for CJK widths. The
+label and the amount shrank with equal priority, so the *amount* got clipped to
+`54…` — the one thing the card exists to show. Fixed by making `.triggerMetric`
+non-shrinking (`flex: 0 0 auto; overflow: visible`) and `.triggerLabel` yield
+first (`flex: 0 1 auto`), then widening the container-query breakpoints so
+English degrades cleanly instead of leaving half-words like `This w…`.
 
 Plus fork identity in `package.json`: the `version` suffix, `private: true`,
 `repository` pointed at the fork, `homepage` kept pointing at upstream's README,
