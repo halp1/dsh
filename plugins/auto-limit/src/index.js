@@ -49,8 +49,12 @@ export { PauseGate, UsagePoller, METERED_PROVIDERS };
 const DEFAULTS = {
   enabled: true,
   threshold: 98,
-  pollIntervalMs: 120_000,
-  pausedPollIntervalMs: 30_000,
+  // The usage endpoints allow roughly one lookup per minute and rate-limit
+  // PROGRESSIVELY (each hit inside a closed window extends it), so polling
+  // faster than this does not buy freshness — it buys a lockout, and a locked
+  // out poller is a blind gate. Measured against the live Claude endpoint.
+  pollIntervalMs: 300_000,
+  pausedPollIntervalMs: 120_000,
   providers: [...METERED_PROVIDERS],
   maxHoldMs: 0,
   notify: true,
@@ -71,13 +75,16 @@ export function resolveConfig(raw = {}) {
   }
 
   const pollIntervalMs = raw.pollIntervalMs ?? DEFAULTS.pollIntervalMs;
-  if (typeof pollIntervalMs !== 'number' || pollIntervalMs < 5_000) {
-    throw new Error('auto-limit: pollIntervalMs must be at least 5000');
+  if (typeof pollIntervalMs !== 'number' || pollIntervalMs < 60_000) {
+    throw new Error(
+      'auto-limit: pollIntervalMs must be at least 60000 — the usage endpoints ' +
+        'allow ~1 lookup/minute and extend their own lockout when polled faster',
+    );
   }
 
   const pausedPollIntervalMs = raw.pausedPollIntervalMs ?? DEFAULTS.pausedPollIntervalMs;
-  if (typeof pausedPollIntervalMs !== 'number' || pausedPollIntervalMs < 5_000) {
-    throw new Error('auto-limit: pausedPollIntervalMs must be at least 5000');
+  if (typeof pausedPollIntervalMs !== 'number' || pausedPollIntervalMs < 60_000) {
+    throw new Error('auto-limit: pausedPollIntervalMs must be at least 60000');
   }
 
   const providers = raw.providers ?? DEFAULTS.providers;
@@ -106,6 +113,39 @@ export function resolveConfig(raw = {}) {
     maxHoldMs,
     notify: raw.notify ?? DEFAULTS.notify,
   });
+}
+
+/**
+ * Read a rate-limit verdict off a terminal stream chunk.
+ *
+ * The provider's own refusal is the one quota signal that cannot be starved by
+ * the usage endpoint's limiter, so it is the gate's backstop. dsh-llm turns an
+ * adapter failure into `{type:'finish', reason:{kind:'error', failure}}`, where
+ * `failure.code` is the stable taxonomy (`RATE_LIMIT`, `QUOTA_EXCEEDED`) and
+ * `providerRetryAfterMs` carries the disclosed reset when the provider sent one.
+ * @param chunk - one stream chunk.
+ * @returns ms to stay closed, or undefined when the chunk is not a rate-limit refusal.
+ */
+export function rateLimitSignal(chunk) {
+  if (chunk?.type !== 'finish') return undefined;
+  const reason = chunk.reason;
+  if (reason?.kind !== 'error') return undefined;
+  const failure = reason.failure;
+  if (failure === undefined) return undefined;
+
+  const rateLimited =
+    failure.code === 'RATE_LIMIT' ||
+    failure.code === 'QUOTA_EXCEEDED' ||
+    failure.status === 429;
+  if (!rateLimited) return undefined;
+
+  const disclosed = failure.providerRetryAfterMs;
+  if (typeof disclosed === 'number' && Number.isFinite(disclosed) && disclosed > 0) {
+    return disclosed;
+  }
+  // No disclosed reset: hold briefly and let the poller establish the truth,
+  // rather than guessing a long window the provider never named.
+  return 60_000;
 }
 
 /** Format an epoch instant for a human-readable log line. */
@@ -200,21 +240,38 @@ export function apply(ctx, rawConfig = {}) {
       logger.info(`auto-limit: released a held ${provider} request; continuing the turn.`);
     }
 
-    yield* next();
+    // Watch the stream itself for the provider's own rate-limit verdict.
+    //
+    // Polling can go blind (the usage endpoints rate-limit their own lookups
+    // aggressively), and when it does, the gate would otherwise stay open right
+    // through 100%. The model traffic is the one signal that cannot be starved:
+    // if the provider says the window is closed, that is authoritative, so the
+    // gate closes on it regardless of what polling knows.
+    for await (const chunk of next()) {
+      const retryAfterMs = rateLimitSignal(chunk);
+      if (retryAfterMs !== undefined) {
+        gate.pause(provider, {
+          window: 'provider-reported limit',
+          usedPercent: 100,
+          resetsAt: Date.now() + retryAfterMs,
+          source: 'stream',
+        });
+        // Ask the poller to confirm with a real reading once the budget allows.
+        poller.schedule(Math.min(retryAfterMs, 60_000));
+      }
+      yield chunk;
+    }
   });
 
-  // A turn that just finished is the most likely moment for usage to have
-  // moved, so refresh shortly after one completes rather than only on the
-  // fixed interval. Guarded because not every composition emits this.
-  const refreshSoon = () => {
-    if (gate.snapshot().length > 0) return; // the poller is already polling fast
-    poller.schedule(Math.max(5_000, Math.min(15_000, config.pollIntervalMs)));
-  };
-  try {
-    ctx.on('agent/turn-end', refreshSoon);
-  } catch {
-    // Event not present in this composition; the interval poll covers it.
-  }
+  // Deliberately NOT refreshing on turn end.
+  //
+  // An earlier version polled 5–15s after every completed turn, reasoning that
+  // usage had just moved. On a busy session that fires constantly, and against
+  // an endpoint that allows ~1 lookup/minute and extends its lockout on every
+  // excess hit, it guaranteed a permanent 429 — which is precisely how the gate
+  // went blind and let a window run from 98% to 100%. The fixed interval, the
+  // tightening cadence near a disclosed reset, and the stream-level rate-limit
+  // backstop cover this without spending calls the budget does not have.
 
   poller.start();
   logger.info(

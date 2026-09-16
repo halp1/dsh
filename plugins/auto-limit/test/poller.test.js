@@ -41,6 +41,13 @@ function makePoller({ store, usage, config = {} }) {
     }
   });
 
+  // Cycles in real life are spaced minutes apart by the scheduler. Tests drive
+  // refreshAll() back to back, so advance the call clock to represent that.
+  poller.advanceClock = () => {
+    for (const provider of poller.config.providers) {
+      poller.lastCallAt.set(provider, Date.now() - 61_000);
+    }
+  };
   return { gate, poller };
 }
 
@@ -76,23 +83,34 @@ describe('UsagePoller decisions', () => {
     assert.equal(gate.blockReason('claude'), undefined);
   });
 
-  it('stays open while any account of the provider still has quota', async () => {
+  it('stays open while a distinct subscription still has quota', async () => {
     const { gate, poller } = makePoller({
       store: {
         claude: { accounts: { full: { accessToken: 'a' }, fresh: { accessToken: 'b' } } },
       },
+      // Distinct subscriptions: different reset instants.
       usage: async (_provider, key) => ({
         supported: true,
-        windows: [{ kind: 'session', usedPercent: key === 'full' ? 100 : 5 }],
+        windows: [
+          {
+            kind: 'session',
+            usedPercent: key === 'full' ? 100 : 5,
+            resetsAt: key === 'full' ? 1_000 : 2_000,
+          },
+        ],
       }),
       config: { providers: ['claude'] },
     });
 
+    // Call spacing means the second account is read on a later cycle; the
+    // gate must not pause on partial information before then.
+    await poller.refreshAll();
+    poller.advanceClock();
     await poller.refreshAll();
     assert.equal(gate.blockReason('claude'), undefined, 'pooled quota must keep it open');
   });
 
-  it('pauses on the soonest reset once every account is full', async () => {
+  it('pauses on the soonest reset once every subscription is full', async () => {
     const { gate, poller } = makePoller({
       store: {
         claude: { accounts: { a: { accessToken: 'a' }, b: { accessToken: 'b' } } },
@@ -106,6 +124,10 @@ describe('UsagePoller decisions', () => {
       config: { providers: ['claude'] },
     });
 
+    await poller.refreshAll();
+    // Second cycle a minute later: the call budget has replenished, so the
+    // remaining subscription is read and the pause decision completes.
+    poller.advanceClock();
     await poller.refreshAll();
     assert.equal(gate.blockReason('claude')?.resetsAt, 6_000);
   });
@@ -125,6 +147,7 @@ describe('UsagePoller decisions', () => {
     assert.notEqual(gate.blockReason('claude'), undefined);
 
     full = false; // the window reset
+    poller.advanceClock();
     await poller.refreshAll();
     assert.equal(gate.blockReason('claude'), undefined);
   });
@@ -157,6 +180,7 @@ describe('UsagePoller decisions', () => {
     assert.notEqual(gate.blockReason('claude'), undefined);
 
     broken = true;
+    poller.advanceClock();
     await poller.refreshAll();
     assert.notEqual(
       gate.blockReason('claude'),
@@ -180,6 +204,7 @@ describe('UsagePoller decisions', () => {
     assert.notEqual(gate.blockReason('claude'), undefined);
 
     delete store.claude;
+    poller.advanceClock();
     await poller.refreshAll();
     assert.equal(gate.blockReason('claude'), undefined);
   });
@@ -196,6 +221,7 @@ describe('UsagePoller decisions', () => {
     await poller.refreshAll();
     assert.equal(poller.readUsage.mock.callCount(), 1);
 
+    poller.advanceClock();
     await poller.refreshAll(); // inside the cooldown
     assert.equal(poller.readUsage.mock.callCount(), 1, 'must not retry during cooldown');
   });
@@ -233,25 +259,26 @@ describe('poll cadence', () => {
     const { gate, poller } = makePoller({
       store: {},
       usage: async () => ({ supported: true, windows: [] }),
-      config: { pausedPollIntervalMs: 30_000 },
+      config: { pausedPollIntervalMs: 120_000 },
     });
     gate.pause('claude', {
       window: '5-hour',
       usedPercent: 99,
-      resetsAt: Date.now() + 8_000,
+      resetsAt: Date.now() + 80_000,
     });
     const delay = poller.nextDelayMs();
-    assert.ok(delay <= 11_000 && delay > 0, `expected a short delay, got ${delay}`);
+    // Sooner than the paused interval, but never below the 60s call floor.
+    assert.ok(delay >= 60_000 && delay <= 85_000, `expected a near-reset delay, got ${delay}`);
   });
 
   it('falls back to the paused interval when no reset was disclosed', () => {
     const { gate, poller } = makePoller({
       store: {},
       usage: async () => ({ supported: true, windows: [] }),
-      config: { pausedPollIntervalMs: 30_000 },
+      config: { pausedPollIntervalMs: 120_000 },
     });
     gate.pause('claude', { window: 'weekly', usedPercent: 99 });
-    assert.equal(poller.nextDelayMs(), 30_000);
+    assert.equal(poller.nextDelayMs(), 120_000);
   });
 });
 
@@ -259,6 +286,7 @@ describe('resolveConfig', () => {
   it('defaults to 98% across both metered providers', () => {
     const config = resolveConfig();
     assert.equal(config.threshold, 98);
+    assert.ok(config.pollIntervalMs >= 60_000, 'must respect the endpoint budget');
     assert.deepEqual([...config.providers], ['claude', 'codex']);
     assert.equal(config.enabled, true);
     assert.equal(config.maxHoldMs, 0, 'unbounded hold by default');
@@ -275,6 +303,9 @@ describe('resolveConfig', () => {
   });
 
   it('refuses a poll interval that would hammer the endpoint', () => {
-    assert.throws(() => resolveConfig({ pollIntervalMs: 100 }), /at least 5000/);
+    assert.throws(() => resolveConfig({ pollIntervalMs: 100 }), /at least 60000/);
+    // 5s used to be allowed and is exactly what wedged the endpoint into a
+    // permanent 429; it must now be rejected.
+    assert.throws(() => resolveConfig({ pollIntervalMs: 5_000 }), /at least 60000/);
   });
 });
