@@ -72,6 +72,17 @@ const MIN_POLL_MS = 60_000;
  */
 const STALE_AFTER_MS = 15 * 60_000;
 
+/**
+ * How long to defer a pause decision while some account has never answered.
+ *
+ * Bounded on purpose. An unread account is a reason for caution, not a reason
+ * to stay open forever: a usage endpoint that never answers would otherwise
+ * hold the gate open through 100%, which is the exact failure this plugin
+ * exists to prevent. Ten minutes is several rotation cycles — long enough for a
+ * transient refusal to clear, short enough that real quota is not lost.
+ */
+const UNREAD_GRACE_MS = 10 * 60_000;
+
 export class UsagePoller {
   /**
    * @param options.gate - the pause gate to drive.
@@ -97,6 +108,8 @@ export class UsagePoller {
     this.readingCache = new Map();
     /** provider → index of the account the next cycle should start from. */
     this.rotation = new Map();
+    /** provider → epoch ms it first deferred a decision on an unread account. */
+    this.deferredSince = new Map();
     /** Guards against overlapping runs when a poll outlives its interval. */
     this.running = false;
   }
@@ -318,9 +331,22 @@ export class UsagePoller {
       this.rotation.set(provider, advanced);
       const usage = await this.readUsage(provider, key, session);
       if (usage === undefined) {
-        // A refused lookup means the limiter is already closed; stop hitting it
-        // this cycle rather than asking again for every remaining account.
-        unread += 1;
+        // A refused lookup means the limiter is already closed, so stop asking
+        // this cycle. Before breaking, fall back to recent cached readings for
+        // this account and the ones after it: dropping everything on a single
+        // refusal is how a rotation that happens to start on the throttled
+        // account blinds an entire cycle, even though a good reading for the
+        // other account is sitting in the cache.
+        for (const pending of ordered.slice(ordered.findIndex((e) => e.key === key))) {
+          const cached = this.cachedReading(provider, pending.key);
+          if (cached === undefined) {
+            unread += 1;
+            continue;
+          }
+          const dup = readings.find((entry) => sameSubscription(entry.usage, cached));
+          if (dup !== undefined) dup.keys.push(pending.key);
+          else readings.push({ key: pending.key, keys: [pending.key], usage: cached });
+        }
         break;
       }
       this.cacheReading(provider, key, usage);
@@ -356,17 +382,32 @@ export class UsagePoller {
     }
 
     if (unread > 0 && !this.everyAccountSeen(provider, accounts)) {
-      // An account of this provider has NEVER been read, so "every subscription
-      // is full" is not established: the unseen one may still have quota, and
-      // pausing on that guess would stop usable work. Rotation guarantees it is
-      // read within a few cycles, which settles the question.
+      // An account of this provider has never been read, so "every
+      // subscription is full" is not yet established: the unseen one may still
+      // have quota, and pausing on that guess would stop usable work.
       //
-      // Once every account has been seen at least once, a merely-deferred
-      // account no longer blocks the decision — its cached reading stands in.
-      // Otherwise a second login would suppress pausing forever, which is the
-      // same silent-blindness failure in a different costume.
-      return;
+      // But this deference MUST expire. If the unseen account can never be read
+      // — which is exactly what a persistently throttled usage endpoint looks
+      // like — then waiting for certainty means waiting forever, and the gate
+      // stays open through 100%. That is the original bug wearing a new hat.
+      //
+      // So: defer only while there is reason to expect an answer soon. Past the
+      // grace period, act on the readings actually in hand. Erring toward
+      // pausing is right here, because a needless pause costs a wait the user
+      // can see and override, while a missed pause costs real quota silently.
+      const waitingSince = this.deferredSince.get(provider) ?? Date.now();
+      this.deferredSince.set(provider, waitingSince);
+
+      if (Date.now() - waitingSince < UNREAD_GRACE_MS) return;
+
+      this.logger.warn(
+        `auto-limit: ${provider} has an account that has not answered a usage ` +
+          `lookup in ${Math.round((Date.now() - waitingSince) / 60_000)}m; ` +
+          'deciding on the accounts that did answer rather than staying open ' +
+          'indefinitely.',
+      );
     }
+    this.deferredSince.delete(provider);
 
     // Every account is over threshold; pause on the one that reopens soonest.
     let best;

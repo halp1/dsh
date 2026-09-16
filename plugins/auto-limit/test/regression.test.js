@@ -192,6 +192,89 @@ describe('regression: a second login must not suppress pausing forever', () => {
   });
 });
 
+describe('regression: an unreadable account must not hold the gate open forever', () => {
+  it('pauses on the accounts that answered once the grace period expires', async () => {
+    // The live failure: one login answers and is over threshold, the other is
+    // stuck behind the usage endpoint's throttle and never answers. Waiting for
+    // certainty that will never arrive is how the gate stayed open through 100%.
+    const { gate, poller } = makePoller({
+      store: { claude: { accounts: { a: { accessToken: 'a' }, b: { accessToken: 'b' } } } },
+      usage: async (_p, key) =>
+        key === 'a'
+          ? { supported: true, windows: [{ kind: 'weekly', usedPercent: 99, resetsAt: 9_000 }] }
+          : undefined,
+      config: { providers: ['claude'], threshold: 98 },
+    });
+
+    await poller.refreshAll();
+    assert.equal(gate.blockReason('claude'), undefined, 'brief deference is correct');
+
+    // The unread account still has not answered ten minutes on.
+    poller.deferredSince.set('claude', Date.now() - 11 * 60_000);
+    poller.lastCallAt.set('claude', Date.now() - 61_000);
+    poller.cooldownUntil.clear();
+    await poller.refreshAll();
+
+    assert.notEqual(
+      gate.blockReason('claude'),
+      undefined,
+      'past the grace period it must act on the readings it has',
+    );
+  });
+
+  it('falls back to a cached reading when the rotation lands on a refusing account', async () => {
+    // Rotation can start the cycle on the throttled account. Breaking out
+    // without consulting the cache would discard a perfectly good reading for
+    // the other account and blind the whole cycle.
+    const { gate, poller } = makePoller({
+      store: { claude: { accounts: { a: { accessToken: 'a' }, b: { accessToken: 'b' } } } },
+      usage: async (_p, key) =>
+        key === 'a'
+          ? { supported: true, windows: [{ kind: 'weekly', usedPercent: 99, resetsAt: 9_000 }] }
+          : undefined,
+      config: { providers: ['claude'], threshold: 98 },
+    });
+
+    await poller.refreshAll(); // reads a, caches it; b refuses
+    assert.ok(poller.readingCache.has('claude/a'), 'a good reading must be cached');
+
+    poller.deferredSince.set('claude', Date.now() - 11 * 60_000);
+    poller.lastCallAt.set('claude', Date.now() - 61_000);
+    poller.cooldownUntil.clear();
+    await poller.refreshAll(); // rotation starts on b, which refuses again
+
+    assert.notEqual(
+      gate.blockReason('claude'),
+      undefined,
+      "a refusal must not discard the other account's cached reading",
+    );
+  });
+
+  it('warns when it stops waiting for an unanswered account', async () => {
+    const warnings = [];
+    const { poller } = makePoller({
+      store: { claude: { accounts: { a: { accessToken: 'a' }, b: { accessToken: 'b' } } } },
+      usage: async (_p, key) =>
+        key === 'a'
+          ? { supported: true, windows: [{ kind: 'weekly', usedPercent: 99, resetsAt: 9_000 }] }
+          : undefined,
+      config: { providers: ['claude'], threshold: 98 },
+      logger: { ...quietLogger, warn: (m) => warnings.push(m) },
+    });
+
+    await poller.refreshAll();
+    poller.deferredSince.set('claude', Date.now() - 11 * 60_000);
+    poller.lastCallAt.set('claude', Date.now() - 61_000);
+    poller.cooldownUntil.clear();
+    await poller.refreshAll();
+
+    assert.ok(
+      warnings.some((m) => m.includes('not answered')),
+      'the user must be told the decision was made on partial data',
+    );
+  });
+});
+
 describe('regression: subscription dedupe', () => {
   it('treats identical windows with identical resets as one subscription', () => {
     const a = {
