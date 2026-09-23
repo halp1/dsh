@@ -30,6 +30,7 @@ export {
   DEFAULT_COUNT_OPTIONS,
   countUnread,
   isAttentionKind,
+  mainSessionId,
   sessionCounts,
   sessionVisible,
 } from './count.ts'
@@ -69,8 +70,8 @@ declare module '@deepseek-ai/cordis' {
 
 /**
  * Services required before the badge can bind. `sessions` and `workspaces` are
- * the Controller object layers; `uiSession` owns the pending-interaction map
- * that approval/plan-review/question dots come from.
+ * the Controller object layers; `uiSession` owns the session status map that
+ * the approval/plan-review/question and completion dots come from.
  */
 export const inject = ['sessions', 'workspaces', 'uiSession']
 
@@ -103,7 +104,7 @@ export function apply(ctx: Context): void {
   const sources: BadgeSources = {
     sessions: ctx.sessions.list,
     workspaces: ctx.workspaces.list,
-    pendingInteractions: ctx.uiSession.pendingInteractions,
+    statuses: ctx.uiSession.sessionStatus,
   }
 
   // Assigned by the effect below and read by the service face. The effect runs

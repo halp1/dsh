@@ -2,7 +2,8 @@
  * Watcher wiring: all three host sources drive the badge, and teardown is clean.
  *
  * The three-source requirement is the subtle part. A watcher bound only to the
- * session list would miss every approval and question (pure client state), and
+ * session list would miss every approval, question, and completion reminder
+ * (ui-session status state), and
  * one that skipped the workspace source would keep counting a finished session
  * the user archived.
  */
@@ -25,29 +26,36 @@ function source(initial) {
 }
 
 function session(id, overrides = {}) {
-  return { id, displayTitle: id, blank: false, running: false, updatedAt: 0, ...overrides }
+  return { id, displayTitle: id, blank: false, running: false, updatedAt: 0, retainedBy: {}, ...overrides }
 }
 
 function list(summaries, current) {
+  // The selection is expressed the way the host does: a main-view retain.
   const byId = {}
-  for (const s of summaries) byId[s.id] = s
+  for (const s of summaries) byId[s.id] = s.id === current ? { ...s, retainedBy: { mainView: 1 } } : s
   return {
     ids: summaries.map(s => s.id),
     byId,
-    current,
-    phase: 'ready',
-    subagentsByParent: {},
-    jobsBySession: {},
-    currentAddress: undefined,
   }
 }
 
-function pending(entries = {}) {
-  return new Map(Object.entries(entries).map(([id, kind]) => [id, { key: `${id}-k`, kind, sessionId: id }]))
+/**
+ * Build the ui-session status map. `interactions` maps id → pending kind;
+ * `unread` lists ids carrying the completion reminder.
+ */
+function statuses({ interactions = {}, unread = [] } = {}) {
+  const map = new Map()
+  const entry = (id) => {
+    if (!map.has(id)) map.set(id, { running: undefined, pendingInteraction: undefined, completionUnread: false })
+    return map.get(id)
+  }
+  for (const [id, kind] of Object.entries(interactions)) entry(id).pendingInteraction = { key: `${id}-k`, kind, sessionId: id }
+  for (const id of unread) entry(id).completionUnread = true
+  return map
 }
 
 /** Assemble sources + a recording applier, with settings the test can mutate. */
-function harness(summaries = [], { archived = [], interactions = {}, settings = DEFAULT_SETTINGS } = {}) {
+function harness(summaries = [], { archived = [], interactions = {}, unread = [], settings = DEFAULT_SETTINGS } = {}) {
   const calls = []
   const nav = {
     setAppBadge: async (n) => { calls.push(n) },
@@ -56,7 +64,7 @@ function harness(summaries = [], { archived = [], interactions = {}, settings = 
   const sources = {
     sessions: source(list(summaries)),
     workspaces: source({ archivedSessionIds: archived }),
-    pendingInteractions: source(pending(interactions)),
+    statuses: source(statuses({ interactions, unread })),
   }
   let live = { ...settings }
   const watcher = installBadgeWatcher(sources, {
@@ -67,7 +75,7 @@ function harness(summaries = [], { archived = [], interactions = {}, settings = 
 }
 
 test('publishes an initial count at install time', () => {
-  const { watcher, calls } = harness([session('a', { completed: true })])
+  const { watcher, calls } = harness([session('a')], { unread: ['a'] })
   assert.equal(watcher.count, 1)
   assert.deepEqual(calls, [1])
 })
@@ -78,23 +86,26 @@ test('publishes an initial zero, clearing a stale badge', () => {
 })
 
 test('follows session-list changes', () => {
-  const h = harness([session('a')])
-  h.sources.sessions.set(list([session('a', { completed: true })]))
+  // The status entry can precede its row; the unit appears once the row does.
+  const h = harness([], { unread: ['a'] })
+  h.sources.sessions.set(list([session('a')]))
   assert.equal(h.watcher.count, 1)
   assert.deepEqual(h.calls, [0, 1])
 })
 
-test('follows pending-interaction changes, which never appear in the session list', () => {
+test('follows session-status changes, which never appear in the session list', () => {
   const h = harness([session('a')])
-  h.sources.pendingInteractions.set(pending({ a: 'approval' }))
+  h.sources.statuses.set(statuses({ interactions: { a: 'approval' } }))
   assert.equal(h.watcher.count, 1)
-  h.sources.pendingInteractions.set(pending())
+  h.sources.statuses.set(statuses())
   assert.equal(h.watcher.count, 0)
-  assert.deepEqual(h.calls, [0, 1, 0])
+  h.sources.statuses.set(statuses({ unread: ['a'] }))
+  assert.equal(h.watcher.count, 1)
+  assert.deepEqual(h.calls, [0, 1, 0, 1])
 })
 
 test('follows archive changes', () => {
-  const h = harness([session('a', { completed: true })])
+  const h = harness([session('a')], { unread: ['a'] })
   h.sources.workspaces.set({ archivedSessionIds: ['a'] })
   assert.equal(h.watcher.count, 0)
   assert.deepEqual(h.calls, [1, 0])
@@ -103,13 +114,13 @@ test('follows archive changes', () => {
 test('does not re-hit the platform when a change leaves the count identical', () => {
   // The realistic case: a streaming turn invalidates the session snapshot many
   // times without changing anything the badge counts.
-  const h = harness([session('a', { completed: true })])
-  for (let i = 0; i < 20; i += 1) h.sources.sessions.set(list([session('a', { completed: true })]))
+  const h = harness([session('a')], { unread: ['a'] })
+  for (let i = 0; i < 20; i += 1) h.sources.sessions.set(list([session('a')]))
   assert.deepEqual(h.calls, [1])
 })
 
 test('disabling zeroes the badge without unsubscribing', () => {
-  const h = harness([session('a', { completed: true })])
+  const h = harness([session('a')], { unread: ['a'] })
   h.setSettings({ enabled: false })
   h.watcher.refresh()
   assert.equal(h.watcher.count, 0)
@@ -121,28 +132,28 @@ test('disabling zeroes the badge without unsubscribing', () => {
 })
 
 test('refresh forces a write even when the number is unchanged', () => {
-  const h = harness([session('a', { completed: true })])
+  const h = harness([session('a')], { unread: ['a'] })
   h.watcher.refresh()
   assert.deepEqual(h.calls, [1, 1])
 })
 
 test('dispose unsubscribes every source and clears the badge', () => {
-  const h = harness([session('a', { completed: true })])
+  const h = harness([session('a')], { unread: ['a', 'b'] })
   h.watcher.dispose()
   assert.deepEqual(h.calls, [1, 0])
   assert.equal(h.sources.sessions.listenerCount, 0)
   assert.equal(h.sources.workspaces.listenerCount, 0)
-  assert.equal(h.sources.pendingInteractions.listenerCount, 0)
+  assert.equal(h.sources.statuses.listenerCount, 0)
   // Post-dispose churn must not reach the platform.
-  h.sources.sessions.set(list([session('a', { completed: true }), session('b', { completed: true })]))
+  h.sources.sessions.set(list([session('a'), session('b')]))
   assert.deepEqual(h.calls, [1, 0])
 })
 
 test('readCount folds the three sources', () => {
   const sources = {
-    sessions: source(list([session('a', { completed: true }), session('b')])),
+    sessions: source(list([session('a'), session('b')])),
     workspaces: source({ archivedSessionIds: [] }),
-    pendingInteractions: source(pending({ b: 'question' })),
+    statuses: source(statuses({ interactions: { b: 'question' }, unread: ['a'] })),
   }
   assert.equal(readCount(sources, DEFAULT_SETTINGS), 2)
 })

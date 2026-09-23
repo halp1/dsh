@@ -4,11 +4,12 @@
  * The badge must follow *every* transition that lights a sidebar dot, and those
  * facts are spread across three independent observables:
  *
- *  - `sessions.list` — the `completed` reminder bit and the current selection.
+ *  - `sessions.list` — the rows themselves and the current selection.
  *  - `workspaces.list` — the archive set, since archiving a finished session
  *    removes its row and therefore its dot.
- *  - `uiSession.pendingInteractions` — approval / plan-review / question, which
- *    are pure browser-side state and never appear in a session summary.
+ *  - `uiSession.sessionStatus` — approval / plan-review / question and the
+ *    completion reminder, which are browser-side state and never appear in a
+ *    session summary.
  *
  * All three are plain `{getSnapshot, subscribe}` sources, so the watcher
  * subscribes to each and recomputes on any of them. Recomputation is cheap (one
@@ -18,7 +19,7 @@
  */
 
 import type { SessionListState } from '@deepseek-ai/dsh-api-session-controller/client'
-import type { SessionPendingInteractionSnapshot } from '@deepseek-ai/dsh-client-ui-session/client'
+import type { SessionStatusSnapshot } from '@deepseek-ai/dsh-client-ui-session/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { countUnread, type BadgeCountOptions } from './count.ts'
 import type { BadgeApplier } from './badge.ts'
@@ -38,7 +39,7 @@ export interface ArchiveSnapshot {
 export interface BadgeSources {
   sessions: Source<SessionListState>
   workspaces: Source<ArchiveSnapshot>
-  pendingInteractions: Source<SessionPendingInteractionSnapshot>
+  statuses: Source<SessionStatusSnapshot>
 }
 
 /** Everything {@link installBadgeWatcher} needs beyond the sources. */
@@ -61,7 +62,7 @@ export function readCount(sources: BadgeSources, options: BadgeCountOptions): nu
   return countUnread({
     list: sources.sessions.getSnapshot(),
     archivedSessionIds: sources.workspaces.getSnapshot().archivedSessionIds,
-    pendingInteractions: sources.pendingInteractions.getSnapshot(),
+    statuses: sources.statuses.getSnapshot(),
   }, options)
 }
 
@@ -107,7 +108,7 @@ export function installBadgeWatcher(sources: BadgeSources, options: BadgeWatcher
   const unsubscribes = [
     sources.sessions.subscribe(onChange),
     sources.workspaces.subscribe(onChange),
-    sources.pendingInteractions.subscribe(onChange),
+    sources.statuses.subscribe(onChange),
   ]
 
   recompute(false)

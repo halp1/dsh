@@ -12,21 +12,23 @@
  *    have no sidebar dot, so it cannot contribute.
  *
  *  - **Attention** mirrors the `warning`/`done` arms of `sessionStatuses`: a
- *    pending interaction (approval, plan review, question) or the host's
- *    `completed` reminder bit. The `ongoing` arms — a running session and its
+ *    pending interaction (approval, plan review, question) or the
+ *    `completionUnread` reminder bit, both read from ui-session's unified
+ *    `sessionStatus` map exactly as ui-workspace's `sessionNode` does. The
+ *    `ongoing` arms — a running session and its
  *    running subagents — are deliberately excluded: a spinning session is work
  *    in progress, not an item waiting to be read, and counting it would pin the
  *    badge to a non-zero number for the entire length of every turn.
  *
- * `completed` is host-owned and already means "finished while not selected and
- * not yet opened", so opening a session clears its own contribution without any
- * read-tracking state on this side. Pending interactions are counted even for
+ * `completionUnread` is ui-session-owned and already means "finished outside
+ * the main view and not yet acknowledged", so opening a session clears its own
+ * contribution without any read-tracking state on this side. Pending interactions are counted even for
  * the session currently on screen: a question is still outstanding until it is
  * answered, and the host drops it from the map the moment it is.
  */
 
 import type { SessionListState, SessionSummary } from '@deepseek-ai/dsh-api-session-controller/client'
-import type { SessionPendingInteractionSnapshot } from '@deepseek-ai/dsh-client-ui-session/client'
+import type { SessionStatus, SessionStatusSnapshot } from '@deepseek-ai/dsh-client-ui-session/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 
 /**
@@ -65,12 +67,12 @@ export const DEFAULT_COUNT_OPTIONS: BadgeCountOptions = {
 
 /** The inputs one badge computation reads; grouped so callers pass one object. */
 export interface BadgeCountInput {
-  /** Session list snapshot (`ctx.sessions.list`), including the current selection. */
+  /** Session list snapshot (`ctx.sessions.list`); main-view retention marks the selection. */
   list: SessionListState
   /** Registry-global archive set (`ctx.workspaces.list` → `archivedSessionIds`). */
   archivedSessionIds: readonly SessionId[]
-  /** Pending UI interactions by session (`uiSession.pendingInteractions`). */
-  pendingInteractions: SessionPendingInteractionSnapshot
+  /** Running, pending-interaction, and completion facts by session (`uiSession.sessionStatus`). */
+  statuses: SessionStatusSnapshot
 }
 
 /**
@@ -92,6 +94,17 @@ export function sessionVisible(
 }
 
 /**
+ * The session the main view currently shows. Mirrors ui-workspace's
+ * `mainSessionId`: the list carries no selection field, so the selected row is
+ * the one the main view holds a retain reference on.
+ * @param list - the session list snapshot.
+ * @returns the main-view session id, if any.
+ */
+export function mainSessionId(list: SessionListState): SessionId | undefined {
+  return Object.values(list.byId).find(session => (session?.retainedBy?.mainView ?? 0) > 0)?.id
+}
+
+/**
  * Whether a pending-interaction kind renders as a warning dot.
  * @param kind - the domain-owned discriminator, or undefined when none is pending.
  * @returns true for approval, plan review, and question.
@@ -103,21 +116,23 @@ export function isAttentionKind(kind: string | undefined): boolean {
 /**
  * Whether one visible session contributes a badge unit under the given options.
  * @param session - the session summary under test.
- * @param pendingKind - its pending-interaction kind, if any.
+ * @param status - its ui-session status entry, if any.
  * @param options - which dot classes count.
  * @returns true when the session should add one to the badge.
  */
 export function sessionCounts(
   session: SessionSummary,
-  pendingKind: string | undefined,
+  status: Partial<SessionStatus> | undefined,
   options: BadgeCountOptions,
 ): boolean {
   // Precedence follows sessionStatuses: a pending interaction is the primary
   // status, so a session blocking on the user counts as attention even if it
-  // also carries the completed bit.
-  if (isAttentionKind(pendingKind)) return options.countAttention
-  if (options.countRunning && session.running) return true
-  return options.countCompleted && session.completed === true
+  // also carries the completion reminder.
+  if (isAttentionKind(status?.pendingInteraction?.kind)) return options.countAttention
+  // The status entry is authoritative once established; the summary's bit is
+  // the pre-baseline fallback, as in ui-workspace's sessionNode.
+  if (options.countRunning && (status?.running ?? session.running)) return true
+  return options.countCompleted && status?.completionUnread === true
 }
 
 /**
@@ -126,7 +141,7 @@ export function sessionCounts(
  * Each qualifying session contributes exactly one unit, matching the one-dot-
  * per-row presentation; a session blocking on approval while also running is
  * still a single item to deal with.
- * @param input - list, archive set, and pending interactions.
+ * @param input - list, archive set, and session statuses.
  * @param options - which dot classes count (defaults to attention + completed).
  * @returns the badge number; 0 means "clear the badge".
  */
@@ -134,14 +149,15 @@ export function countUnread(
   input: BadgeCountInput,
   options: BadgeCountOptions = DEFAULT_COUNT_OPTIONS,
 ): number {
-  const { list, archivedSessionIds, pendingInteractions } = input
+  const { list, archivedSessionIds, statuses } = input
   const archived = new Set(archivedSessionIds)
+  const current = mainSessionId(list)
   let count = 0
   for (const id of list.ids) {
     const session = list.byId[id]
     if (session === undefined) continue
-    if (!sessionVisible(session, list.current, archived)) continue
-    if (sessionCounts(session, pendingInteractions.get(id)?.kind, options)) count += 1
+    if (!sessionVisible(session, current, archived)) continue
+    if (sessionCounts(session, statuses.get(id), options)) count += 1
   }
   return count
 }
