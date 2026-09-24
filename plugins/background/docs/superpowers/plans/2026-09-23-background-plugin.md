@@ -34,6 +34,13 @@ read from the document's `body` / `body[data-ds-dark-theme]` rules (falling back
 to the known 0.1.7 values), or from a registered custom theme's tokens when it
 defines them. No color parsing needed; works for both schemes.
 
+### Found in manual verification
+
+Giving each surface token partial alpha compounds: frame → column → panel root
+are all painted with the base color, so three layers at 0.85 come out ~0.997
+opaque. Surface tokens are now `transparent` and a single stage tint layer
+(`--dsh-background-tint`, base color at the chosen opacity) replaces them.
+
 ## Review Focus
 
 1. Local path with `~`, trailing slash, or spaces → resolves and serves correctly (sources test).

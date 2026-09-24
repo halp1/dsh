@@ -106,14 +106,21 @@ test('translucent leaves opaque values alone and mixes the rest', () => {
   assert.equal(translucent('var(--c)', 0.85), 'color-mix(in srgb, var(--c) 85%, transparent)')
 })
 
-test('buildOverrides: surfaces take the opacity, floating layers keep a 0.9 floor, both schemes', () => {
+test('buildOverrides: surfaces go transparent, one tint carries the opacity, floating layers keep a 0.9 floor', () => {
   const o = buildOverrides(FALLBACK_VALUES, 0.5)
-  assert.equal(o['--dsw-alias-bg-base'].light, 'color-mix(in srgb, var(--dsw-static-neutral-bluish-00) 50%, transparent)')
-  assert.equal(o['--dsw-alias-bg-base'].dark, 'color-mix(in srgb, var(--dsw-static-neutral-bluish-950) 50%, transparent)')
-  assert.equal(o['--dsw-specific-sidebar-fill'].dark, 'color-mix(in srgb, var(--dsw-static-neutral-bluish-900) 50%, transparent)')
+  assert.deepEqual(o['--dsw-alias-bg-base'], { light: 'transparent', dark: 'transparent' })
+  assert.deepEqual(o['--dsw-specific-sidebar-fill'], { light: 'transparent', dark: 'transparent' })
+  assert.equal(o['--dsh-background-tint'].light, 'color-mix(in srgb, var(--dsw-static-neutral-bluish-00) 50%, transparent)')
+  assert.equal(o['--dsh-background-tint'].dark, 'color-mix(in srgb, var(--dsw-static-neutral-bluish-950) 50%, transparent)')
   assert.equal(o['--dsw-alias-bg-layer-2'].dark, 'color-mix(in srgb, var(--dsw-static-neutral-bluish-850) 90%, transparent)')
   const high = buildOverrides(FALLBACK_VALUES, 0.95)
   assert.match(high['--dsw-alias-bg-overlay'].light, / 95%/)
+})
+
+test('buildOverrides at full opacity restores the raw surfaces', () => {
+  const o = buildOverrides(FALLBACK_VALUES, 1)
+  assert.equal(o['--dsw-alias-bg-base'].dark, 'var(--dsw-static-neutral-bluish-950)')
+  assert.equal(o['--dsh-background-tint'].dark, 'var(--dsw-static-neutral-bluish-950)')
 })
 
 test('readBaseFromRules separates light and dark rules and falls back', () => {

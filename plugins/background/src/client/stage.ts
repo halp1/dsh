@@ -7,6 +7,7 @@
  */
 import type { Appearance, Fit, Position } from '../shared/state.ts'
 import type { PoolItem } from './pool.ts'
+import { TINT_TOKEN } from './tokens.ts'
 
 export const STAGE_ID = 'dsh-background-stage'
 const FADE_MS = 400
@@ -78,6 +79,11 @@ export class Stage {
       root.append(layer)
       return layer
     })
+    // One tint over the image stands in for every (now transparent) app
+    // surface; its color is the theme base at the chosen opacity.
+    const tint = this.doc.createElement('div')
+    Object.assign(tint.style, { position: 'absolute', inset: '0', background: `var(${TINT_TOKEN}, transparent)` })
+    root.append(tint)
     this.doc.body.prepend(root)
     this.root = root
     return this.layers
