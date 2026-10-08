@@ -1,0 +1,14 @@
+# Bundle self-activation patch: mounts this plugin when the package is
+# installed into a profile via
+#   dsh plugin --profile web add file:/Users/halp/code/dsh/dsh-plugin-wco
+#
+# Override from the profile's own cordis.patch.yml, e.g.:
+#
+#   - id: wco
+#     config:
+#       displayOverride: [window-controls-overlay, minimal-ui]
+#       themeColor: false
+#
+- insert:
+    - id: wco
+      name: dsh-plugin-wco
