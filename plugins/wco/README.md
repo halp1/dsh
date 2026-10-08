@@ -1,16 +1,17 @@
 # dsh-plugin-wco
 
 Window Controls Overlay for DeepSeek Harness when it is installed as a PWA.
-The browser's title bar goes away, and the DSH frame draws its own caption band
-around the native window controls (traffic lights on macOS, min/max/close on
-Windows and Linux).
+The browser's title bar goes away and DSH's own top row moves up into that
+strip, next to the native window controls. The whole title bar's height goes
+back to content.
 
 ```
-before                                   after
-┌─────────────────────────────────────┐  ┌─────────────────────────────────────┐
-│ ● ● ●   DeepSeek Harness         ⋮  │  │ ● ● ● [≡][+]                     ⋮  │ ← DSH's own band
-├─────────────────────────────────────┤  ├────────┬────────────────────────────┤
-│ sidebar │ conversation              │  │ sidebar│ conversation               │
+before                                      after
+┌────────────────────────────────────────┐  ┌────────────────────────────────────────┐
+│ ● ● ●   DeepSeek Harness            ⋮  │  │ ● ● ● 🐳 deepseek ▢ │ Title…  ⋯ ▢ ▢  ⋮  │
+├────────────────────────────────────────┤  │ [New Session]       │ Chat Trajectory   │
+│ 🐳 deepseek  ▢ │ Title…        ⋯ ▢ ▢   │  │ …                   │ …                 │
+│ [New Session]  │ Chat Trajectory        │
 ```
 
 ## How it works
@@ -25,34 +26,33 @@ static file server. It serves the shell's manifest (read from the installed
 "display_override": ["window-controls-overlay", "standalone"]
 ```
 
-**Layout.** DSH already has a layout for "a caption the app does not own": the
-Windows Electron shell's `html[data-windows-titlebar]` marker plus
-`--dsh-windows-titlebar-height`. With the marker set, the frame reserves a
-draggable band above every column and the sidebar puts its toggle and New
-Session buttons in it. A small head script (an index injection row, so it runs
-before the client boots) reads `navigator.windowControlsOverlay` and sets that
-contract from the real overlay geometry. It also handles the two things the
-Windows layout doesn't:
+**Layout.** A head script (an index injection row, so it runs before the
+client boots) reads `navigator.windowControlsOverlay`. It leaves the layout
+where it is, because DSH's top rows already sit at the top of the viewport and
+are about as tall as a title bar. Instead it:
 
-- **Controls on the left (macOS).** Each `position: fixed` caption rule with a
-  `left` offset gets a companion rule that adds the left inset, so the
-  sidebar buttons sit to the right of the traffic lights. The rules come from
-  scanning the CSSOM, so hashed CSS-module class names don't matter. The scan
-  reruns whenever a stylesheet is added.
-- **Overlay colour.** Chrome paints the controls area with `theme-color`. The
-  script inserts a `theme-color` meta that tracks the band's fill
-  (`--dsw-specific-sidebar-fill`) ahead of the theme presenter's meta, so the
-  whole strip is one colour and follows light/dark changes.
+- **Moves content out from under the controls.** On every layout change
+  (sidebar collapse, right panel, panel switches, resize), it measures the top
+  rows (`[data-window-drag]` rows and page headers) that intersect the
+  controls' rectangles. Rows with room get padding on that side, so the header
+  actions slide left of the controls and the sidebar brand slides right of the
+  traffic lights. That row is also lifted so it's centred on them. Rows without
+  room move down; the collapsed sidebar rail is the only one in practice. It
+  works from geometry, so it doesn't depend on the shell's hashed class names.
+- **Makes the strip draggable.** A click-through `app-region: drag` layer covers
+  the strip, and the shell's `data-window-drag` rows drag too (the same marks
+  the macOS desktop app uses). Buttons, tabs, menus and dialogs stay `no-drag`.
+- **Centres** the conversation title row and the right panel's tab strip on the
+  controls.
+- **Matches the colour.** Chrome paints the controls' backing with
+  `theme-color`. The script keeps an opaque `theme-color` ahead of the theme's
+  own, matched to the content background. It composites translucent themes,
+  such as dsh-plugin-background, so the backing doesn't turn black.
 
-A stylesheet row also marks interactive elements (buttons, menus, dialogs,
-tooltips…) `app-region: no-drag`, so a popover that overlaps the band still
-takes clicks.
-
-The script does nothing unless the overlay is actually visible. In a browser
-tab, with the overlay toggled off, in fullscreen, or inside the Electron
-desktop app (which sets `data-platform` / its own titlebar marker), the page
-stays the ordinary web UI. If the overlay hides mid-session, every mark is
-withdrawn.
+The script does nothing unless the overlay is visible. In a browser tab, with
+the title bar shown again, in fullscreen, or inside the Electron desktop app,
+the page stays the ordinary web UI. If the overlay hides mid-session, every
+change is withdrawn.
 
 ## Install
 
@@ -79,16 +79,16 @@ look for `display_override`.
 The runtime parks a handle on `window` for the devtools console:
 
 ```js
-__dshWco__.state()                         // active?, geometry, settings
-__dshWco__.configure({ enabled: false })   // turn the layout off on this device
-__dshWco__.configure({ simulate: 'left' }) // fake a macOS overlay in a normal tab (striped box = controls)
-__dshWco__.configure({ simulate: 'right' })// fake a Windows overlay
-__dshWco__.configure({ simulate: null })   // back to the real API
+__dshWco__.state()                            // active?, geometry, number of rows adjusted
+__dshWco__.debug()                            // each top row measured, and what was changed
+__dshWco__.configure({ enabled: false })      // turn it off on this device
+__dshWco__.configure({ simulate: 'mac' })     // fake a macOS overlay in a normal tab (striped boxes = controls)
+__dshWco__.configure({ simulate: 'windows' }) // fake a Windows overlay
+__dshWco__.configure({ simulate: null })      // back to the real API
 ```
 
-Settings persist in `localStorage` under `dsh.wco.settings` and take effect
-after a reload. That's when the sidebar re-reads the marker for its JS-side
-choices (rail width, icon sizes); the CSS side updates immediately.
+Settings persist in `localStorage` under `dsh.wco.settings` and apply
+immediately.
 
 ## Config
 
@@ -100,7 +100,7 @@ Override from the profile's `cordis.patch.yml`:
     displayOverride: [window-controls-overlay, standalone]  # fallback chain
     manifest: true        # serve the patched manifest
     layout: true          # inject the page runtime + styles
-    themeColor: true      # keep the overlay colour on the band fill
+    themeColor: true      # match the controls' backing to the content background
     manifestFields: {}    # extra top-level manifest fields, e.g. { theme_color: '#101014' }
     # baseManifest: /path/to/manifest.webmanifest   # override the auto-located one
 ```
@@ -108,7 +108,7 @@ Override from the profile's `cordis.patch.yml`:
 ## Development
 
 ```bash
-node --test test/*.test.js   # 26 tests, no DOM dependency
+node --test test/*.test.js   # 31 tests, no DOM dependency
 ```
 
 No build step: the node half is plain ESM, and the page runtime is serialized
