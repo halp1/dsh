@@ -569,6 +569,25 @@ export const BUILTIN_MODEL_CATALOG: readonly ModelEntry[] = [
     // 同 GPT-6 Astra 口径只记标准档。
     price: { currency: 'USD', input: 2, cacheHit: 0.1, output: 10 },
   },
+  // OpenAI 绘图模型（gpt-image 系列）：由经营业者提供的实付人民币单价——
+  // 输入 ¥14 / 缓存读 ¥5.6 / 输出 ¥84 per 1M（两个型号同价）。它们经 4Router 的
+  // 绘图通道暴露，models.dev 无同 id 的一手收录，故按实付价直接记 CNY 刊例价。
+  // 注意：图像生成目前多为脚本直连 `/v1/images/*`，不经宿主模型层时不会产生账本用量；
+  // 收录只保证「若经 DSH 调用则能被计价」，不凭空产生费用。
+  {
+    key: 'gpt-image-2',
+    name: 'GPT Image 2',
+    provider: 'OpenAI',
+    colorVar: 'ds-green',
+    price: { currency: 'CNY', input: 14, cacheHit: 5.6, output: 84 },
+  },
+  {
+    key: 'gpt-image-2.5-sunburst',
+    name: 'GPT Image 2.5 Sunburst',
+    provider: 'OpenAI',
+    colorVar: 'ds-green',
+    price: { currency: 'CNY', input: 14, cacheHit: 5.6, output: 84 },
+  },
   // Google — Gemini 3.x (ai.google.dev/gemini-api/docs/pricing 2026-09).
   // Google does NOT bill by time of day: Standard is the real-time full
   // price, while the Flex tier prices spare-capacity traffic at exactly -50%
@@ -1209,4 +1228,8 @@ export const BUILTIN_MODEL_KEY_ALIASES: Readonly<Record<string, string>> = {
   'grok-4-5': 'grok-4.5',
   'grok-4.6': 'grok',
   'grok-4-6': 'grok',
+  // OpenAI 绘图模型：官方 id 即目录键，点/横杠变体一并归一。
+  'gpt-image-2': 'gpt-image-2',
+  'gpt-image-2.5-sunburst': 'gpt-image-2.5-sunburst',
+  'gpt-image-2-5-sunburst': 'gpt-image-2.5-sunburst',
 }
