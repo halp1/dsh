@@ -64,6 +64,30 @@ export function isOfficialProvider(provider: string): boolean {
   return /^deepseek(?:-[a-z0-9-]+)?$/i.test(provider.trim())
 }
 
+/**
+ * 已知的「第三方插件注册 adapter」通道名单：这些 provider 由别的插件经
+ * `ctx.llm.registerAdapter` 注册，**不经 llm-pi-ai 路由表**，因此
+ * {@link siteRefOf} 的路由查询必然 miss。与订阅豁免（issue #37 的 grok
+ * build）同构：显式列出、不做「猜通道」的通用发现——猜错会把来源不明的
+ * 路由也归位成可计价通道，违背 issue #82「支出主体无法核实不计价」的初衷。
+ *
+ * 收录语义：这些通道的支出主体是可核实的（WorkBuddy = 腾讯 WorkBuddy
+ * 桌面 App 账号），计费用模型官方目录价折算 Token 成本，与积分制解耦。
+ * 它们**不是** DeepSeek 官方渠道——{@link isOfficialProvider} 与
+ * {@link officialChannelOf} 都不会因本名单把调用算进官方口径。
+ */
+export const KNOWN_ADAPTER_PROVIDERS: ReadonlySet<string> = new Set([
+  // dsh-workbuddy-connect（corrinehu）：国内版 provider id。
+  'workbuddy',
+  // dsh-workbuddy-connect：国际版（WorkBuddy AI）provider id。
+  'workbuddy-ai',
+])
+
+/** 一个 provider 是否是已知的第三方插件注册 adapter 通道。 */
+export function isKnownAdapterProvider(provider: string): boolean {
+  return KNOWN_ADAPTER_PROVIDERS.has(provider.trim())
+}
+
 /** DeepSeek 官方直连端点的归一化 origin（`siteOriginOf` 口径）：有 baseURL 的路由只有它算官方。 */
 export const OFFICIAL_DEEPSEEK_ORIGIN = 'https://api.deepseek.com'
 
@@ -134,8 +158,10 @@ export function siteOriginOf(baseURL: string): string {
  *   网关）按 `direct` 归位——unknown 一刀切会把官方直连的费用堆进「未知路由」组、
  *   且不算官方渠道（回归修复）；订阅豁免命中的通道（显式 `subscriptionProviders`
  *   配置或判定函数）同样按 `direct` 归位——订阅管理类插件注册的通道不经路由表，
- *   unknown 桶既掩盖归属又按 token 误计费（issue #37 的 grok build）；其余配置外
- *   名称保留 unknown（无法核实通道）。
+ *   unknown 桶既掩盖归属又按 token 误计费（issue #37 的 grok build）；已知的第三方
+ *   插件注册 adapter 通道（{@link KNOWN_ADAPTER_PROVIDERS}，如 workbuddy）同样按
+ *   `direct` 归位——支出主体可核实、按模型官方目录价计 Token 成本，unknown 桶会让
+ *   费用恒为 0；其余配置外名称保留 unknown（无法核实通道）。
  * @param provider - 会话日志里的 provider 路由名（request/header 的 `config.provider`）。
  * @param routes - 当前 provider 路由视图（来自 llm-pi-ai providers）。
  * @param opts - `subscription`：该调用是否已被订阅豁免判定命中。
@@ -152,6 +178,7 @@ export function siteRefOf(
   }
   if (isOfficialProvider(provider)) return { kind: 'direct', provider }
   if (opts.subscription === true) return { kind: 'direct', provider }
+  if (isKnownAdapterProvider(provider)) return { kind: 'direct', provider }
   return { kind: 'unknown', provider }
 }
 
@@ -929,7 +956,13 @@ export interface UsageLedgerDocument {
 // 目录条目（issue #88，中转站绘图通道的实付人民币单价）。与 19 同因：fingerprint
 // 不含目录，复用旧行会让已按「未收录」记 0 的用量在升级后继续为 0；bump 让日志
 // 仍在的会话按目录价重折。
-export const FOLD_VERSION = 20
+// 21：计价语义变更——已知的第三方插件注册 adapter 通道（KNOWN_ADAPTER_PROVIDERS，
+// 如 dsh-workbuddy-connect 的 workbuddy / workbuddy-ai）从 unknown 桶归位
+// direct:<provider> 并按模型官方目录价计价。旧口径下这些调用（issue #82 的
+// unknown 记 0）费用恒为 0、token 照常统计，复用旧行会让已发生的用量在升级后
+// 仍为 0；bump 让日志仍在的会话重折出费用，仅日志已删的行留在旧口径（账本
+// 「历史定格」语义的固有残留）。
+export const FOLD_VERSION = 21
 
 /**
  * 一次性账本迁移：id 唯一，apply 在加载边界对原始文档执行，已应用过的跳过。

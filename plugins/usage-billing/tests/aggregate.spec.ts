@@ -173,6 +173,70 @@ describe('byDayModelsSite (issue #16)', () => {
   })
 })
 
+describe('known adapter providers (workbuddy)', () => {
+  it('homes workbuddy calls to direct and prices them by catalog rate', () => {
+    // dsh-workbuddy-connect 经 ctx.llm.registerAdapter 注册 provider，不经
+    // llm-pi-ai 路由表：旧口径落 unknown 桶且费用记 0（issue #82），归位后按
+    // 模型官方目录价计 Token 成本。
+    const events: SessionEvent[] = [header(1, 'deepseek-v4.1-flash', 'workbuddy'), message(2, 2_000, USAGE)]
+    const fold = foldSession(events, new Set())
+    const day = dayStamp(2_000)
+
+    // 归位 direct:<provider> 桶，不再是 unknown。
+    expect(fold.bySite.has('unknown')).toBe(false)
+    const direct = fold.bySite.get('direct:workbuddy')
+    expect(direct?.calls).toBe(1)
+    // 三维格同样归位（provider 视图的模型行按此取数）。
+    expect(fold.byDayModelsSite.get(day)?.get('flash')?.get('direct:workbuddy')?.calls).toBe(1)
+    // 计价：目录内模型按目录价算出金额（token 口径与 foldUsage 单测同源）。
+    expect(fold.total.cost).toBeGreaterThan(0)
+    expect(direct?.cost).toBeGreaterThan(0)
+    // 不是订阅通道，token 照常统计。
+    expect(fold.total.calls).toBe(1)
+    expect(fold.total.input).toBe(920)
+  })
+
+  it('homes the international workbuddy-ai variant the same way', () => {
+    const events: SessionEvent[] = [header(1, 'glm-5.3-flash', 'workbuddy-ai'), message(2, 2_000, USAGE)]
+    const fold = foldSession(events, new Set())
+    expect(fold.bySite.has('direct:workbuddy-ai')).toBe(true)
+    expect(fold.bySite.has('unknown')).toBe(false)
+    expect(fold.total.cost).toBeGreaterThan(0)
+  })
+
+  it('never counts workbuddy calls as the official DeepSeek channel', () => {
+    // workbuddy 是腾讯 WorkBuddy 桌面 App 的账号通道，不是 DeepSeek 官方直连：
+    // 归位 direct 不得顺带把调用算进官方口径（officialCalls/officialCost 必须为 0），
+    // 否则「官方 vs 三方」分桶与 DeepSeek 官方组会虚增。
+    const events: SessionEvent[] = [header(1, 'deepseek-v4.1-flash', 'workbuddy'), message(2, 2_000, USAGE)]
+    const fold = foldSession(events, new Set())
+    expect(fold.total.officialCalls).toBe(0)
+    expect(fold.total.officialCost).toBe(0)
+    const direct = fold.bySite.get('direct:workbuddy')
+    expect(direct?.officialCalls).toBe(0)
+    expect(direct?.officialCost).toBe(0)
+  })
+
+  it('leaves unlisted providers outside the route table in the unknown bucket', () => {
+    // 反证：名单外的配置外 provider 仍按 issue #82 口径落 unknown、记 0 费用。
+    // 这条断言同时守住「不猜通道」的边界——加名单是显式行为，不是前缀/模式匹配。
+    const events: SessionEvent[] = [header(1, 'deepseek-v4.1-flash', 'some-other-plugin'), message(2, 2_000, USAGE)]
+    const fold = foldSession(events, new Set())
+    expect(fold.bySite.has('unknown')).toBe(true)
+    expect(fold.total.cost).toBe(0)
+  })
+
+  it('keeps unknown-channel models uncatalogued out of the priced path', () => {
+    // 归位只解决通道归属，不解决目录缺口：目录外模型仍记 0 并进 unpricedModels，
+    // 面板据此提示「未收录」而不是伪造金额。
+    const events: SessionEvent[] = [header(1, 'not-a-real-model-id', 'workbuddy'), message(2, 2_000, USAGE)]
+    const fold = foldSession(events, new Set())
+    expect(fold.bySite.has('direct:workbuddy')).toBe(true)
+    expect(fold.total.cost).toBe(0)
+    expect([...fold.unpricedModels]).toContain('not-a-real-model-id')
+  })
+})
+
 describe('foldUsage', () => {
   it('accumulates calls and splits tokens into cache buckets', () => {
     const acc = emptyUsage()

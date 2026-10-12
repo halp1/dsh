@@ -2491,6 +2491,23 @@ const DEFAULT_SUBSCRIPTION_PROVIDERS = [
 function isOfficialProvider(provider) {
 	return /^deepseek(?:-[a-z0-9-]+)?$/i.test(provider.trim());
 }
+/**
+* 已知的「第三方插件注册 adapter」通道名单：这些 provider 由别的插件经
+* `ctx.llm.registerAdapter` 注册，**不经 llm-pi-ai 路由表**，因此
+* {@link siteRefOf} 的路由查询必然 miss。与订阅豁免（issue #37 的 grok
+* build）同构：显式列出、不做「猜通道」的通用发现——猜错会把来源不明的
+* 路由也归位成可计价通道，违背 issue #82「支出主体无法核实不计价」的初衷。
+*
+* 收录语义：这些通道的支出主体是可核实的（WorkBuddy = 腾讯 WorkBuddy
+* 桌面 App 账号），计费用模型官方目录价折算 Token 成本，与积分制解耦。
+* 它们**不是** DeepSeek 官方渠道——{@link isOfficialProvider} 与
+* {@link officialChannelOf} 都不会因本名单把调用算进官方口径。
+*/
+const KNOWN_ADAPTER_PROVIDERS = /* @__PURE__ */ new Set(["workbuddy", "workbuddy-ai"]);
+/** 一个 provider 是否是已知的第三方插件注册 adapter 通道。 */
+function isKnownAdapterProvider(provider) {
+	return KNOWN_ADAPTER_PROVIDERS.has(provider.trim());
+}
 /** DeepSeek 官方直连端点的归一化 origin（`siteOriginOf` 口径）：有 baseURL 的路由只有它算官方。 */
 const OFFICIAL_DEEPSEEK_ORIGIN = "https://api.deepseek.com";
 /**
@@ -2527,8 +2544,10 @@ function siteOriginOf(baseURL) {
 *   网关）按 `direct` 归位——unknown 一刀切会把官方直连的费用堆进「未知路由」组、
 *   且不算官方渠道（回归修复）；订阅豁免命中的通道（显式 `subscriptionProviders`
 *   配置或判定函数）同样按 `direct` 归位——订阅管理类插件注册的通道不经路由表，
-*   unknown 桶既掩盖归属又按 token 误计费（issue #37 的 grok build）；其余配置外
-*   名称保留 unknown（无法核实通道）。
+*   unknown 桶既掩盖归属又按 token 误计费（issue #37 的 grok build）；已知的第三方
+*   插件注册 adapter 通道（{@link KNOWN_ADAPTER_PROVIDERS}，如 workbuddy）同样按
+*   `direct` 归位——支出主体可核实、按模型官方目录价计 Token 成本，unknown 桶会让
+*   费用恒为 0；其余配置外名称保留 unknown（无法核实通道）。
 * @param provider - 会话日志里的 provider 路由名（request/header 的 `config.provider`）。
 * @param routes - 当前 provider 路由视图（来自 llm-pi-ai providers）。
 * @param opts - `subscription`：该调用是否已被订阅豁免判定命中。
@@ -2551,6 +2570,10 @@ function siteRefOf(provider, routes, opts = {}) {
 		provider
 	};
 	if (opts.subscription === true) return {
+		kind: "direct",
+		provider
+	};
+	if (isKnownAdapterProvider(provider)) return {
 		kind: "direct",
 		provider
 	};
@@ -3426,7 +3449,7 @@ function createUsageAggregator(persistence, options = {}) {
 			id,
 			...cwd === void 0 ? {} : { cwd },
 			...stamp === null ? {} : { stamp },
-			foldVersion: 20,
+			foldVersion: 21,
 			fingerprint: foldFingerprint,
 			fold: serializeFold(fold)
 		};
@@ -3533,7 +3556,7 @@ function createUsageAggregator(persistence, options = {}) {
 			try {
 				const cwd = meta.cwd;
 				const ledgerRow = ledger.get(id);
-				if (ledgerRow !== void 0 && ledgerRow.stamp !== void 0 && stamp !== null && ledgerRow.stamp === stamp && (ledgerRow.foldVersion ?? 1) === 20 && ledgerRow.fingerprint === foldFingerprint) {
+				if (ledgerRow !== void 0 && ledgerRow.stamp !== void 0 && stamp !== null && ledgerRow.stamp === stamp && (ledgerRow.foldVersion ?? 1) === 21 && ledgerRow.fingerprint === foldFingerprint) {
 					const fold = deserializeFold(ledgerRow.fold);
 					folds.push({
 						id,
@@ -3621,7 +3644,7 @@ function createUsageAggregator(persistence, options = {}) {
 			for (const entry of ledger.values()) {
 				if (included.has(entry.id)) continue;
 				try {
-					const stale = (entry.foldVersion ?? 1) < 20 || entry.fingerprint !== foldFingerprint;
+					const stale = (entry.foldVersion ?? 1) < 21 || entry.fingerprint !== foldFingerprint;
 					folds.push({
 						id: entry.id,
 						...entry.cwd === void 0 ? {} : { cwd: entry.cwd },
