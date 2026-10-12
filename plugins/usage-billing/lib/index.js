@@ -1577,6 +1577,30 @@ const BUILTIN_MODEL_CATALOG = [
 		}
 	},
 	{
+		key: "gpt-image-2",
+		name: "GPT Image 2",
+		provider: "OpenAI",
+		colorVar: "ds-green",
+		price: {
+			currency: "CNY",
+			input: 14,
+			cacheHit: 5.6,
+			output: 84
+		}
+	},
+	{
+		key: "gpt-image-2.5-sunburst",
+		name: "GPT Image 2.5 Sunburst",
+		provider: "OpenAI",
+		colorVar: "ds-green",
+		price: {
+			currency: "CNY",
+			input: 14,
+			cacheHit: 5.6,
+			output: 84
+		}
+	},
+	{
 		key: "gemini-pro",
 		name: "Gemini 3.1 Pro",
 		provider: "Google",
@@ -2415,7 +2439,10 @@ const BUILTIN_MODEL_KEY_ALIASES = {
 	"grok-4.5": "grok-4.5",
 	"grok-4-5": "grok-4.5",
 	"grok-4.6": "grok",
-	"grok-4-6": "grok"
+	"grok-4-6": "grok",
+	"gpt-image-2": "gpt-image-2",
+	"gpt-image-2.5-sunburst": "gpt-image-2.5-sunburst",
+	"gpt-image-2-5-sunburst": "gpt-image-2.5-sunburst"
 };
 //#endregion
 //#region lib/types/aggregate.js

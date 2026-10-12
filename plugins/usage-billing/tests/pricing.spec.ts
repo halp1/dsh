@@ -442,6 +442,24 @@ describe('computeCostAt (P0-1)', () => {
     }
   })
 
+  it('prices the OpenAI image model ids exposed by the relay imaging channel', () => {
+    // 绘图模型（gpt-image 系列）经中转站的绘图通道暴露，models.dev 无同 id 的一手收录，
+    // 故按经营业者给出的实付人民币单价收录。两个型号同价：输入 ¥14 / 缓存读 ¥5.6 / 输出 ¥84。
+    const expected: Array<[string, string]> = [
+      ['gpt-image-2', 'GPT Image 2'],
+      ['gpt-image-2.5-sunburst', 'GPT Image 2.5 Sunburst'],
+    ]
+    for (const [id, name] of expected) {
+      expect(resolveCatalogKey(id)).toBe(id)
+      const entry = modelOf(id)
+      expect(entry.name).toBe(name)
+      expect(entry.estimated).toBeUndefined()
+      expect(entry.price).toMatchObject({ currency: 'CNY', input: 14, cacheHit: 5.6, output: 84 })
+    }
+    // 点/横杠变体归一。
+    expect(resolveCatalogKey('gpt-image-2-5-sunburst')).toBe('gpt-image-2.5-sunburst')
+  })
+
   it('keeps user prices authoritative across the reprice boundary', () => {
     // 用户价 = 实付价：分界前也不套内置旧价口径。
     const priced = { ...modelOf('flash'), userPriced: true as const, price: { currency: 'CNY' as const, input: 9, cacheHit: 0.3, output: 27 } }
