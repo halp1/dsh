@@ -925,7 +925,11 @@ export interface UsageLedgerDocument {
 // 别名而落「未收录」、费用记 0，复用旧行会让已发生的用量在升级后仍为 0；bump 让
 // 日志仍在的会话按目录价重折，仅日志已删的行留在旧口径（账本「历史定格」语义的
 // 固有残留）。
-export const FOLD_VERSION = 19
+// 20：计价语义变更——补录 OpenAI 绘图模型 gpt-image-2 / gpt-image-2.5-sunburst
+// 目录条目（issue #88，中转站绘图通道的实付人民币单价）。与 19 同因：fingerprint
+// 不含目录，复用旧行会让已按「未收录」记 0 的用量在升级后继续为 0；bump 让日志
+// 仍在的会话按目录价重折。
+export const FOLD_VERSION = 20
 
 /**
  * 一次性账本迁移：id 唯一，apply 在加载边界对原始文档执行，已应用过的跳过。

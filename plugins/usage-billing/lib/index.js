@@ -3426,7 +3426,7 @@ function createUsageAggregator(persistence, options = {}) {
 			id,
 			...cwd === void 0 ? {} : { cwd },
 			...stamp === null ? {} : { stamp },
-			foldVersion: 19,
+			foldVersion: 20,
 			fingerprint: foldFingerprint,
 			fold: serializeFold(fold)
 		};
@@ -3533,7 +3533,7 @@ function createUsageAggregator(persistence, options = {}) {
 			try {
 				const cwd = meta.cwd;
 				const ledgerRow = ledger.get(id);
-				if (ledgerRow !== void 0 && ledgerRow.stamp !== void 0 && stamp !== null && ledgerRow.stamp === stamp && (ledgerRow.foldVersion ?? 1) === 19 && ledgerRow.fingerprint === foldFingerprint) {
+				if (ledgerRow !== void 0 && ledgerRow.stamp !== void 0 && stamp !== null && ledgerRow.stamp === stamp && (ledgerRow.foldVersion ?? 1) === 20 && ledgerRow.fingerprint === foldFingerprint) {
 					const fold = deserializeFold(ledgerRow.fold);
 					folds.push({
 						id,
@@ -3621,7 +3621,7 @@ function createUsageAggregator(persistence, options = {}) {
 			for (const entry of ledger.values()) {
 				if (included.has(entry.id)) continue;
 				try {
-					const stale = (entry.foldVersion ?? 1) < 19 || entry.fingerprint !== foldFingerprint;
+					const stale = (entry.foldVersion ?? 1) < 20 || entry.fingerprint !== foldFingerprint;
 					folds.push({
 						id: entry.id,
 						...entry.cwd === void 0 ? {} : { cwd: entry.cwd },
