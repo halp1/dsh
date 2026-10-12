@@ -1791,6 +1791,17 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
   // 全量重折的分片大小：每片折叠后让出事件循环，超大会话不再连续阻塞宿主 RPC（issue #30）。
   const FOLD_CHUNK_EVENTS = 8000
 
+  /** 惰性失效（价目表时序）：账本/缓存行若以「当时不可计价」的模型落盘，
+   *  而价目表现在能计价了，该行必须重折——否则显示层按实时价算出的
+   *  「目录价预估」与服务端 cost=0 并存，出现「明细比总额高」的双口径
+   *  （真机复现：预热折叠早于 models.dev 价目表注入，step-5-preview
+   *  折叠时刻 cost=0、渲染时刻 ≈¥38）。复用判定据此刻检查：不走配置指纹
+   *  （价目表不进指纹，否则 6h 一次的价格刷新会让全部历史行全量重折），
+   *  也不 bump FOLD_VERSION（那是归账语义版本，价目表时序不是语义变更）。
+   *  价目表变化后未受影响行（无 unpriced 模型）依旧零读取复用。 */
+  const foldNeedsReprice = (fold: SerializedSessionFold): boolean =>
+    fold.unpricedModels.some(key => isPriced(key))
+
   /** 把一份（全量或增量）折叠结果登记进 durable ledger；内容无变化时不落盘。 */
   const recordLedger = (id: string, cwd: string | undefined, stamp: string | null, fold: SessionFold): void => {
     if (options.ledger === undefined) return
@@ -1805,12 +1816,15 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
     const row = ledger.get(id)
     // A no-locate backend has no stable stamp, so compare the serialized row;
     // located logs use the cheap stamp and metadata check.
+    // 例外：行内 unpricedModels 模型若已被当前价目表收录（惰性失效触发的重折），
+    // 必须重写——fold 的 cost/unpricedModels 变了，但元数据键全同，不比内容会发现不了。
     const changed = row === undefined
       || row.stamp !== entry.stamp
       || row.cwd !== entry.cwd
       || row.foldVersion !== entry.foldVersion
       || row.fingerprint !== entry.fingerprint
       || (stamp === null && JSON.stringify(row.fold) !== JSON.stringify(entry.fold))
+      || (stamp !== null && foldNeedsReprice(row.fold))
     if (changed) {
       ledger.set(id, entry)
       ledgerNeedsSave = true
@@ -1922,38 +1936,40 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
           if (!ledger.has(id)) noLedgerUnreadable += 1
           continue
         }
-        const hit = cache.get(id)
-        if (hit !== undefined && stamp !== null && hit.stamp === stamp) {
-          // LRU touch：复用命中的会话移到缓存末尾，供上方上限清理优先淘汰最久未用。
-          cache.delete(id)
-          cache.set(id, hit)
-          folds.push({ id, ...(meta.cwd === undefined ? {} : { cwd: meta.cwd }), fold: hit.fold })
-          included.add(id)
-          continue
-        }
         // 单个损坏/不可读的会话日志（如 zstd torn frame）不能拖垮整份聚合：
         // 跳到下一个会话，避免面板整体归零。失败会话放进 skipped 末尾告警。
         try {
           const cwd = meta.cwd
           // 重启首折快路径：账本行的失效键与当前日志完全一致（同算法版本）时
           // 零读取复用——几十个历史会话的重启不再各自全量解压一遍。
+          // 放在 cache 命中之前：惰性失效（价目表就绪）须让账本行优先拦截，否则
+          // 命中缓存的旧折叠（同 stamp 零读取）会吞掉重折。账本命中行不进 LRU，
+          // 也不写 cache（stamp 未动，每轮直接命中账本快路径）。
           const ledgerRow = ledger.get(id)
-          // 复用双键：日志 stamp 未动 **且** 聚合配置指纹一致——用户改配置
-          //（订阅豁免/路由别名/官方名单/搜索估值）后历史行立即失效重折（issue #37）。
           if (ledgerRow !== undefined && ledgerRow.stamp !== undefined && stamp !== null
             && ledgerRow.stamp === stamp && (ledgerRow.foldVersion ?? 1) === FOLD_VERSION
-            && ledgerRow.fingerprint === foldFingerprint) {
+            && ledgerRow.fingerprint === foldFingerprint
+            && !foldNeedsReprice(ledgerRow.fold)) {
             const fold = deserializeFold(ledgerRow.fold)
-            // 账本命中行不进 LRU：会话数超过上限时，它们每轮都会把活跃会话的
-            // 增量状态机（machine/lastSeq）挤出缓存，使活跃会话退化为每轮全量
-            // 重折（issue #30 的增量修复被抵消）。账本行本身就在 ledger map 里，
-            // 下轮反序列化即可复用，无需占用缓存名额。
             folds.push({ id, ...(cwd === undefined ? {} : { cwd }), fold })
             included.add(id)
             continue
           }
+          const hit = cache.get(id)
+          if (hit !== undefined && stamp !== null && hit.stamp === stamp) {
+            // LRU touch：复用命中的会话移到缓存末尾，供上方上限清理优先淘汰最久未用。
+            cache.delete(id)
+            cache.set(id, hit)
+            folds.push({ id, ...(meta.cwd === undefined ? {} : { cwd: meta.cwd }), fold: hit.fold })
+            included.add(id)
+            continue
+          }
           const previous = cache.get(id)
-          if (previous?.machine !== undefined && previous.lastSeq !== undefined) {
+          // 惰性失效同样作用于增量游标：价目表就绪后，此前因模型未收录而
+          // cost=0 的缓存行不能继续增量追加（旧事件永远补不出 cost）——
+          // 丢弃缓存退回全量重折，整条日志按当前价目表计价。
+          if (previous?.machine !== undefined && previous.lastSeq !== undefined
+            && ![...previous.fold.unpricedModels].some(key => isPriced(key))) {
             // seq 增量折叠（issue #30）：活跃会话持续追加使 mtime+size 键每轮失效，
             // 全量重读会让宿主事件循环连续阻塞十几秒、session/list 全部挂起。
             // 只读取上次折叠之后的新增段，折进既有 fold（状态机跨批次延续）。

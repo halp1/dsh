@@ -3442,6 +3442,15 @@ function createUsageAggregator(persistence, options = {}) {
 	const searchEstimate = options.searchCallEstimateCny ?? .02;
 	const foldFingerprint = configFingerprint(subscriptionMatcher, officialProviderIds, routeAliases, searchEstimate);
 	const FOLD_CHUNK_EVENTS = 8e3;
+	/** 惰性失效（价目表时序）：账本/缓存行若以「当时不可计价」的模型落盘，
+	*  而价目表现在能计价了，该行必须重折——否则显示层按实时价算出的
+	*  「目录价预估」与服务端 cost=0 并存，出现「明细比总额高」的双口径
+	*  （真机复现：预热折叠早于 models.dev 价目表注入，step-5-preview
+	*  折叠时刻 cost=0、渲染时刻 ≈¥38）。复用判定据此刻检查：不走配置指纹
+	*  （价目表不进指纹，否则 6h 一次的价格刷新会让全部历史行全量重折），
+	*  也不 bump FOLD_VERSION（那是归账语义版本，价目表时序不是语义变更）。
+	*  价目表变化后未受影响行（无 unpriced 模型）依旧零读取复用。 */
+	const foldNeedsReprice = (fold) => fold.unpricedModels.some((key) => isPriced(key));
 	/** 把一份（全量或增量）折叠结果登记进 durable ledger；内容无变化时不落盘。 */
 	const recordLedger = (id, cwd, stamp, fold) => {
 		if (options.ledger === void 0) return;
@@ -3454,7 +3463,7 @@ function createUsageAggregator(persistence, options = {}) {
 			fold: serializeFold(fold)
 		};
 		const row = ledger.get(id);
-		if (row === void 0 || row.stamp !== entry.stamp || row.cwd !== entry.cwd || row.foldVersion !== entry.foldVersion || row.fingerprint !== entry.fingerprint || stamp === null && JSON.stringify(row.fold) !== JSON.stringify(entry.fold)) {
+		if (row === void 0 || row.stamp !== entry.stamp || row.cwd !== entry.cwd || row.foldVersion !== entry.foldVersion || row.fingerprint !== entry.fingerprint || stamp === null && JSON.stringify(row.fold) !== JSON.stringify(entry.fold) || stamp !== null && foldNeedsReprice(row.fold)) {
 			ledger.set(id, entry);
 			ledgerNeedsSave = true;
 		}
@@ -3541,22 +3550,10 @@ function createUsageAggregator(persistence, options = {}) {
 				if (!ledger.has(id)) noLedgerUnreadable += 1;
 				continue;
 			}
-			const hit = cache.get(id);
-			if (hit !== void 0 && stamp !== null && hit.stamp === stamp) {
-				cache.delete(id);
-				cache.set(id, hit);
-				folds.push({
-					id,
-					...meta.cwd === void 0 ? {} : { cwd: meta.cwd },
-					fold: hit.fold
-				});
-				included.add(id);
-				continue;
-			}
 			try {
 				const cwd = meta.cwd;
 				const ledgerRow = ledger.get(id);
-				if (ledgerRow !== void 0 && ledgerRow.stamp !== void 0 && stamp !== null && ledgerRow.stamp === stamp && (ledgerRow.foldVersion ?? 1) === 21 && ledgerRow.fingerprint === foldFingerprint) {
+				if (ledgerRow !== void 0 && ledgerRow.stamp !== void 0 && stamp !== null && ledgerRow.stamp === stamp && (ledgerRow.foldVersion ?? 1) === 21 && ledgerRow.fingerprint === foldFingerprint && !foldNeedsReprice(ledgerRow.fold)) {
 					const fold = deserializeFold(ledgerRow.fold);
 					folds.push({
 						id,
@@ -3566,8 +3563,20 @@ function createUsageAggregator(persistence, options = {}) {
 					included.add(id);
 					continue;
 				}
+				const hit = cache.get(id);
+				if (hit !== void 0 && stamp !== null && hit.stamp === stamp) {
+					cache.delete(id);
+					cache.set(id, hit);
+					folds.push({
+						id,
+						...meta.cwd === void 0 ? {} : { cwd: meta.cwd },
+						fold: hit.fold
+					});
+					included.add(id);
+					continue;
+				}
 				const previous = cache.get(id);
-				if (previous?.machine !== void 0 && previous.lastSeq !== void 0) {
+				if (previous?.machine !== void 0 && previous.lastSeq !== void 0 && ![...previous.fold.unpricedModels].some((key) => isPriced(key))) {
 					const from = previous.lastSeq + 1;
 					const { events, inheritedEventCount } = await persistence.readFrom(meta.id, sessionLogOffsetOf(from));
 					const after = await stampOf(meta);
@@ -7480,10 +7489,16 @@ function apply(ctx, config = {}) {
 	let live = { source: "builtin" };
 	let pricingSyncedAt = 0;
 	const refreshPricing = async () => {
+		const before = live;
 		live = await fetchLivePricing();
 		pricingSyncedAt = Date.now();
 		applyLivePricing(live);
 		pricingBodyCache = void 0;
+		if (live !== before && live.extraModels !== before.extraModels) aggregator.aggregate().then(() => {
+			console.info("[usage-billing] repriced folds after pricing refresh; ledger aligned with live catalog");
+		}).catch((error) => {
+			console.warn("[usage-billing] reprice fold after pricing refresh failed; next aggregate retries:", error);
+		});
 	};
 	let pricingBodyCache;
 	const pricingBody = () => {

@@ -1,4 +1,4 @@
-import { applyBuiltinCatalog } from '../src/client/pricing.ts'
+import { applyBuiltinCatalog, applyLivePricing } from '../src/client/pricing.ts'
 import { BUILTIN_MODEL_CATALOG, BUILTIN_MODEL_KEY_ALIASES } from '../src/builtin-catalog.ts'
 
 // 测试套件承担宿主注入角色：目录与别名表在模块加载时全量注入（宿主 activate
@@ -1802,6 +1802,151 @@ describe('unreadable sessions visibility', () => {
 
     // exactOptionalPropertyTypes：无拒读时不带 key，UI 判空逻辑不必区分 0 与缺省。
     expect(Object.hasOwn(stats, 'unreadableSessions')).toBe(false)
+  })
+})
+
+describe('lazy reprice after live catalog arrives (fold-version preserved)', () => {
+  /** 真实日志形态：step-5-preview 在预热折叠时刻未收录（cost=0、落 unpricedModels）。 */
+  function step5Events(): SessionEvent[] {
+    return [header(1, 'step-5-preview'), message(2, Date.UTC(2026, 9, 12, 4, 0, 0), USAGE)]
+  }
+
+  afterEach(() => {
+    vi.useRealTimers()
+    applyLivePricing({ source: 'builtin' })
+  })
+
+  it('refolds a cached fold whose unpriced model becomes priced', async () => {
+    vi.useFakeTimers()
+    try {
+      const logs: Record<string, SessionEvent[]> = { a: step5Events() }
+      const reads: number[] = []
+      const persistence = {
+        list: async () => [{ id: 'a' }],
+        readFrom: async (id: SessionId, fromSeq: number) => {
+          reads.push(fromSeq)
+          return { meta: { id }, events: (logs.a ?? []).filter(e => e.seq >= fromSeq) }
+        },
+      } as unknown as UsagePersistence
+      const aggregator = createUsageAggregator(persistence)
+
+      // 折叠时刻价目表不含 step-5-preview：cost=0、落 unpricedModels。
+      const before = await aggregator.aggregate()
+      expect(before.byModel['step-5-preview']?.cost ?? 0).toBe(0)
+      expect(before.unpricedModels).toContain('step-5-preview')
+
+      // 价目表注入（models.dev extraModels）后重折：step-5-preview 折出 cost，
+      // total.cost 与 byModel 之和一致（无双口径）。
+      applyLivePricing({
+        source: 'live',
+        rate: 7,
+        extraModels: [{ key: 'step-5-preview', name: 'Step 5 Preview', provider: 'Step', price: { input: 2, cacheHit: 0.2, output: 8 } }],
+      })
+      vi.advanceTimersByTime(AGGREGATE_TTL_MS + 1000)
+      const after = await aggregator.aggregate()
+      const cellAfter = after.byModel['step-5-preview']
+      expect(cellAfter?.cost ?? 0).toBeGreaterThan(0)
+      expect(after.unpricedModels ?? []).not.toContain('step-5-preview')
+      const byModelSum = Object.values(after.byModel).reduce((sum, row) => sum + row.cost, 0)
+      expect(after.total.cost).toBeCloseTo(byModelSum, 6)
+      // 关键：旧折叠（cache 命中，同 stamp 零读取）没有吞掉重折——
+      // 日志被重新读取（全量 from=0），cost 由此折出。
+      expect(reads).toContain(0)
+      expect(reads.length).toBeGreaterThanOrEqual(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('invalidates the incremental cursor when the cached fold has since-priced unpriced models', async () => {
+    vi.useFakeTimers()
+    try {
+      const logs: Record<string, SessionEvent[]> = { a: step5Events() }
+      const reads: string[] = []
+      const persistence = {
+        list: async () => [{ id: 'a' }],
+        readFrom: async (id: SessionId, fromSeq: number) => {
+          reads.push(`from=${String(fromSeq)}`)
+          return { meta: { id }, events: (logs.a ?? []).filter(e => e.seq >= fromSeq) }
+        },
+      } as unknown as UsagePersistence
+      const aggregator = createUsageAggregator(persistence)
+      await aggregator.aggregate()
+      expect(reads).toEqual(['from=0'])
+
+      // 追加事件 + 价目表就绪：惰性失效须丢弃增量游标退回全量重折，
+      // 旧段按新价目表计价（增量追加永远补不出旧段的 cost）。
+      logs.a = [...step5Events(), { type: 'assistant/message', seq: 3, time: Date.UTC(2026, 9, 12, 5, 0, 0), data: { turn: 1, step: 2, message: { role: 'assistant', content: [] }, usage: USAGE } } as unknown as SessionEvent]
+      applyLivePricing({
+        source: 'live',
+        rate: 7,
+        extraModels: [{ key: 'step-5-preview', name: 'Step 5 Preview', provider: 'Step', price: { input: 2, cacheHit: 0.2, output: 8 } }],
+      })
+      vi.advanceTimersByTime(AGGREGATE_TTL_MS + 1000)
+      const after = await aggregator.aggregate()
+      // 第二次读取是全量（from=0），而非增量 from=2。
+      expect(reads).toEqual(['from=0', 'from=0'])
+      expect(after.total.cost).toBeGreaterThan(0)
+      expect(after.byModel['step-5-preview']?.calls).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('reuses a ledger row whose unpriced models stay unpriced, refolds when priced', async () => {
+    vi.useFakeTimers()
+    let dir: string | undefined
+    try {
+      const logs: Record<string, SessionEvent[]> = { a: step5Events() }
+      dir = await mkdtemp(join(tmpdir(), 'dsh-billing-reprice-'))
+      const path = join(dir, 'a.jsonl')
+      await writeFile(path, 'seed')
+      const info = await stat(path)
+      let reads = 0
+      const persistence = {
+        list: async () => [{ id: 'a' }],
+        locate: (meta: { id: SessionId }) => ({ kind: 'jsonl', path }),
+        readFrom: async (id: SessionId, fromSeq: number) => {
+          reads += 1
+          return { meta: { id }, events: (logs.a ?? []).filter(e => e.seq >= fromSeq) }
+        },
+      } as unknown as UsagePersistence
+      const fold = legacyFold()
+      fold.unpricedModels = ['step-5-preview']
+      const store = fakeLedgerStore([{
+        id: 'a',
+        stamp: `${String(info.mtimeMs)}:${String(info.size)}`,
+        foldVersion: FOLD_VERSION,
+        fingerprint: configFingerprint(new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {}, DEFAULT_SEARCH_CALL_ESTIMATE_CNY),
+        fold,
+      }])
+      const aggregator = createUsageAggregator(persistence, { ledger: store.store })
+
+      // 负向对照：模型仍未收录 → 账本行零读取复用（惰性失效不误伤未受影响行）。
+      const before = await aggregator.aggregate()
+      expect(reads).toBe(0)
+      expect(before.unpricedModels).toContain('step-5-preview')
+
+      // 价目表注入后：账本行失效重折，cost>0、unpriced 标记清除、账本行重写。
+      applyLivePricing({
+        source: 'live',
+        rate: 7,
+        extraModels: [{ key: 'step-5-preview', name: 'Step 5 Preview', provider: 'Step', price: { input: 2, cacheHit: 0.2, output: 8 } }],
+      })
+      vi.advanceTimersByTime(AGGREGATE_TTL_MS + 1000)
+      const after = await aggregator.aggregate()
+      expect(reads).toBe(1)
+      expect(after.byModel['step-5-preview']?.cost ?? 0).toBeGreaterThan(0)
+      expect(after.unpricedModels ?? []).not.toContain('step-5-preview')
+      expect(after.staleLedgerSessions ?? 0).toBe(0)
+      // 重折后的账本行须落盘：unpricedModels 已按新价目表清空（recordLedger 的
+      // changed 判定须识别惰性失效行，否则元数据全同会挡掉重写）。
+      await aggregator.flush()
+      expect(store.current().sessions[0]?.fold.unpricedModels).toEqual([])
+    } finally {
+      vi.useRealTimers()
+      if (dir !== undefined) await rm(dir, { recursive: true, force: true })
+    }
   })
 })
 

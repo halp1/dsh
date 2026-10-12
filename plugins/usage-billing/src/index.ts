@@ -1053,11 +1053,25 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
   // 一次完成的同步动作），随 pricing 响应下发供费率条展示「上次同步」。
   let pricingSyncedAt = 0
   const refreshPricing = async (): Promise<void> => {
+    const before = live
     live = await fetchLivePricing()
     pricingSyncedAt = Date.now()
     applyLivePricing(live)
     // 响应体缓存失效：live 变了，pricing 响应须重新序列化（含内置目录与别名表）。
     pricingBodyCache = undefined
+    // 价目表代际变化（builtin→live，或 live 刷新换了 extraModels）：此前因
+    // 「折叠时价目表不全」而 cost=0 的已收录模型行，须按新价目表重折出 cost，
+    // 与显示层目录价口径对齐（修复「明细 ≈¥38 vs 总额 ¥7」的双口径）。复用判定
+    // 是惰性的（aggregate.ts foldNeedsReprice：行内 unpricedModels ∩ 现价目表），
+    // 只有含受影响模型的行重折，其余行依旧零读取复用——不是全量重折。若价目表
+    // 实际无变化，本次聚合命中 TTL/全行复用，近乎零开销。
+    if (live !== before && live.extraModels !== before.extraModels) {
+      void aggregator.aggregate()
+        .then(() => { console.info('[usage-billing] repriced folds after pricing refresh; ledger aligned with live catalog') })
+        .catch((error: unknown) => {
+          console.warn('[usage-billing] reprice fold after pricing refresh failed; next aggregate retries:', error)
+        })
+    }
   }
   // /api/billing/pricing 响应体缓存：内置目录与别名表在 activate 注入后不变，
   // 只有 live/syncedAt 随 refresh 变化；缓存整个响应体避免每请求重复序列化
