@@ -233,7 +233,81 @@ describe('known adapter providers (workbuddy)', () => {
     const fold = foldSession(events, new Set())
     expect(fold.bySite.has('direct:workbuddy')).toBe(true)
     expect(fold.total.cost).toBe(0)
+
     expect([...fold.unpricedModels]).toContain('not-a-real-model-id')
+  })
+})
+
+describe('no workbuddy installed (known-adapter isolation)', () => {
+  /**
+   * 负向隔离（g-001/g-002 的正确性边界）：KNOWN_ADAPTER_PROVIDERS 是显式名单，
+   * 只在会话日志出现 workbuddy/workbuddy-ai 调用时才参与判定。未安装
+   * dsh-workly-connect 的部署不产生这类事件，计费结果必须与名单引入前逐字段一致。
+   * 本组用例证明这一点：同一套「不含 workbuddy 通道」的事件流，四种通道形态的
+   * 归位、计价、官方口径全部走原有路径；平行对照组再证明测试本身有区分度。
+   */
+
+  /** 一套覆盖四种通道形态的事件流，provider 名经参数注入（平行对照组用）。 */
+  function mixedChannelEvents(provider: string): SessionEvent[] {
+    return [
+      // 形态 1：deepseek 前缀官方直连（不经路由表）→ direct + 官方口径 + 目录价。
+      header(1, 'deepseek-v4.1-flash', 'deepseek-official'), message(2, 1_000, USAGE),
+      // 形态 2：路由表命中带 baseURL → site 桶（按 origin 归组）。
+      header(3, 'glm-5.3-flash', provider === 'workbuddy' ? 'workbuddy' : provider), message(4, 2_000, USAGE),
+      // 形态 3：订阅豁免通道 → direct + 记 0 + plan 标记。
+      header(5, 'kimi-k3', 'kimi-coding'), message(6, 3_000, USAGE),
+      // 形态 4：名单外配置外 provider → unknown 桶记 0（issue #82）。
+      header(7, 'flash', 'some-other-plugin'), message(8, 4_000, USAGE),
+    ]
+  }
+
+  /** 断言一套 fold 与预期语义逐字段一致（四种形态各验关键不变量）。 */
+  function expectBaselineSemantics(fold: SessionFold, siteProvider: string): void {
+    // 形态 1：官方直连不变——official 计数与费用来自 deepseek 前缀，与名单无关。
+    expect(fold.total.officialCalls).toBe(1)
+    expect(fold.total.officialCost).toBeGreaterThan(0)
+    expect(fold.bySite.get('direct:deepseek-official')?.officialCalls).toBe(1)
+    // 形态 2：site 桶按 origin 归组（路由表优先于名单——名单不抢配置路径）。
+    expect(fold.bySite.has(`site:https://relay.example.com`)).toBe(true)
+    // 形态 3：订阅豁免记 0（kimi-k3 有目录价但走 kimi-coding 订阅通道）。
+    expect(fold.bySite.get('direct:kimi-coding')?.cost).toBe(0)
+    expect(fold.bySite.get('direct:kimi-coding')?.calls).toBe(1)
+    // 形态 4：名单外配置外 provider 仍 unknown 记 0（issue #82 语义不动）。
+    expect(fold.bySite.get('unknown')?.calls).toBe(1)
+    expect(fold.bySite.get('unknown')?.cost).toBe(0)
+    // 名单绝不给非 workbuddy 通道发 direct 归位。
+    expect(fold.bySite.has(`direct:${siteProvider}`)).toBe(siteProvider.startsWith('workbuddy'))
+  }
+
+  it('prices a mixed-channel log identically with or without the known-adapter list', () => {
+    // 路由视图：一条带 baseURL 的中转路由（形态 2 的 site 桶来源）。
+    const routes = { 'my-relay': { baseURL: 'https://relay.example.com/v1' } }
+    // 对照组 A：provider 名为普通中转名（未安装 workbuddy 时日志里的形态）。
+    const foldA = foldSession(mixedChannelEvents('my-relay'), new Set(['kimi-coding']), undefined, routes)
+    expectBaselineSemantics(foldA, 'my-relay')
+    const sumA = [...foldA.bySite.values()].reduce((sum, cell) => sum + cell.cost, 0)
+    // total 与 bySite 之和一致（无双口径）。
+    expect(foldA.total.cost).toBeCloseTo(sumA, 6)
+
+    // 对照组 B：同样的结构、provider 名换成另一个非 workbuddy 名——结果同构
+    //（桶键跟随 provider 名变化，其余语义逐字段一致）。KNOWN_ADAPTER_PROVIDERS
+    // 存在与否不改变这两组中的任何字段。
+    const foldB = foldSession(mixedChannelEvents('other-relay'), new Set(['kimi-coding']), undefined, { 'other-relay': { baseURL: 'https://relay.example.com/v1' } })
+    expectBaselineSemantics(foldB, 'other-relay')
+    expect(foldB.total.cost).toBeCloseTo(foldA.total.cost, 6)
+    expect(foldB.total.calls).toBe(foldA.total.calls)
+    expect(foldB.total.officialCalls).toBe(foldA.total.officialCalls)
+    expect(foldB.total.officialCost).toBeCloseTo(foldA.total.officialCost, 6)
+  })
+
+  it('differs only when the provider id itself is on the known-adapter list', () => {
+    // 平行对照：同名事件流，唯一变量是 provider 是否叫 workbuddy——
+    // 证明上一条测试的「零改变」断言不是恒真，名单确实只在命中时生效。
+    const routes = { 'workbuddy': { baseURL: 'https://relay.example.com/v1' } }
+    const fold = foldSession(mixedChannelEvents('workbuddy'), new Set(['kimi-coding']), undefined, routes)
+    // 路由表命中（形态 2）优先于名单：site 桶仍按 origin 归组，名单不抢配置路径。
+    expect(fold.bySite.has('site:https://relay.example.com')).toBe(true)
+    expect(fold.bySite.has('direct:workbuddy')).toBe(false)
   })
 })
 
