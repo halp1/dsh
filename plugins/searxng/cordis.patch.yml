@@ -1,0 +1,28 @@
+# Bundle self-activation patch: mounts the SearXNG search provider when the
+# package is installed into a profile via
+#   dsh plugin --profile web add file:~/code/dsh/dsh-plugin-searxng
+#
+# It also pins `web.searchProvider` to this provider. That is required, not
+# cosmetic: the shipped DeepSeek provider pins itself as the search backend, and
+# it needs a DEEPSEEK_API_KEY this setup does not have. Without the pin the seam
+# keeps routing every search to it and fails with WEB_PROVIDER_CREDENTIAL_MISSING.
+#
+# Configure it by overriding the `web-search-searxng` id from the profile's own
+# cordis.patch.yml:
+#
+#   - id: web-search-searxng
+#     config:
+#       baseURL: https://searxng.example.com
+#       categories: [general]
+#       language: en
+#       timeoutMs: 15000
+#
+- id: web
+  config:
+    searchProvider: searxng
+
+- insert:
+    - id: web-search-searxng
+      name: dsh-plugin-searxng
+      config:
+        baseURL: https://searxng.haelp.dev
