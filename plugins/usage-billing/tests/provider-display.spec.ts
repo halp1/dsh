@@ -55,3 +55,13 @@ describe('directChannelRoute', () => {
     expect(directChannelRoute('直连 · WorkBuddy')).toBe('WorkBuddy')
   })
 })
+
+describe('channelDisplayName case handling (nit from PR #90 review)', () => {
+  it('maps case variants of a known adapter route to its brand name', () => {
+    // 聚合层 isKnownAdapterProvider 大小写不敏感；显示层必须同姿态，
+    // 否则会出现「已归位 direct 并按目录价计价，但组头显示裸路由名」的两侧不一致。
+    expect(channelDisplayName('direct:WorkBuddy')).toBe('直连 · WorkBuddy')
+    expect(channelDisplayName('direct:WORKBUDDY-AI', 'en')).toBe('Direct · WorkBuddy AI')
+    expect(channelDisplayName('direct: workbuddy ')).toBe('直连 · WorkBuddy')
+  })
+})

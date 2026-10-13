@@ -47,7 +47,13 @@ export declare function isOfficialProvider(provider: string): boolean;
  * {@link officialChannelOf} 都不会因本名单把调用算进官方口径。
  */
 export declare const KNOWN_ADAPTER_PROVIDERS: ReadonlySet<string>;
-/** 一个 provider 是否是已知的第三方插件注册 adapter 通道。 */
+/**
+ * 一个 provider 是否命中已知 adapter 通道名单。判定与 {@link isOfficialProvider}
+ * 同姿态：trim + 大小写不敏感——dsh-workbuddy-connect 注册的是小写 id
+ *（`workbuddy` / `workbuddy-ai`），宿主不强制 route 小写，按大小写归一化可避免
+ * 日志里出现大小写变体时静默落回 unknown 桶。路由表命中仍优先于本名单
+ *（见 {@link siteRefOf}），用户自配的大小写变体走配置路径。
+ */
 export declare function isKnownAdapterProvider(provider: string): boolean;
 /** DeepSeek 官方直连端点的归一化 origin（`siteOriginOf` 口径）：有 baseURL 的路由只有它算官方。 */
 export declare const OFFICIAL_DEEPSEEK_ORIGIN = "https://api.deepseek.com";

@@ -2504,9 +2504,15 @@ function isOfficialProvider(provider) {
 * {@link officialChannelOf} 都不会因本名单把调用算进官方口径。
 */
 const KNOWN_ADAPTER_PROVIDERS = /* @__PURE__ */ new Set(["workbuddy", "workbuddy-ai"]);
-/** 一个 provider 是否是已知的第三方插件注册 adapter 通道。 */
+/**
+* 一个 provider 是否命中已知 adapter 通道名单。判定与 {@link isOfficialProvider}
+* 同姿态：trim + 大小写不敏感——dsh-workbuddy-connect 注册的是小写 id
+*（`workbuddy` / `workbuddy-ai`），宿主不强制 route 小写，按大小写归一化可避免
+* 日志里出现大小写变体时静默落回 unknown 桶。路由表命中仍优先于本名单
+*（见 {@link siteRefOf}），用户自配的大小写变体走配置路径。
+*/
 function isKnownAdapterProvider(provider) {
-	return KNOWN_ADAPTER_PROVIDERS.has(provider.trim());
+	return KNOWN_ADAPTER_PROVIDERS.has(provider.trim().toLowerCase());
 }
 /** DeepSeek 官方直连端点的归一化 origin（`siteOriginOf` 口径）：有 baseURL 的路由只有它算官方。 */
 const OFFICIAL_DEEPSEEK_ORIGIN = "https://api.deepseek.com";
@@ -3564,7 +3570,7 @@ function createUsageAggregator(persistence, options = {}) {
 					continue;
 				}
 				const hit = cache.get(id);
-				if (hit !== void 0 && stamp !== null && hit.stamp === stamp) {
+				if (hit !== void 0 && stamp !== null && hit.stamp === stamp && ![...hit.fold.unpricedModels].some((key) => isPriced(key))) {
 					cache.delete(id);
 					cache.set(id, hit);
 					folds.push({
@@ -7488,17 +7494,25 @@ function apply(ctx, config = {}) {
 	});
 	let live = { source: "builtin" };
 	let pricingSyncedAt = 0;
+	/** 价目表代际：extraModels 的 key 集合稳定序列化。fetchLivePricing 每次都重建
+	*  数组（引用必不同），引用比较恒真会退化成「每次刷新都跑一轮 reprice」；
+	*  key 集合变化才代表真的出现了「此前未收录、现在可计价」的模型。 */
+	const priceGenerationOf = (snapshot) => (snapshot.extraModels ?? []).map((model) => model.key).sort().join(",");
+	let priceGeneration = priceGenerationOf(live);
 	const refreshPricing = async () => {
-		const before = live;
 		live = await fetchLivePricing();
 		pricingSyncedAt = Date.now();
 		applyLivePricing(live);
 		pricingBodyCache = void 0;
-		if (live !== before && live.extraModels !== before.extraModels) aggregator.aggregate().then(() => {
-			console.info("[usage-billing] repriced folds after pricing refresh; ledger aligned with live catalog");
-		}).catch((error) => {
-			console.warn("[usage-billing] reprice fold after pricing refresh failed; next aggregate retries:", error);
-		});
+		const nextGeneration = priceGenerationOf(live);
+		if (nextGeneration !== priceGeneration) {
+			priceGeneration = nextGeneration;
+			aggregator.aggregate().then(() => {
+				console.info("[usage-billing] repriced folds after pricing refresh; ledger aligned with live catalog");
+			}).catch((error) => {
+				console.warn("[usage-billing] reprice fold after pricing refresh failed; next aggregate retries:", error);
+			});
+		}
 	};
 	let pricingBodyCache;
 	const pricingBody = () => {

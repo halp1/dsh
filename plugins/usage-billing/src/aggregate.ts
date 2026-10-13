@@ -83,9 +83,15 @@ export const KNOWN_ADAPTER_PROVIDERS: ReadonlySet<string> = new Set([
   'workbuddy-ai',
 ])
 
-/** 一个 provider 是否是已知的第三方插件注册 adapter 通道。 */
+/**
+ * 一个 provider 是否命中已知 adapter 通道名单。判定与 {@link isOfficialProvider}
+ * 同姿态：trim + 大小写不敏感——dsh-workbuddy-connect 注册的是小写 id
+ *（`workbuddy` / `workbuddy-ai`），宿主不强制 route 小写，按大小写归一化可避免
+ * 日志里出现大小写变体时静默落回 unknown 桶。路由表命中仍优先于本名单
+ *（见 {@link siteRefOf}），用户自配的大小写变体走配置路径。
+ */
 export function isKnownAdapterProvider(provider: string): boolean {
-  return KNOWN_ADAPTER_PROVIDERS.has(provider.trim())
+  return KNOWN_ADAPTER_PROVIDERS.has(provider.trim().toLowerCase())
 }
 
 /** DeepSeek 官方直连端点的归一化 origin（`siteOriginOf` 口径）：有 baseURL 的路由只有它算官方。 */
@@ -1956,7 +1962,12 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
             continue
           }
           const hit = cache.get(id)
-          if (hit !== undefined && stamp !== null && hit.stamp === stamp) {
+          // 惰性失效同样作用于 cache 命中路径：预热折叠（价目表未就绪）会同时写入
+          // cache 行与账本行——账本门触发落穿后，若无这道门就会零读取复用旧折叠，
+          // 空闲会话 stamp 永不变 → 整个进程生命周期 cost=0，只有重启才自愈。
+          // cache 里是内存版 fold（unpricedModels 是 Set，没有 .some）。
+          if (hit !== undefined && stamp !== null && hit.stamp === stamp
+            && ![...hit.fold.unpricedModels].some(key => isPriced(key))) {
             // LRU touch：复用命中的会话移到缓存末尾，供上方上限清理优先淘汰最久未用。
             cache.delete(id)
             cache.set(id, hit)

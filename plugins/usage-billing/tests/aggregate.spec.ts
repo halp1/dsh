@@ -204,6 +204,18 @@ describe('known adapter providers (workbuddy)', () => {
     expect(fold.total.cost).toBeGreaterThan(0)
   })
 
+  it('homes case variants of the adapter route to direct (nit from PR #90 review)', () => {
+    // 宿主不强制 route 小写；名单判定与 isOfficialProvider 同姿态（trim + 大小写
+    // 不敏感），避免日志里出现大小写变体时静默落回 unknown 桶。
+    const events: SessionEvent[] = [header(1, 'deepseek-v4.1-flash', 'WorkBuddy'), message(2, 2_000, USAGE)]
+    const fold = foldSession(events, new Set())
+    expect(fold.bySite.has('unknown')).toBe(false)
+    expect(fold.bySite.get('direct:WorkBuddy')?.calls).toBe(1)
+    expect(fold.total.cost).toBeGreaterThan(0)
+    // 仍不算官方渠道。
+    expect(fold.total.officialCalls).toBe(0)
+  })
+
   it('never counts workbuddy calls as the official DeepSeek channel', () => {
     // workbuddy 是腾讯 WorkBuddy 桌面 App 的账号通道，不是 DeepSeek 官方直连：
     // 归位 direct 不得顺带把调用算进官方口径（officialCalls/officialCost 必须为 0），
@@ -1964,6 +1976,54 @@ describe('lazy reprice after live catalog arrives (fold-version preserved)', () 
       expect(after.byModel['step-5-preview']?.calls).toBe(2)
     } finally {
       vi.useRealTimers()
+    }
+  })
+
+  it('refolds a cache hit whose unpriced model becomes priced on a stamped backend (PR #90 P1)', async () => {
+    // 生产形态的宿主（有 locate → 稳定 stamp）下，预热折叠会同时写入 cache 行与
+    // 账本行。价目表就绪后的下一轮：账本门触发落穿，但若 cache 命中路径没有同一
+    // 道门，就会零读取复用旧折叠 —— 空闲会话 stamp 永不变，整个进程生命周期
+    // cost=0，只有重启才自愈。本用例守住 cache 命中路径的惰性失效门。
+    vi.useFakeTimers()
+    let dir: string | undefined
+    try {
+      const logs: Record<string, SessionEvent[]> = { a: step5Events() }
+      dir = await mkdtemp(join(tmpdir(), 'dsh-billing-reprice-cachehit-'))
+      const path = join(dir, 'a.jsonl')
+      await writeFile(path, 'seed')
+      let reads = 0
+      // 无账本（纯 cache 路径）+ 真实文件 locate → stamp 稳定（同 test 3 的形态）。
+      const persistence = {
+        list: async () => [{ id: 'a' }],
+        locate: (meta: { id: SessionId }) => ({ kind: 'jsonl', path }),
+        readFrom: async (id: SessionId, fromSeq: number) => {
+          reads += 1
+          return { meta: { id }, events: (logs.a ?? []).filter(e => e.seq >= fromSeq) }
+        },
+      } as unknown as UsagePersistence
+      const aggregator = createUsageAggregator(persistence)
+
+      // 第一轮：价目表未就绪 → cost=0、落 unpricedModels，写入 cache。
+      const before = await aggregator.aggregate()
+      expect(reads).toBe(1)
+      expect(before.byModel['step-5-preview']?.cost ?? 0).toBe(0)
+      expect(before.unpricedModels).toContain('step-5-preview')
+
+      // 价目表就绪后的下一轮：cache 命中路径必须让路（stamp 未变）。
+      applyLivePricing({
+        source: 'live',
+        rate: 7,
+        extraModels: [{ key: 'step-5-preview', name: 'Step 5 Preview', provider: 'Step', price: { input: 2, cacheHit: 0.2, output: 8 } }],
+      })
+      vi.advanceTimersByTime(AGGREGATE_TTL_MS + 1000)
+      const after = await aggregator.aggregate()
+      // 关键断言：日志被重新全量读取（不是 cache 零读取吞掉），cost 折出。
+      expect(reads).toBe(2)
+      expect(after.byModel['step-5-preview']?.cost ?? 0).toBeGreaterThan(0)
+      expect(after.unpricedModels ?? []).not.toContain('step-5-preview')
+    } finally {
+      vi.useRealTimers()
+      if (dir !== undefined) await rm(dir, { recursive: true, force: true })
     }
   })
 

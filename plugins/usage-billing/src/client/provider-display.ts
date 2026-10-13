@@ -106,7 +106,9 @@ export function channelDisplayName(siteKey: string, lang: ProviderLang = 'zh'): 
     // 而非「直连 · deepseek-official」这类裸路由名。
     if (/^deepseek(?:-[a-z0-9-]+)?$/i.test(provider)) return lang === 'en' ? 'DeepSeek Official' : 'DeepSeek 官方'
     // 已知的第三方插件注册 adapter 通道（workbuddy 等）显示品牌名，而非裸路由 id。
-    const known = DIRECT_ROUTE_NAMES[provider]
+    // 大小写归一化与聚合层 isKnownAdapterProvider 同姿态：归位 direct 的调用必须
+    // 同时拿到品牌名，不能出现「已计价但显示裸路由名」的两侧不一致。
+    const known = DIRECT_ROUTE_NAMES[provider.trim().toLowerCase()]
     if (known !== undefined) return `${lang === 'en' ? 'Direct' : '直连'} · ${known}`
     return `${lang === 'en' ? 'Direct' : '直连'} · ${provider}`
   }
