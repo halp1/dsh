@@ -3453,21 +3453,28 @@ function createUsageAggregator(persistence, options = {}) {
 	let ledgerAppliedMigrations;
 	let lastDoc;
 	let lastAt = 0;
+	const deserializedFoldOf = (() => {
+		const memo = /* @__PURE__ */ new WeakMap();
+		return (serialized) => {
+			const hit = memo.get(serialized);
+			if (hit !== void 0) return hit;
+			const fold = deserializeFold(serialized);
+			memo.set(serialized, fold);
+			return fold;
+		};
+	})();
 	/** 每次聚合取最新的 provider 路由视图（中转站零配置发现）；缺省按空处理（全部未知路由）。
 	*  叠加已注册 adapter 的通道（issue #91）：宿主 llm 注册表里的 provider 合成无 baseURL
 	*  的空路由视图——siteRefOf 的路由命中分支正是「无 origin 直连」的语义，归位
 	*  `direct:<provider>` 按官方目录价计费；llm-pi-ai 已有配置的路由优先（其 origin 可还原）。 */
-	const routesOf = () => {
+	const routesOf = (registered) => {
 		const routes = { ...options.resolveRoutes?.() };
-		const registered = options.resolveRegisteredProviders?.();
-		if (registered !== void 0) {
-			for (const provider of registered) if (routes[provider] === void 0) routes[provider] = {};
-		}
+		for (const provider of registered) if (routes[provider] === void 0) routes[provider] = {};
 		return routes;
 	};
 	const searchEstimate = options.searchCallEstimateCny ?? .02;
-	const foldFingerprintOf = () => configFingerprint(subscriptionMatcher, officialProviderIds, routeAliases, searchEstimate, options.modelKeyAliases, options.resolveRegisteredProviders?.() ?? /* @__PURE__ */ new Set());
-	let foldFingerprint = foldFingerprintOf();
+	const foldFingerprintOf = (registered) => configFingerprint(subscriptionMatcher, officialProviderIds, routeAliases, searchEstimate, options.modelKeyAliases, registered);
+	let foldFingerprint = foldFingerprintOf(/* @__PURE__ */ new Set());
 	const FOLD_CHUNK_EVENTS = 8e3;
 	/** 惰性失效（价目表时序）：账本/缓存行若以「当时不可计价」的模型落盘，
 	*  而价目表现在能计价了，该行必须重折——否则显示层按实时价算出的
@@ -3549,7 +3556,9 @@ function createUsageAggregator(persistence, options = {}) {
 	const aggregateOnce = async () => {
 		const now = Date.now();
 		await ensureLedgerLoaded();
-		foldFingerprint = foldFingerprintOf();
+		const registeredProviders = options.resolveRegisteredProviders?.() ?? /* @__PURE__ */ new Set();
+		foldFingerprint = foldFingerprintOf(registeredProviders);
+		const roundRoutes = routesOf(registeredProviders);
 		let metas;
 		try {
 			metas = await persistence.list();
@@ -3582,7 +3591,7 @@ function createUsageAggregator(persistence, options = {}) {
 				const cwd = meta.cwd;
 				const ledgerRow = ledger.get(id);
 				if (ledgerRow !== void 0 && ledgerRow.stamp !== void 0 && stamp !== null && ledgerRow.stamp === stamp && (ledgerRow.foldVersion ?? 1) === 22 && ledgerRow.fingerprint === foldFingerprint && !foldNeedsReprice(ledgerRow.fold)) {
-					const fold = deserializeFold(ledgerRow.fold);
+					const fold = deserializedFoldOf(ledgerRow.fold);
 					folds.push({
 						id,
 						...cwd === void 0 ? {} : { cwd },
@@ -3617,7 +3626,7 @@ function createUsageAggregator(persistence, options = {}) {
 						cache.delete(id);
 						continue;
 					}
-					foldInto(previous.fold, previous.machine, events, subscriptionMatcher, officialProviderIds, routesOf(), searchEstimate, inheritedEventCount, routeAliases);
+					foldInto(previous.fold, previous.machine, events, subscriptionMatcher, officialProviderIds, roundRoutes, searchEstimate, inheritedEventCount, routeAliases);
 					refreshTurns(previous.fold, previous.machine);
 					previous.lastSeq = events[events.length - 1]?.seq ?? previous.lastSeq;
 					previous.stamp = stamp;
@@ -3638,7 +3647,7 @@ function createUsageAggregator(persistence, options = {}) {
 				const fold = freshFold();
 				const machine = freshMachine();
 				for (let start = 0; start < events.length; start += FOLD_CHUNK_EVENTS) {
-					foldInto(fold, machine, events.slice(start, start + FOLD_CHUNK_EVENTS), subscriptionMatcher, officialProviderIds, routesOf(), searchEstimate, inheritedEventCount, routeAliases);
+					foldInto(fold, machine, events.slice(start, start + FOLD_CHUNK_EVENTS), subscriptionMatcher, officialProviderIds, roundRoutes, searchEstimate, inheritedEventCount, routeAliases);
 					if (start + FOLD_CHUNK_EVENTS < events.length) await new Promise((resolve) => {
 						setImmediate(resolve);
 					});
@@ -3687,7 +3696,7 @@ function createUsageAggregator(persistence, options = {}) {
 						id: entry.id,
 						...entry.cwd === void 0 ? {} : { cwd: entry.cwd },
 						...stale ? { staleLedger: true } : {},
-						fold: deserializeFold(entry.fold)
+						fold: deserializedFoldOf(entry.fold)
 					});
 					included.add(entry.id);
 					if (stale) staleLedgerSessions += 1;
@@ -3908,7 +3917,7 @@ function createUsageAggregator(persistence, options = {}) {
 			const row = ledger.get(sessionId);
 			if (row === void 0) return void 0;
 			try {
-				const fold = deserializeFold(row.fold);
+				const fold = deserializedFoldOf(row.fold);
 				return {
 					calls: fold.total.calls,
 					cost: fold.total.cost,

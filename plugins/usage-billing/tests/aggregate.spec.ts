@@ -2155,6 +2155,24 @@ describe('registered adapter providers home to direct (issue #91)', () => {
     }
   })
 
+  it('queries the registry at most once per aggregation round', async () => {
+    // 性能回归：注册表查询（ctx.get('llm') 服务调用 + 集合合并）在每个分片折叠
+    // 调用点执行会放大成风暴；聚合器须按轮次缓存路由视图与注册集合（issue #91）。
+    let registryReads = 0
+    const persistence = fakePersistence({
+      cc: adapterLog(0, 'commandcode', 'deepseek/deepseek-v4.1-flash'),
+    })
+    const aggregator = createUsageAggregator(persistence, {
+      resolveRegisteredProviders: () => {
+        registryReads += 1
+        return new Set(['commandcode'])
+      },
+    })
+
+    await aggregator.aggregate()
+    expect(registryReads).toBe(1)
+  })
+
   it('refolds rows when user model aliases change (fingerprint includes aliases)', async () => {
     // 别名改动（issue #91 P2）：旧行按旧 key「zz-custom」未收录记 0；指纹含别名后
     // 新聚合器强制重折，用量按新目录键 flash 计价，byModel 不再新旧 key 并存。

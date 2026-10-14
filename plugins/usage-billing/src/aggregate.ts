@@ -1810,17 +1810,28 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
   let ledgerAppliedMigrations: string[] | undefined
   let lastDoc: UsageStatsDocument | undefined
   let lastAt = 0
+  // 账本行反序列化按行内容身份记忆（自审计 2026-10-14）：快路径/兜底段每轮都对
+  // 全部历史行跑 deserializeFold，行内容不变时结果相同——历史行多（上千个存档）
+  // 时把每轮 O(行数) 的重建降为 0。recordLedger 重写行时 fold 引用换代，
+  // WeakMap 旧键随旧对象回收，不留陈旧折叠。
+  const deserializedFoldOf = (() => {
+    const memo = new WeakMap<SerializedSessionFold, SessionFold>()
+    return (serialized: SerializedSessionFold): SessionFold => {
+      const hit = memo.get(serialized)
+      if (hit !== undefined) return hit
+      const fold = deserializeFold(serialized)
+      memo.set(serialized, fold)
+      return fold
+    }
+  })()
   /** 每次聚合取最新的 provider 路由视图（中转站零配置发现）；缺省按空处理（全部未知路由）。
    *  叠加已注册 adapter 的通道（issue #91）：宿主 llm 注册表里的 provider 合成无 baseURL
    *  的空路由视图——siteRefOf 的路由命中分支正是「无 origin 直连」的语义，归位
    *  `direct:<provider>` 按官方目录价计费；llm-pi-ai 已有配置的路由优先（其 origin 可还原）。 */
-  const routesOf = (): Readonly<Record<string, ProviderRouteView>> => {
+  const routesOf = (registered: ReadonlySet<string>): Readonly<Record<string, ProviderRouteView>> => {
     const routes: Record<string, ProviderRouteView> = { ...options.resolveRoutes?.() }
-    const registered = options.resolveRegisteredProviders?.()
-    if (registered !== undefined) {
-      for (const provider of registered) {
-        if (routes[provider] === undefined) routes[provider] = {}
-      }
+    for (const provider of registered) {
+      if (routes[provider] === undefined) routes[provider] = {}
     }
     return routes
   }
@@ -1830,8 +1841,9 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
   // 与已注册 adapter 集合同属折叠语义（issue #91）：改动后历史行按新口径重算。
   // 已注册集合随 provider 插件装卸变化，按聚合轮次求值——宿主 llm/adapters-updated
   // 之后的第一轮聚合即按新通道口径重折，无需订阅事件。
-  const foldFingerprintOf = (): string => configFingerprint(subscriptionMatcher, officialProviderIds, routeAliases, searchEstimate, options.modelKeyAliases, options.resolveRegisteredProviders?.() ?? new Set())
-  let foldFingerprint = foldFingerprintOf()
+  const foldFingerprintOf = (registered: ReadonlySet<string>): string => configFingerprint(subscriptionMatcher, officialProviderIds, routeAliases, searchEstimate, options.modelKeyAliases, registered)
+  // 初值不带注册表（每轮聚合开始前刷新）：创建时刻不为指纹多读一次服务。
+  let foldFingerprint = foldFingerprintOf(new Set())
   // 全量重折的分片大小：每片折叠后让出事件循环，超大会话不再连续阻塞宿主 RPC（issue #30）。
   const FOLD_CHUNK_EVENTS = 8000
 
@@ -1939,8 +1951,12 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
       const now = Date.now()
 
       await ensureLedgerLoaded()
-      // 每轮刷新指纹：已注册 adapter 集合变化（provider 插件装卸）即触发历史行重折。
-      foldFingerprint = foldFingerprintOf()
+      // 每轮刷新指纹与路由视图：已注册 adapter 集合变化（provider 插件装卸）即触发
+      // 历史行重折。注册表查询每轮只跑一次——此前 routesOf() 在每个分片折叠调用点
+      // 都走一次服务调用 + 集合合并，大会话分片会放大成调用风暴（issue #91 回退）。
+      const registeredProviders = options.resolveRegisteredProviders?.() ?? new Set<string>()
+      foldFingerprint = foldFingerprintOf(registeredProviders)
+      const roundRoutes = routesOf(registeredProviders)
 
       let metas: readonly SessionHeader[]
       try {
@@ -1996,7 +2012,7 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
             && ledgerRow.stamp === stamp && (ledgerRow.foldVersion ?? 1) === FOLD_VERSION
             && ledgerRow.fingerprint === foldFingerprint
             && !foldNeedsReprice(ledgerRow.fold)) {
-            const fold = deserializeFold(ledgerRow.fold)
+            const fold = deserializedFoldOf(ledgerRow.fold)
             folds.push({ id, ...(cwd === undefined ? {} : { cwd }), fold })
             included.add(id)
             continue
@@ -2045,7 +2061,7 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
               cache.delete(id)
               continue
             }
-            foldInto(previous.fold, previous.machine, events, subscriptionMatcher, officialProviderIds, routesOf(), searchEstimate, inheritedEventCount, routeAliases)
+            foldInto(previous.fold, previous.machine, events, subscriptionMatcher, officialProviderIds, roundRoutes, searchEstimate, inheritedEventCount, routeAliases)
             refreshTurns(previous.fold, previous.machine)
             const last = events[events.length - 1]
             previous.lastSeq = last?.seq ?? previous.lastSeq
@@ -2071,7 +2087,7 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
           const fold = freshFold()
           const machine = freshMachine()
           for (let start = 0; start < events.length; start += FOLD_CHUNK_EVENTS) {
-            foldInto(fold, machine, events.slice(start, start + FOLD_CHUNK_EVENTS), subscriptionMatcher, officialProviderIds, routesOf(), searchEstimate, inheritedEventCount, routeAliases)
+            foldInto(fold, machine, events.slice(start, start + FOLD_CHUNK_EVENTS), subscriptionMatcher, officialProviderIds, roundRoutes, searchEstimate, inheritedEventCount, routeAliases)
             if (start + FOLD_CHUNK_EVENTS < events.length) await new Promise<void>(resolve => { setImmediate(resolve) })
           }
           refreshTurns(fold, machine)
@@ -2119,7 +2135,7 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
               id: entry.id,
               ...(entry.cwd === undefined ? {} : { cwd: entry.cwd }),
               ...(stale ? { staleLedger: true as const } : {}),
-              fold: deserializeFold(entry.fold),
+              fold: deserializedFoldOf(entry.fold),
             })
             included.add(entry.id)
             if (stale) staleLedgerSessions += 1
@@ -2373,7 +2389,7 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
       const row = ledger.get(sessionId)
       if (row === undefined) return undefined
       try {
-        const fold = deserializeFold(row.fold)
+        const fold = deserializedFoldOf(row.fold)
         return { calls: fold.total.calls, cost: fold.total.cost, input: fold.total.input, output: fold.total.output }
       } catch {
         // 账本行损坏（deserialize 抛错）：视为无数据，调用方走 doc 兜底。
