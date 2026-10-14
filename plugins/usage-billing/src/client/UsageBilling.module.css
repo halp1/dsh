@@ -4067,6 +4067,177 @@ span.bandDot { cursor: default; }
 
 /* ── 设置 Tab：set-card（头部 标题+说明+开关 → 控制列） ───────────── */
 
+/* v1.5 设置页布局：左 200px 锚点 + 右侧 pane。容器查询 ≤540px 退化顶栏 nav。 */
+.settingsLayout {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 18px;
+  container-type: inline-size;
+  container-name: billing-settings;
+}
+
+.settingsNav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-right: 14px;
+  border-right: 1px solid var(--ds-border);
+  align-self: start;
+  position: sticky;
+  top: 0;
+  max-height: min(720px, calc(88vh - 80px));
+  overflow-y: auto;
+}
+
+.settingsNavItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ds-t-2);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: background-color var(--ds-t-fast), color var(--ds-t-fast);
+}
+
+.settingsNavItem:hover {
+  background: var(--dsb-3);
+  color: var(--ds-t-1);
+}
+
+.settingsNavItem:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1.5px var(--ds-border-strong);
+}
+
+.settingsNavItemActive {
+  background: color-mix(in srgb, var(--ds-blue) 14%, transparent);
+  color: var(--ds-t-1);
+  font-weight: 600;
+}
+
+.settingsNavIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  color: var(--ds-t-3);
+}
+
+.settingsNavItemActive .settingsNavIcon {
+  color: var(--ds-blue);
+}
+
+.settingsNavIcon svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* violet 第二强调色用于「高级」锚点（区别于预算蓝 / 显示 violet） */
+.settingsNavItemAdvanced .settingsNavIcon {
+  color: var(--ds-violet);
+}
+
+.settingsPane {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+@container billing-settings (max-width: 540px) {
+  .settingsLayout { grid-template-columns: 1fr; }
+  .settingsNav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    border-right: none;
+    border-bottom: 1px solid var(--ds-border);
+    padding-right: 0;
+    padding-bottom: 10px;
+    position: static;
+    max-height: none;
+  }
+}
+
+/* v1.5 密度/动效开关行：复用 setCardHead 视觉语言 */
+.densityRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--ds-border);
+  border-radius: var(--ds-r-1);
+  background: var(--dsb-2);
+}
+
+.densityRow + .densityRow {
+  margin-top: 8px;
+}
+
+.densityLeft {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.densityLeft strong {
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.densityLeft span {
+  font-size: 11px;
+  color: var(--ds-t-3);
+}
+
+.densityButtons {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px;
+  border: 1px solid var(--ds-border);
+  border-radius: 8px;
+  background: var(--dsb-3);
+}
+
+.densityButton {
+  border: 0;
+  border-radius: 6px;
+  padding: 4px 10px;
+  background: transparent;
+  color: var(--ds-t-2);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background-color var(--ds-t-fast), color var(--ds-t-fast);
+}
+
+.densityButton:hover {
+  color: var(--ds-t-1);
+}
+
+.densityButtonActive {
+  background: var(--dsb-2);
+  color: var(--ds-t-1);
+  font-weight: 600;
+  box-shadow: 0 0 0 1px var(--ds-border-strong);
+}
+
+/* violet 用在「舒适」档——与「默认」蓝、「紧凑」中性的区别 */
+.densityButtonComfortable.densityButtonActive {
+  background: var(--ds-violet-bg);
+  color: var(--ds-violet);
+  box-shadow: 0 0 0 1px var(--ds-violet-strong);
+}
+
 .setCard {
   display: flex;
   flex-direction: column;

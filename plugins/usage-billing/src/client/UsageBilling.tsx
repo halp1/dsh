@@ -50,6 +50,14 @@ import {
   saveLiveCostBarPrefs,
   saveSiteListPrefs,
   saveUserPrices,
+  loadDensity,
+  saveDensity,
+  loadMotion,
+  saveMotion,
+  DENSITY_PREF_EVENT,
+  MOTION_PREF_EVENT,
+  type DensityPref,
+  type MotionPref,
   type SiteListPrefs,
   type UserPriceMap,
 } from './usage-billing-settings.ts'
@@ -2073,6 +2081,54 @@ function BillingDashboard({
   // 年（GitHub 风格年度贡献图，含月份与周几标注）；指标：费用 / Token 双口径。
   const [heatmapRange, setHeatmapRange] = useState<'month' | 'half' | 'year'>('month')
   const [heatmapMetric, setHeatmapMetric] = useState<'cost' | 'tokens'>('cost')
+  /* v1.5 密度模式 / 动效强度：写 localStorage 即时同步 CustomEvent，
+     触发 documentElement.dataset.density/motion 重写 CSS 变量。 */
+  const [density, setDensityState] = useState<DensityPref>(loadDensity)
+  const [motion, setMotionState] = useState<MotionPref>(loadMotion)
+  /* v1.5 设置页当前活动组（左侧锚点高亮跟随）。无 scroll-spy——alpha.1
+     只在点击 nav 时切换；后续 v1.5.1 用 IntersectionObserver。 */
+  const [activeSettingsGroup, setActiveSettingsGroup] = useState<string>('budget')
+  const scrollToSettingsGroup = useCallback((id: string) => {
+    setActiveSettingsGroup(id)
+    /* dashboardBody 是滚动容器；用 querySelector 找锚点并滚动入视。 */
+    if (typeof document === 'undefined') return
+    const target = document.getElementById(`settings-${id}`)
+    if (target !== null) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+  }, [])
+  const setDensity = useCallback((d: DensityPref) => {
+    setDensityState(d)
+    saveDensity(d)
+  }, [])
+  const setMotion = useCallback((m: MotionPref) => {
+    setMotionState(m)
+    saveMotion(m)
+  }, [])
+  /* 把偏好应用到 documentElement——CSS 选择器 [data-density]/[data-motion] 派生 */
+  useEffect(() => {
+    if (typeof document === 'undefined') return
+    document.documentElement.dataset.density = density
+    document.documentElement.dataset.motion = motion
+  }, [density, motion])
+  /* 监听其他 React 树（同文档）的偏好变更——多仪表盘实例一致。 */
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const onDensity = (event: Event): void => {
+      const detail = (event as CustomEvent<{ density: DensityPref }>).detail
+      if (detail?.density !== undefined) setDensityState(detail.density)
+    }
+    const onMotion = (event: Event): void => {
+      const detail = (event as CustomEvent<{ motion: MotionPref }>).detail
+      if (detail?.motion !== undefined) setMotionState(detail.motion)
+    }
+    window.addEventListener(DENSITY_PREF_EVENT, onDensity)
+    window.addEventListener(MOTION_PREF_EVENT, onMotion)
+    return () => {
+      window.removeEventListener(DENSITY_PREF_EVENT, onDensity)
+      window.removeEventListener(MOTION_PREF_EVENT, onMotion)
+    }
+  }, [])
   // KPI 全局统计范围（issue #47 反馈）：控制概览 KPI 七卡（含平均成本）的统计口径，
   // 默认累计；用户选择持久化到 localStorage，下次打开保持上次范围。
   const [kpiRange, setKpiRange] = useState<AvgCostRange>(loadKpiRange)
@@ -3108,8 +3164,87 @@ function BillingDashboard({
 
           {tab === 'settings' && (
             <div className={css.tabPanel} data-testid="billing-tab-panel-settings">
+              {/* v1.5 设置页布局：左侧 180px 锚点 + 右侧分组 pane。5 组分类——预算 / 提醒 /
+                  显示 / 高级 / 关于。每组对应原 section（id 兼容）。锚点导航仅滚动到
+                  目标（无 scroll-spy：alpha.1 先做基础可达性，scroll-spy 留 v1.5.1）。 */}
+              <div className={css.settingsLayout}>
+                <aside className={css.settingsNav} data-testid="billing-settings-nav" role="navigation" aria-label="settings">
+                  {[
+                    { id: 'budget', icon: '¥', label: t('settingsNavBudget') },
+                    { id: 'alert', icon: '🔔', label: t('settingsNavAlert') },
+                    { id: 'display', icon: '◐', label: t('settingsNavDisplay') },
+                    { id: 'advanced', icon: '✱', label: t('settingsNavAdvanced'), advanced: true },
+                    { id: 'about', icon: 'ⓘ', label: t('settingsNavAbout') },
+                  ].map(item => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      className={clsx(
+                        css.settingsNavItem,
+                        activeSettingsGroup === item.id && css.settingsNavItemActive,
+                        item.advanced && css.settingsNavItemAdvanced,
+                      )}
+                      data-testid={`billing-settings-nav-${item.id}`}
+                      onClick={() => { scrollToSettingsGroup(item.id) }}
+                    >
+                      <span className={css.settingsNavIcon} aria-hidden="true">{item.icon}</span>
+                      {item.label}
+                    </button>
+                  ))}
+                </aside>
+                <div className={css.settingsPane}>
+                  {/* v1.5 新增：密度模式与动效强度开关（设置 - 显示分组最前） */}
+                  <div className={clsx(css.setCard, css.densityCard)} data-testid="billing-density-motion-card">
+                    <div className={css.setCardHead}>
+                      <div className={css.setCardMeta}>
+                        <h3 className={css.setCardTitle}>{t('settingsSectionDisplay')}</h3>
+                      </div>
+                    </div>
+                    <div className={css.densityRow}>
+                      <div className={css.densityLeft}>
+                        <strong>{t('densityLabel')}</strong>
+                        <span>{t('densityHint')}</span>
+                      </div>
+                      <div className={css.densityButtons} data-testid="billing-density-buttons">
+                        {(['compact', 'default', 'comfortable'] as const).map(d => (
+                          <button
+                            key={d}
+                            type="button"
+                            className={clsx(
+                              css.densityButton,
+                              density === d && css.densityButtonActive,
+                              d === 'comfortable' && css.densityButtonComfortable,
+                            )}
+                            data-testid={`billing-density-${d}`}
+                            onClick={() => { setDensity(d) }}
+                          >
+                            {d === 'compact' ? t('densityCompact') : d === 'default' ? t('densityDefault') : t('densityComfortable')}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className={css.densityRow}>
+                      <div className={css.densityLeft}>
+                        <strong>{t('motionLabel')}</strong>
+                        <span>{t('motionHint')}</span>
+                      </div>
+                      <div className={css.densityButtons} data-testid="billing-motion-buttons">
+                        {(['off', 'subtle', 'rich'] as const).map(m => (
+                          <button
+                            key={m}
+                            type="button"
+                            className={clsx(css.densityButton, motion === m && css.densityButtonActive)}
+                            data-testid={`billing-motion-${m}`}
+                            onClick={() => { setMotion(m) }}
+                          >
+                            {m === 'off' ? t('motionOff') : m === 'subtle' ? t('motionSubtle') : t('motionRich')}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
               {/* 1. 月度预算：set-card——头部(标题+说明+开关) + 控制列(金额/进度/说明)。 */}
-              <section className={css.setCard} data-testid="billing-budget">
+              <section className={css.setCard} data-testid="billing-budget" id="settings-budget">
                 <div className={css.setCardHead}>
                   <div className={css.setCardMeta}>
                     <h3 className={css.setCardTitle}>{t('budget')}</h3>
@@ -3180,7 +3315,7 @@ function BillingDashboard({
               </section>
 
               {/* 2. 峰谷切换提醒：set-card——头部 + 控制列(提前量/位置/模式/系统通知/预览)。 */}
-              <section className={css.setCard} data-testid="billing-peak-alert-settings">
+              <section className={css.setCard} data-testid="billing-peak-alert-settings" id="settings-alert">
                 <div className={css.setCardHead}>
                   <div className={css.setCardMeta}>
                     <h3 className={css.setCardTitle}>{t('peakAlert')}</h3>
@@ -3275,7 +3410,7 @@ function BillingDashboard({
 
               {/* 3. 功能开关：三个纯显隐/工具开关聚合为一行三列（usage_stats 工具 /
                   平价消耗胶囊 / 中转站列表），缩短设置页纵向长度。 */}
-              <section className={css.setCard} data-testid="billing-toggle-setting">
+              <section className={css.setCard} data-testid="billing-toggle-setting" id="settings-display">
                 <div className={css.setGrid3}>
                   <div className={css.setCell} data-testid="billing-usage-stats-tool-setting">
                     <div className={css.setCardHead}>
@@ -3345,7 +3480,7 @@ function BillingDashboard({
 
               {/* 4. 展示内容：模型用量悬浮窗（模式 / 订阅目标）与计费卡主指标聚合为
                   一行两列；订阅目标多选随模式展开在本 cell 内，不跨列。 */}
-              <section className={css.setCard} data-testid="billing-display-setting">
+              <section className={css.setCard} data-testid="billing-display-setting" id="settings-display-extra">
                 <div className={css.setGrid2}>
                   <div className={css.setCell} data-testid="billing-float-setting">
                     <div className={css.setCardHead}>
@@ -3464,10 +3599,12 @@ function BillingDashboard({
               </section>
 
               {/* 5. 自定义单价：set-card——已存价列表 + 新增行；显示层重估，口径差异见说明。 */}
-              <UserPriceCard userPrices={userPrices} onUserPrices={onUserPrices} t={t} />
+              <div id="settings-advanced"><UserPriceCard userPrices={userPrices} onUserPrices={onUserPrices} t={t} /></div>
 
               {/* 6. 插件信息卡：作者 / 仓库 / 版本 / 许可证（设置 Tab 常驻）。 */}
-              <PluginInfoCard t={t} version={stats.pluginVersion} />
+              <div id="settings-about"><PluginInfoCard t={t} version={stats.pluginVersion} /></div>
+                </div>{/* settingsPane */}
+              </div>{/* settingsLayout */}
             </div>
           )}
 

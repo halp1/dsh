@@ -269,6 +269,12 @@ export type UsageBillingKey =
   | 'motionOff'
   | 'motionSubtle'
   | 'motionRich'
+  | 'settingsNavBudget'
+  | 'settingsNavAlert'
+  | 'settingsNavDisplay'
+  | 'settingsNavAdvanced'
+  | 'settingsNavAbout'
+  | 'settingsSectionDisplay'
   | 'tokenDaily'
   | 'tokenByModel'
   | 'tokenMiss'
@@ -592,6 +598,12 @@ export const zh: Record<UsageBillingKey, string> = {
   'motionOff': '关闭',
   'motionSubtle': '克制',
   'motionRich': '丰富',
+  'settingsNavBudget': '预算',
+  'settingsNavAlert': '提醒',
+  'settingsNavDisplay': '显示',
+  'settingsNavAdvanced': '高级',
+  'settingsNavAbout': '关于',
+  'settingsSectionDisplay': '显示偏好',
   'tokenViewStructure': '按结构',
   'tokenViewModel': '按模型',
   'tokenHitShort': '命中',
@@ -907,6 +919,12 @@ export const en: Record<UsageBillingKey, string> = {
   'motionOff': 'Off',
   'motionSubtle': 'Subtle',
   'motionRich': 'Rich',
+  'settingsNavBudget': 'Budget',
+  'settingsNavAlert': 'Alerts',
+  'settingsNavDisplay': 'Display',
+  'settingsNavAdvanced': 'Advanced',
+  'settingsNavAbout': 'About',
+  'settingsSectionDisplay': 'Display preferences',
   'tokenHit': 'Input (cache hit)',
   'tokenOutput': 'Output',
   'tokenViewStructure': 'Structure',
