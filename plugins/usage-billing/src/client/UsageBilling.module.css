@@ -630,22 +630,13 @@ body {
 }
 
 .dashboard {
-  /* v1.5：grid 两列布局，左栏 200px Tab 数据栏 + 右栏流体 body。
-     头部/底部跨列。窄 modal 下（容器查询 ≤600px）退化为单列堆叠。 */
-  display: grid;
-  grid-template-columns: 200px 1fr;
-  grid-template-rows: auto 1fr auto;
-  gap: 12px;
-  padding: 12px;
+  display: flex;
+  flex-direction: column;
   width: 100%;
   max-height: min(760px, 88vh);
-  /* 启用容器查询，让 tabRail / dashboardBody 在窄 modal 下自主降级 */
-  container-type: inline-size;
-  container-name: billing-dashboard;
 }
 
 .dashboardHead {
-  grid-column: 1 / -1;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -710,14 +701,10 @@ body {
   gap: 14px;
   padding: 16px 24px 24px;
   overflow-y: auto;
-  grid-column: 2;
-  grid-row: 2;
-  min-width: 0;
 }
 
 /* 底部公共细条（ub-footer）：轮询说明 + 版本/许可证，所有 Tab 共享。 */
 .modalFooter {
-  grid-column: 1 / -1;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -728,21 +715,6 @@ body {
   font-size: 11px;
   line-height: 16px;
   color: var(--ds-t-3);
-}
-
-/* 窄 modal（容器查询 ≤600px）退化：左栏 Tab rail 隐藏，单列堆叠。
-   v1.4.x 风格的顶部分段控件通过 .tabBar 在 JSX 里兜底渲染（alpha.1
-   先保留 v1.4.x 的 .tabNav 规则不删，由 tabRail/tabBar 类切换）。 */
-@container billing-dashboard (max-width: 600px) {
-  .dashboard {
-    grid-template-columns: 1fr;
-  }
-  .tabRail {
-    display: none;
-  }
-  .dashboardBody {
-    grid-column: 1;
-  }
 }
 
 /* ── Tab 导航（v1.5：分段控件 → 左侧 200px 数据栏） ────────────── */
@@ -764,6 +736,65 @@ body {
   max-height: min(720px, calc(88vh - 80px));
   overflow-y: auto;
 }
+
+/* ── Tab 导航（v1.5 alpha.1.1）：200px 左栏布局挤压右栏内容、退回顶部分段。
+   保留原 200px 左栏（.tabRail / .tabRailItem 等）样式作为 v1.6 desktop 全屏
+   modal 形态的储备；当前 modal 宽度下用顶部分段控件（v1.4.x 风格）。 */
+
+/* 顶部分段控件：内嵌轨道（--dsb 更深一档），激活段以 --dsb-3 实底 + 1px 内描边浮起。 */
+.tabNav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 14px 24px 0;
+  padding: 4px;
+  border: 1px solid var(--ds-border);
+  border-radius: var(--ds-r-1);
+  background: var(--dsb);
+}
+
+.tabButton {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px 6px 12px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ds-t-3);
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color var(--ds-t-fast), color var(--ds-t-fast), box-shadow var(--ds-t-fast);
+}
+
+.tabButton:hover {
+  color: var(--ds-t-2);
+}
+
+.tabButton:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px var(--ds-border-strong);
+  color: var(--ds-t-2);
+}
+
+/* 激活段：--dsb-3 实底 + 1px 内描边 */
+.tabButtonActive,
+.tabButtonActive:hover,
+.tabButtonActive:focus-visible {
+  background: var(--dsb-3);
+  color: var(--ds-t-1);
+  font-weight: 600;
+  box-shadow: 0 0 0 1px var(--ds-border-strong) inset;
+}
+
+/* 顶部分段里的图标槽：12×12，比左栏小一档 */
+.tabButton > .tabRailIcon { width: 12px; height: 12px; }
+.tabButton > .tabRailIcon svg { width: 12px; height: 12px; }
+
+/* 顶部分段里的标签——与图标 baseline 对齐 */
+.tabNavLabel { line-height: 16px; }
 
 .tabRailItem {
   position: relative;

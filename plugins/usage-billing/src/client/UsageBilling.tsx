@@ -2808,11 +2808,11 @@ function BillingDashboard({
           </div>
         </div>
 
-        {/* Tab 导航（v1.5）：从顶部分段控件改成 200px 左侧数据栏。
-           图标 + 标签 + 数据徽章三段式，激活态 2px 蓝色左描边。
-           data-testid 由 billing-tab-nav 改为 billing-tab-rail（破坏性更新，
-           测试已同步）。 */}
-        <aside className={css.tabRail} data-testid="billing-tab-rail" role="tablist" aria-label={t('title')}>
+        {/* Tab 导航（v1.5 alpha.1.1 调整）：200px 左栏布局挤压右栏内容、退回顶部分段
+           控件 + 徽章数据信号。data-testid 保留为 billing-tab-nav（兼容测试）。
+           原 200px 左栏设计（.tabRail）保留在 CSS 里，待 v1.6 调研 modal 宽 ≥900
+           后再启用（对应 desktop 全屏 modal 形态）。 */}
+        <nav className={css.tabNav} data-testid="billing-tab-nav" role="tablist" aria-label={t('title')}>
           {DASHBOARD_TABS.map(item => {
             const badge = tabBadgeFor(item.id, dashboardBadgeState)
             return (
@@ -2822,14 +2822,12 @@ function BillingDashboard({
                 role="tab"
                 aria-selected={tab === item.id}
                 aria-controls={`billing-tab-panel-${item.id}`}
-                className={clsx(css.tabRailItem, tab === item.id && css.tabRailItemActive)}
+                className={clsx(css.tabButton, tab === item.id && css.tabButtonActive)}
                 data-testid={`billing-tab-${item.id}`}
                 onClick={() => { setTab(item.id) }}
               >
-                <span className={css.tabRailIcon} aria-hidden="true">
-                  {TAB_ICONS[item.id]}
-                </span>
-                <span className={css.tabRailLabel}>{t(item.labelKey)}</span>
+                <span className={css.tabRailIcon} aria-hidden="true">{TAB_ICONS[item.id]}</span>
+                <span className={css.tabNavLabel}>{t(item.labelKey)}</span>
                 {badge && (
                   <span
                     className={clsx(
@@ -2846,7 +2844,7 @@ function BillingDashboard({
               </button>
             )
           })}
-        </aside>
+        </nav>
 
         {/* Scrollable body: 按 Tab 条件渲染分区。 */}
         <div className={css.dashboardBody}>
