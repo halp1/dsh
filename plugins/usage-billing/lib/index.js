@@ -7238,10 +7238,17 @@ function apply(ctx, config = {}) {
 	const workspaceTitleResolver = buildWorkspaceTitleResolver(ctx);
 	applyBuiltinCatalog(BUILTIN_MODEL_CATALOG, BUILTIN_MODEL_KEY_ALIASES);
 	applyUserModelAliases(config.modelKeyAliases);
+	let llmRegistryWarned = false;
 	const registeredProvidersOf = () => {
 		try {
-			return new Set(ctx.llm.listProviders().map((provider) => provider.id));
-		} catch {
+			const providers = (ctx.get?.("llm"))?.listProviders() ?? [];
+			llmRegistryWarned = false;
+			return new Set(providers.map((provider) => provider.id));
+		} catch (error) {
+			if (!llmRegistryWarned) {
+				llmRegistryWarned = true;
+				console.warn("[usage-billing] llm registry unavailable; plugin-registered adapter channels stay unknown (issue #91):", error);
+			}
 			return /* @__PURE__ */ new Set();
 		}
 	};

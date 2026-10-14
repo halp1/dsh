@@ -8,6 +8,11 @@
 
 > **版本序列说明**：自 v1.2.0 起预览线序列恒高于稳定线 1.1.x——消除此前 1.0.x < 1.1.x 的版本号倒挂（pnpm `minimumReleaseAge` 冷静期会把刚发布的 latest 跳过、回退到旧稳定线，issue #40 有实测案例）。安装建议钉具体版本号。
 
+### v1.4.32（2026-10-14）
+
+- 修复：**v1.4.31 的插件注册通道发现不生效**（issue #91 反馈，感谢 @shiinakaze）——cordis 服务代理要求服务名在插件 `inject` 里才能属性访问：`ctx.llm` 直接抛 "cannot get property llm without inject"，而异常被静默吞掉退化为空集，通道依旧落 unknown、费用 0，与 1.4.30 无异。现改走 `ctx.get('llm')`（cordis 提供的免 inject 服务读取，与 workspaceRegistry 同款写法）；失败 warn 一次（成功后复位），不再完全静默——这类「修复上线但不生效」必须可自查
+- 构建：lib/client.js 252,657 字节 ≤ 256 KiB（262,144 字节）单文件上限，余量 9,487 字节
+
 ### v1.4.31（2026-10-14）
 
 - 修复：**插件注册的 adapter 通道被判「未知路由」、费用恒 0**（issue #91，感谢 @shiinakaze 的完整定位报告）——CommandCode 等通道由独立插件经 `ctx.llm.registerAdapter` 注册、不经 llm-pi-ai 路由表（且 dsh-llm 注册是 all-or-nothing，补配进 llm-pi-ai 会 `DUPLICATE_ADAPTER` 启动失败），插件此前只认 llm-pi-ai 一个路由来源，这类通道全部落 unknown 记 0。现从宿主 llm 注册表（`ctx.llm.listProviders()`，软依赖，访问异常退化为空集）发现已注册通道，归位 `direct:<provider>` 按模型官方目录价计费；「未知路由」口径收窄为「宿主也不认识的通道」，#82 的记 0 姿态不变

@@ -756,11 +756,21 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
   applyUserModelAliases(config.modelKeyAliases)
   // 已注册 adapter 的 provider 集合（宿主 llm 注册表）：llm-pi-ai 之外的插件路由
   // （ctx.llm.registerAdapter，issue #91 的 commandcode）经此归位 direct 桶按官方价
-  // 计费。软依赖：运行时无 llm 服务（理论不会）或访问异常时退化为空集，unknown 口径不变。
+  // 计费。读取必须走 ctx.get（免 inject 声明；属性访问 ctx.llm 在服务未进 inject 时
+  // 直接抛错，issue #91 反馈）——软依赖：llm 服务缺失/异常时 warn 一次并退化为空集，
+  // unknown 口径不变；不能静默，否则「修复上线但不生效」无法自查。
+  let llmRegistryWarned = false
   const registeredProvidersOf = (): ReadonlySet<string> => {
     try {
-      return new Set(ctx.llm.listProviders().map(provider => provider.id))
-    } catch {
+      const llm = (ctx as { get?(name: string): unknown }).get?.('llm') as { listProviders(): ReadonlyArray<{ id: string }> } | undefined
+      const providers = llm?.listProviders() ?? []
+      llmRegistryWarned = false
+      return new Set(providers.map(provider => provider.id))
+    } catch (error) {
+      if (!llmRegistryWarned) {
+        llmRegistryWarned = true
+        console.warn('[usage-billing] llm registry unavailable; plugin-registered adapter channels stay unknown (issue #91):', error)
+      }
       return new Set()
     }
   }
