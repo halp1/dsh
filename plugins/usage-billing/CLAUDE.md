@@ -47,7 +47,7 @@
 
 - `main`：预览线开发（0.1.2 面），发布走 npm `latest` + `alpha` tag。
 - `compat/stable-dsh`：稳定线（0.1.1 面，从 v1.0.11 分叉），**已冻结于终版 v1.1.17**——仅供历史查阅与存量用户安装，不再接收变更，也不再跨线 cherry-pick。
-- main 构建：`./sync.sh`（含 256KiB Store 单文件体积门禁，>245KiB 警告）；compat 构建：`bash build.sh`（同门禁）。
+- main 构建：`./sync.sh`（含本仓自设体积防线：>256KiB 提示、>320KiB 强警告——**非上游硬约束**，DSH Store 只对图标文件设 256 KiB 上限，插件 JS bundle 无审查上限）；compat 构建：`bash build.sh`（同防线）。
 
 ## 本机测试环境（三套，端口/家目录全隔离）
 
@@ -78,5 +78,5 @@
 - `CLAUDE.md` 是 `AGENTS.md` 的**普通文件拷贝**（DSH Store 契约禁止仓库内符号链接，symlink 会导致收录暂缓）；改 `AGENTS.md` 后必须同步 `cp AGENTS.md CLAUDE.md` 再提交。
 
 - 计费口径：历史事件一律按**事件发生时刻**生效的官方规则计价，官方调价按变更节点追加规则（见 `src/client/pricing.ts` 的时间线与 README「计费规则时间线」），不得统一套现行规则重算历史。
-- 体积红线：`lib/client.js` 上限 256KiB（DSH Store 单文件契约），纯 CSS/文案/资产的增长也要过门禁评估。
+- 体积红线：**DSH Store 对插件 JS bundle 无审查上限**（仅对图标文件 icon.* 设 256 KiB 上限）。`lib/client.js` 的 256 KiB / 320 KiB 两道阈值是本仓 `sync.sh` 自设的成本防线——把新增功能的体积增长暴露在每次构建，避免被用户感知到加载变慢；非上游强制。纯 CSS/文案/资产的增量也要进评估视野。
 - issue 回复用中文；先诊断根因再动手，修复双线同步时在回复里写清两条线各自的版本。

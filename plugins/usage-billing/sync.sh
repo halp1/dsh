@@ -131,24 +131,24 @@ else
   npx tsc -b tsconfig.json
   npx tsdown
 
-  # ---- 客户端 bundle 体积门禁 ----
-  # DSH Store 自动审查对单运行文件有 256 KiB（262144 字节）硬上限，超限即
-  # fail-closed（更新暂缓，Store issue #255）。在构建出口当场量测：超过
-  # 245 KiB 警告（接近审查线，新功能需评估体积成本）、超过 256 KiB 直接
-  # 失败，把体积成本暴露在每次构建，而不是等 Store 八小时复检打回。
+  # ---- 客户端 bundle 体积检查 ----
+  # 注意：DSH Store 对插件 JS bundle 没有硬上限（plugins 通过 npm 加载，宿主
+  # 只对图标文件 icon.* 设 256 KiB 上限）。这里的两道阈值（256 KiB 软警告、
+  # 320 KiB 强警告）是本仓自设的体积成本防线——把新增功能的体积增长暴露在每次
+  # 构建，而不是等被用户/issue 反馈「安装越来越慢」再回头查；不是上游强制。
+  # 如需放宽，对应调整 HARD_BYTES / SOFT_BYTES 与下面 [警告] 文案。
   CLIENT_BYTES="$(node -p "require('fs').statSync('$SRC/lib/client.js').size")"
-  HARD_BYTES=$((256 * 1024))
-  WARN_BYTES=$((HARD_BYTES - 11 * 1024))
+  SOFT_BYTES=$((256 * 1024))   # 历史线——超过值得评审体积增长是否值得
+  HARD_BYTES=$((320 * 1024))   # 强警告——超过应立刻着手压缩
   if [ "$CLIENT_BYTES" -gt "$HARD_BYTES" ]; then
-    echo "[错误] lib/client.js = ${CLIENT_BYTES} 字节，超过 DSH Store 单文件上限 ${HARD_BYTES}（256 KiB）"
-    echo "       发布会被 Store 暂缓（fail-closed）；请先压缩 bundle 体积再构建"
-    exit 1
-  fi
-  if [ "$CLIENT_BYTES" -gt "$WARN_BYTES" ]; then
-    echo "[警告] lib/client.js = ${CLIENT_BYTES} 字节，距 Store 上限仅 $((HARD_BYTES - CLIENT_BYTES)) 字节"
-    echo "       新增功能请同步评估体积（文案/资产/依赖），避免下次发版撞线"
+    echo "[警告] lib/client.js = ${CLIENT_BYTES} 字节，超过强警告线 ${HARD_BYTES}（320 KiB）"
+    echo "       本线为本仓自设，非上游硬约束；但应尽快压缩体积（拆分 chunk、"
+    echo "       移除未用 CSS、压缩 color-mix 等），避免被用户感知到加载变慢"
+  elif [ "$CLIENT_BYTES" -gt "$SOFT_BYTES" ]; then
+    echo "[提示] lib/client.js = ${CLIENT_BYTES} 字节，超过历史软线 ${SOFT_BYTES}（256 KiB）"
+    echo "       新增功能请同步评估体积成本（文案 / CSS / 依赖），避免下次撞强线"
   else
-    echo "[检查] lib/client.js = ${CLIENT_BYTES} 字节（Store 上限 ${HARD_BYTES}）"
+    echo "[检查] lib/client.js = ${CLIENT_BYTES} 字节（软线 ${SOFT_BYTES}）"
   fi
 
   # harness-a1 副本从 0.1.2 宿主侧加载，需要 lib 产物；
