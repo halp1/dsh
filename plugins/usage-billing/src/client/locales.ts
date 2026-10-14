@@ -259,6 +259,16 @@ export type UsageBillingKey =
   | 'tokenReasoningShort'
   | 'tokenIo'
   | 'tokenPeak'
+  | 'densityLabel'
+  | 'densityHint'
+  | 'densityCompact'
+  | 'densityDefault'
+  | 'densityComfortable'
+  | 'motionLabel'
+  | 'motionHint'
+  | 'motionOff'
+  | 'motionSubtle'
+  | 'motionRich'
   | 'tokenDaily'
   | 'tokenByModel'
   | 'tokenMiss'
@@ -572,6 +582,16 @@ export const zh: Record<UsageBillingKey, string> = {
   'tokenMiss': '输入（缓存未命中）',
   'tokenHit': '输入（缓存命中）',
   'tokenOutput': '输出',
+  'densityLabel': '显示密度',
+  'densityHint': '紧凑减小行高、舒适加大留白。重启插件生效',
+  'densityCompact': '紧凑',
+  'densityDefault': '默认',
+  'densityComfortable': '舒适',
+  'motionLabel': '动效强度',
+  'motionHint': '关闭后所有入场与数据更新动画静止，保留基础交互反馈',
+  'motionOff': '关闭',
+  'motionSubtle': '克制',
+  'motionRich': '丰富',
   'tokenViewStructure': '按结构',
   'tokenViewModel': '按模型',
   'tokenHitShort': '命中',
@@ -877,6 +897,16 @@ export const en: Record<UsageBillingKey, string> = {
   'tokenDaily': 'Daily tokens',
   'tokenByModel': 'Tokens by model',
   'tokenMiss': 'Input (cache miss)',
+  'densityLabel': 'Display density',
+  'densityHint': 'Compact shrinks row height, comfortable adds breathing room. Applies after restart',
+  'densityCompact': 'Compact',
+  'densityDefault': 'Default',
+  'densityComfortable': 'Comfortable',
+  'motionLabel': 'Motion strength',
+  'motionHint': 'Off freezes all entrance and data-update animations; basic interaction feedback remains',
+  'motionOff': 'Off',
+  'motionSubtle': 'Subtle',
+  'motionRich': 'Rich',
   'tokenHit': 'Input (cache hit)',
   'tokenOutput': 'Output',
   'tokenViewStructure': 'Structure',

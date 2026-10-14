@@ -453,3 +453,64 @@ export function loadPerfViewPrefs(): PerfViewPrefs {
 export function savePerfViewPrefs(prefs: PerfViewPrefs): void {
   writeStored(PERF_VIEW_STORAGE_KEY, JSON.stringify(prefs))
 }
+
+/**
+ * 显示密度档位（v1.5 新增）。紧凑档减小行高/字号/内边距，舒适档加大；
+ * 默认档保持历史感官。client 端写到 `documentElement.dataset.density`，
+ * CSS `[data-density="..."]` 选择器派生 `--ds-density-*` 变量。
+ */
+export type DensityPref = 'compact' | 'default' | 'comfortable'
+
+/** localStorage key（与其他 `dsh.ui-usage-billing.*` 偏好同命名空间）。 */
+export const DENSITY_STORAGE_KEY = 'dsh.ui-usage-billing.density'
+
+/** 密度变更后派发的 CustomEvent 名（其他订阅侧监听它即时重读）。 */
+export const DENSITY_PREF_EVENT = 'dsh.ui-usage-billing.density-pref'
+
+/** 默认密度：保持历史感官（老用户感官零变化）。 */
+export const DEFAULT_DENSITY: DensityPref = 'default'
+
+/** 读取密度偏好（损坏/越界回退默认）。仅在浏览器半区调用。 */
+export function loadDensity(): DensityPref {
+  const raw = readRaw(DENSITY_STORAGE_KEY)
+  return raw === 'compact' || raw === 'comfortable' ? raw : DEFAULT_DENSITY
+}
+
+/** 写入密度偏好并同步派发事件（同文档即时生效，跨标签页靠 storage 事件）。
+ *  失败静默（展示偏好非关键）。 */
+export function saveDensity(density: DensityPref): void {
+  writeStored(DENSITY_STORAGE_KEY, density)
+  if (typeof window !== 'undefined' && typeof CustomEvent !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(DENSITY_PREF_EVENT, { detail: { density } }))
+  }
+}
+
+/**
+ * 动效强度档位（v1.5 新增）。`off` 冻结全部 transition+animation，
+ * `subtle` 抑制 240ms 以上的入场/计数动画但保留 160ms 微交互，
+ * `rich` 即默认（全开）。写到 `documentElement.dataset.motion`。
+ */
+export type MotionPref = 'off' | 'subtle' | 'rich'
+
+/** localStorage key（与其他 `dsh.ui-usage-billing.*` 偏好同命名空间）。 */
+export const MOTION_STORAGE_KEY = 'dsh.ui-usage-billing.motion'
+
+/** 动效变更后派发的 CustomEvent 名。 */
+export const MOTION_PREF_EVENT = 'dsh.ui-usage-billing.motion-pref'
+
+/** 默认动效：全开（保持历史感官）。 */
+export const DEFAULT_MOTION: MotionPref = 'rich'
+
+/** 读取动效偏好（损坏/越界回退默认）。仅在浏览器半区调用。 */
+export function loadMotion(): MotionPref {
+  const raw = readRaw(MOTION_STORAGE_KEY)
+  return raw === 'off' || raw === 'subtle' ? raw : DEFAULT_MOTION
+}
+
+/** 写入动效偏好并同步派发事件。失败静默。 */
+export function saveMotion(motion: MotionPref): void {
+  writeStored(MOTION_STORAGE_KEY, motion)
+  if (typeof window !== 'undefined' && typeof CustomEvent !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(MOTION_PREF_EVENT, { detail: { motion } }))
+  }
+}

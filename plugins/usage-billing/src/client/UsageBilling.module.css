@@ -10,6 +10,11 @@
   --ds-amber: #f59e0b;
   --ds-red: #ef4444;
   --ds-violet: #a78bfa;
+  /* violet 第二强调色派生：soft=14% 表面 / bg=8% 卡片底 / strong=60% 强调边。
+     v1.5 起启用——密度「舒适」档激活态、设置「高级」锚点、自定义单价徽标。 */
+  --ds-violet-soft: color-mix(in srgb, var(--ds-violet) 14%, transparent);
+  --ds-violet-bg: color-mix(in srgb, var(--ds-violet) 8%, transparent);
+  --ds-violet-strong: color-mix(in srgb, var(--ds-violet) 60%, transparent);
 }
 body {
   --dsb: var(--dsw-alias-bg-layer-1);
@@ -36,7 +41,37 @@ body {
   --ds-r-1: 8px;
   --ds-r-2: 12px;
   --ds-r-3: 16px;
+  /* 动效令牌家族（v1.5 扩充）：fast=微交互 / enter=卡片浮入、Tab 切换 /
+     pulse=数据更新闪烁 / countup=数字滚动 / scan=保留 triggerScan 专用 */
   --ds-t-fast: 160ms cubic-bezier(0.2,0.8,0.2,1);
+  --ds-t-enter: 240ms cubic-bezier(0.2,0.8,0.2,1);
+  --ds-t-pulse: 1.2s cubic-bezier(0.2,0.8,0.2,1);
+  --ds-t-countup: 400ms cubic-bezier(0.22,1,0.36,1);
+  --ds-t-scan: 900ms cubic-bezier(0.2,0.8,0.2,1);
+  /* 密度模式派生（v1.5）：默认挂 :root；紧凑/舒适档通过 [data-density]
+     选择器改写。读取侧从 .row/.panel 等派生 pad 与 row-h，省去各表面
+     重复声明。 */
+  --ds-density-pad-y: 10px;
+  --ds-density-pad-x: 14px;
+  --ds-density-row-h: 32px;
+  --ds-density-font: 12px;
+}
+
+/* 密度模式：紧凑档减小行高/字号/内边距，舒适档加大。
+   触发由 client 端读 localStorage `dsh.ui-usage-billing.density` 写到
+   documentElement.dataset.density；切换瞬时生效。alpha 默认 'default'
+   ——用户主动开启才生效，老用户感官零变化。 */
+[data-density="compact"] {
+  --ds-density-pad-y: 6px;
+  --ds-density-pad-x: 10px;
+  --ds-density-row-h: 26px;
+  --ds-density-font: 11.5px;
+}
+[data-density="comfortable"] {
+  --ds-density-pad-y: 14px;
+  --ds-density-pad-x: 18px;
+  --ds-density-row-h: 40px;
+  --ds-density-font: 13px;
 }
 
 /* ── Sidebar footer trigger ─────────────────────────────────────────── */
@@ -181,6 +216,36 @@ body {
   .triggerBudgetPulse {
     animation: none;
   }
+
+  /* v1.5 扩展：dashboard 弹窗入场 / Tab 切换 / 数据更新闪烁全部静止。
+     原版只覆盖 sidebar trigger，弹窗内动画对前庭敏感用户依然触发。 */
+  .dashboardModal { animation: none; }
+  .tabPanel { animation: none; }
+  .peakAlertPop { animation: none; }
+  .kpiTile,
+  .heroGaugeArc,
+  .chartLine,
+  .chartArea {
+    transition: none;
+    animation: none;
+  }
+}
+
+/* 动效强度档：用户可在设置 Tab 关闭/降低。
+   `off` 直接冻结所有 transition+animation；`subtle` 保留 160ms 微交互、
+   抑制更长动画（240ms / 1.2s / 400ms）；`rich` 即默认（无视觉差异）。 */
+[data-motion="off"] *,
+[data-motion="off"] *::before,
+[data-motion="off"] *::after {
+  transition: none !important;
+  animation: none !important;
+}
+[data-motion="subtle"] *,
+[data-motion="subtle"] *::before,
+[data-motion="subtle"] *::after {
+  /* 仅抑制 240ms 以上动画；160ms 微交互保留（按钮 hover / 状态过渡）。 */
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
 }
 
 /* 图标：裸放仪表（issue #47 反馈去方框），32×32 容器承载 30×30 仪表，颜色随
