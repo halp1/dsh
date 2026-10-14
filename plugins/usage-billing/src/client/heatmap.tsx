@@ -35,12 +35,15 @@ interface Cell {
   placeholder: boolean
 }
 
+/* v1.5 光谱：青(轻)→蓝(中)→蓝实(高)→琥珀(爆量)。
+   level 0 = 无活动（浅灰占位 / 未来日）。
+   与 hero 渐变弧、subscription 蓝底卡形成「数据光谱」统一设计语言。 */
 const LEVEL_COLORS: readonly string[] = [
-  'color-mix(in srgb, var(--ds-blue) 10%, var(--dsb-3))',
-  'color-mix(in srgb, var(--ds-blue) 30%, var(--dsb-3))',
+  'color-mix(in srgb, var(--dsb-3) 70%, transparent)',
+  'color-mix(in srgb, var(--ds-cyan) 30%, var(--dsb-3))',
   'color-mix(in srgb, var(--ds-blue) 60%, var(--dsb-3))',
-  'color-mix(in srgb, var(--ds-blue) 90%, var(--dsb-3))',
   'var(--ds-blue)',
+  'var(--ds-amber)',
 ]
 
 /** 月份缩写（年度热力图横轴标签，GitHub 风格）。 */
@@ -169,6 +172,9 @@ export function UsageHeatmap({ days, currency, now, t, range = 'month', unit = '
   const fmt = (value: number): string => (unit === 'tokens' ? formatTokens(value) : money(value))
   // monthWeeks 无条件计算，保证跨 range 切换时 hooks 顺序稳定。
   const monthWeeks = useMemo(() => buildMonthWeeks(days, now ?? new Date()), [days, now])
+  /* v1.5：当日格子加琥珀描边。提前 dayStamp(now) 一次，渲染时字符串相等
+     比对；跨日刷新（轮询 30s）会自然重算，cell 重新挂载 data-today。 */
+  const todayKey = dayStamp(now ?? new Date())
 
   if (range !== 'month') {
     // Week-column views (half/year): compact per-week column grid; the half
@@ -216,6 +222,7 @@ export function UsageHeatmap({ days, currency, now, t, range = 'month', unit = '
                   className={css.heatmapYearCell}
                   data-testid="heatmap-year-cell"
                   data-level={cell.level}
+                  data-today={cell.date === todayKey ? 'true' : undefined}
                   style={{ background: LEVEL_COLORS[cell.level] }}
                   title={`${cell.date} · ${fmt(cell.value)}`}
                   aria-label={`${cell.date}: ${fmt(cell.value)}`}
@@ -251,6 +258,7 @@ export function UsageHeatmap({ days, currency, now, t, range = 'month', unit = '
                 className={css.heatmapCell}
                 data-testid="heatmap-cell"
                 data-level={cell.level}
+                data-today={cell.date === todayKey ? 'true' : undefined}
                 style={{ background: LEVEL_COLORS[cell.level] }}
                 title={`${cell.date} · ${fmt(cell.value)}`}
                 aria-label={`${cell.date}: ${fmt(cell.value)}`}

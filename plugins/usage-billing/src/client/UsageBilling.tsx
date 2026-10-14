@@ -131,6 +131,91 @@ export const DASHBOARD_TABS: readonly { id: DashboardTab; labelKey: UsageBilling
   { id: 'settings', labelKey: 'tabSettings' },
 ]
 
+/** v1.5 Tab 内联 SVG 图标（14×14，无外部依赖；保持 stroke 风格统一） */
+const TAB_ICONS: Record<DashboardTab, React.ReactNode> = {
+  overview: (
+    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M2 13 L2 3 M2 13 L14 13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      <path d="M4 10 L8 7 L10 9 L14 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  providers: (
+    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M5 7 L7 9 L11 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  token: (
+    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="6" cy="6" r="3" stroke="currentColor" strokeWidth="1.5" />
+      <circle cx="11" cy="11" r="3" stroke="currentColor" strokeWidth="1.5" />
+    </svg>
+  ),
+  trends: (
+    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M2 4 L6 8 L9 5 L14 10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M11 10 L14 10 L14 7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  pricing: (
+    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M8 2 L14 5 L14 11 L8 14 L2 11 L2 5 Z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+      <path d="M8 2 L8 14 M2 5 L14 5" stroke="currentColor" strokeWidth="1.5" />
+    </svg>
+  ),
+  settings: (
+    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="8" cy="8" r="2.5" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M8 1.5 L8 3.5 M8 12.5 L8 14.5 M1.5 8 L3.5 8 M12.5 8 L14.5 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  ),
+}
+
+/** v1.5 Tab 徽章数据信号：空字符串 / 数字 / 状态字。`kind` 决定色调。 */
+type TabBadgeKind = 'warn' | 'hot' | 'violet' | 'neutral'
+interface TabBadge { label: string; kind: TabBadgeKind }
+
+/** 各 Tab 数据信号聚合：调用方传 dashboardBadgeState（避免每个 Tab 重复声明） */
+interface DashboardBadgeState {
+  providersCount: number
+  tokenTotal: number
+  trendDelta: number | null
+  rateAgeMinutes: number | null
+  settingsDirty: number
+}
+
+/** 把 Tab id + 当前状态映射为徽章（null = 不渲染徽章）。 */
+function tabBadgeFor(id: DashboardTab, state: DashboardBadgeState): TabBadge | null {
+  switch (id) {
+    case 'overview':
+      return { label: '实时', kind: 'neutral' }
+    case 'providers':
+      return { label: `${state.providersCount} 厂商`, kind: 'neutral' }
+    case 'token':
+      return { label: formatTokenBadge(state.tokenTotal), kind: 'neutral' }
+    case 'trends': {
+      if (state.trendDelta === null) return null
+      const pct = Math.abs(state.trendDelta)
+      if (pct < 5) return null
+      const sign = state.trendDelta > 0 ? '↑' : '↓'
+      return { label: `${sign} ${pct.toFixed(0)}%`, kind: pct >= 25 ? 'warn' : 'neutral' }
+    }
+    case 'pricing':
+      if (state.rateAgeMinutes === null || state.rateAgeMinutes < 360) return { label: '已同步', kind: 'neutral' }
+      return { label: '需同步', kind: 'violet' }
+    case 'settings':
+      if (state.settingsDirty <= 0) return null
+      return { label: String(state.settingsDirty), kind: 'hot' }
+  }
+}
+
+/** Token 量缩成紧凑数字（M / K），徽章宽度敏感场景用。 */
+function formatTokenBadge(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
+  return String(n)
+}
+
 /** 预算提醒档位（百分比）：跨档时桌面通知，每档每天最多一次。 */
 const BUDGET_ALERT_TIERS: readonly number[] = [50, 80, 100]
 
@@ -2494,6 +2579,39 @@ function BillingDashboard({
       })
   }, [stats.byDayModelsSite, stats.byModel, quotas, balances, health, lang, t, providersTodayOnly])
 
+  /* v1.5 Tab 徽章数据信号：从已聚合的 providerGroups / stats / pricingSyncedAt 派生。
+     放这里是为了引用顺序正确（providerGroups 在 line 2406 才声明）。
+     useMemo 缓存——避免 Tab 重渲染时重算整张大表。 */
+  const dashboardBadgeState = useMemo<DashboardBadgeState>(() => {
+    const groupsCount = providerGroups.length
+    const todayKey = dayStampLocal()
+    const byDayMap = stats.byDay ?? {}
+    const todayUsage = byDayMap[todayKey]
+    const todayTokens = todayUsage
+      ? todayUsage.input + todayUsage.output + todayUsage.cacheHit + todayUsage.cacheMiss
+      : 0
+    const days = Object.keys(byDayMap).sort()
+    const trendDelta = days.length >= 2
+      ? (() => {
+          const last = byDayMap[days[days.length - 1]!]!
+          const prev = byDayMap[days[days.length - 2]!]!
+          const lastTotal = last.input + last.output + last.cacheHit + last.cacheMiss
+          const prevTotal = prev.input + prev.output + prev.cacheHit + prev.cacheMiss
+          return prevTotal > 0 ? ((lastTotal - prevTotal) / prevTotal) * 100 : null
+        })()
+      : null
+    const rateAgeMinutes = pricingSyncedAt > 0
+      ? Math.floor((Date.now() - pricingSyncedAt) / 60000)
+      : null
+    return {
+      providersCount: groupsCount,
+      tokenTotal: todayTokens,
+      trendDelta,
+      rateAgeMinutes,
+      settingsDirty: 0,
+    }
+  }, [providerGroups, stats.byDay, pricingSyncedAt])
+
   // 一键展开/收起（issue #77）：只作用于有明细可展开的组（模型行或订阅卡）；
   // 纯余额组无内容可折叠，不参与计数与按钮文案判定。
   const collapsibleProviderIds = useMemo(
@@ -2667,22 +2785,45 @@ function BillingDashboard({
           </div>
         </div>
 
-        {/* Tab 导航：概览 / 趋势 / 厂商 / 明细（分区后各区块默认展开）。 */}
-        <nav className={css.tabNav} data-testid="billing-tab-nav" role="tablist" aria-label={t('title')}>
-          {DASHBOARD_TABS.map(item => (
-            <button
-              key={item.id}
-              type="button"
-              role="tab"
-              aria-selected={tab === item.id}
-              className={clsx(css.tabButton, tab === item.id && css.tabButtonActive)}
-              data-testid={`billing-tab-${item.id}`}
-              onClick={() => { setTab(item.id) }}
-            >
-              {t(item.labelKey)}
-            </button>
-          ))}
-        </nav>
+        {/* Tab 导航（v1.5）：从顶部分段控件改成 200px 左侧数据栏。
+           图标 + 标签 + 数据徽章三段式，激活态 2px 蓝色左描边。
+           data-testid 由 billing-tab-nav 改为 billing-tab-rail（破坏性更新，
+           测试已同步）。 */}
+        <aside className={css.tabRail} data-testid="billing-tab-rail" role="tablist" aria-label={t('title')}>
+          {DASHBOARD_TABS.map(item => {
+            const badge = tabBadgeFor(item.id, dashboardBadgeState)
+            return (
+              <button
+                key={item.id}
+                type="button"
+                role="tab"
+                aria-selected={tab === item.id}
+                aria-controls={`billing-tab-panel-${item.id}`}
+                className={clsx(css.tabRailItem, tab === item.id && css.tabRailItemActive)}
+                data-testid={`billing-tab-${item.id}`}
+                onClick={() => { setTab(item.id) }}
+              >
+                <span className={css.tabRailIcon} aria-hidden="true">
+                  {TAB_ICONS[item.id]}
+                </span>
+                <span className={css.tabRailLabel}>{t(item.labelKey)}</span>
+                {badge && (
+                  <span
+                    className={clsx(
+                      css.tabBadge,
+                      badge.kind === 'warn' && css.tabBadgeWarn,
+                      badge.kind === 'hot' && css.tabBadgeHot,
+                      badge.kind === 'violet' && css.tabBadgeViolet,
+                    )}
+                    data-testid={`billing-tab-badge-${item.id}`}
+                  >
+                    {badge.label}
+                  </span>
+                )}
+              </button>
+            )
+          })}
+        </aside>
 
         {/* Scrollable body: 按 Tab 条件渲染分区。 */}
         <div className={css.dashboardBody}>
@@ -3643,6 +3784,35 @@ function BillingDashboard({
                             )}
                           </span>
                         </div>
+                        {/* v1.5 三段式：头部（厂家身份）→ 摘要行（4 列核心数据：调用/输入/输出/费用）→
+                            展开明细（折叠后才渲染）。摘要行常驻，不被折叠门控——用户能 1 秒
+                            识别厂家画像，再决定是否展开下钻。 */}
+                        {group.models.length > 0 && (
+                          <div className={css.providerStatRow} data-testid="billing-provider-stat-row">
+                            {(() => {
+                              const totals = group.models.reduce((acc, m) => ({
+                                calls: acc.calls + m.calls,
+                                input: acc.input + m.input,
+                                output: acc.output + m.output,
+                              }), { calls: 0, input: 0, output: 0 })
+                              const hitRate = totals.input > 0
+                                ? group.models.reduce((sum, m) => sum + m.cacheHitRate, 0) / group.models.length
+                                : 0
+                              return [
+                                { lbl: t('calls'), val: totals.calls.toLocaleString(), sub: '' },
+                                { lbl: t('inputTokens'), val: formatTokens(totals.input), sub: hitRate > 0 ? `${t('cacheHitRate')} ${hitRate.toFixed(0)}%` : '' },
+                                { lbl: t('outputTokens'), val: formatTokens(totals.output), sub: '' },
+                                { lbl: t('cost'), val: money(providerCostOf(group)), sub: group.models.length === 1 ? '' : `${group.models.length} ${t('models')}` },
+                              ].map((cell, idx) => (
+                                <div key={idx} className={css.providerStatCell}>
+                                  <div className={css.providerStatLbl}>{cell.lbl}</div>
+                                  <div className={css.providerStatVal}>{cell.val}</div>
+                                  {cell.sub !== '' && <div className={css.providerStatSub}>{cell.sub}</div>}
+                                </div>
+                              ))
+                            })()}
+                          </div>
+                        )}
                         {/* 展开明细（issue #77）：模型行与订阅卡收在组头之下，展开才渲染。 */}
                         {open && (<>
                         {/* 未知通道说明（issue #82）：组头费用显示「—」的原因。 */}
@@ -3710,7 +3880,7 @@ function BillingDashboard({
                             {group.subscriptions.map((quota) => {
                               const statusText = subscriptionStatusText(quota.status, t)
                               return (
-                                <div key={quota.provider} className={css.subscriptionCard} data-testid="billing-subscription-card">
+                                <div key={quota.provider} className={clsx(css.subscriptionCard, css.subscriptionCardUpgraded)} data-testid="billing-subscription-card">
                                   <div className={css.subscriptionHead}>
                                     <span className={css.subscriptionName}>{providerName(quota.displayName)}</span>
                                     {/* plan 双口径徽标（dsh-spend）：订阅制/按量；订阅制附月费。 */}

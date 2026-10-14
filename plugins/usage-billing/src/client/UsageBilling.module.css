@@ -630,10 +630,28 @@ body {
 }
 
 .dashboard {
-  display: flex;
-  flex-direction: column;
+  /* v1.5：grid 两列布局，左栏 200px Tab 数据栏 + 右栏流体 body。
+     头部/底部跨列。窄 modal 下（容器查询 ≤600px）退化为单列堆叠。 */
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  grid-template-rows: auto 1fr auto;
+  gap: 12px;
+  padding: 12px;
   width: 100%;
   max-height: min(760px, 88vh);
+  /* 启用容器查询，让 tabRail / dashboardBody 在窄 modal 下自主降级 */
+  container-type: inline-size;
+  container-name: billing-dashboard;
+}
+
+.dashboardHead {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--ds-border);
 }
 
 .dashboardHead {
@@ -692,10 +710,14 @@ body {
   gap: 14px;
   padding: 16px 24px 24px;
   overflow-y: auto;
+  grid-column: 2;
+  grid-row: 2;
+  min-width: 0;
 }
 
 /* 底部公共细条（ub-footer）：轮询说明 + 版本/许可证，所有 Tab 共享。 */
 .modalFooter {
+  grid-column: 1 / -1;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -708,10 +730,151 @@ body {
   color: var(--ds-t-3);
 }
 
-/* ── Tab 导航（概览 / 明细 / 用量 / 趋势 / 费率 / 设置） ────────────── */
+/* 窄 modal（容器查询 ≤600px）退化：左栏 Tab rail 隐藏，单列堆叠。
+   v1.4.x 风格的顶部分段控件通过 .tabBar 在 JSX 里兜底渲染（alpha.1
+   先保留 v1.4.x 的 .tabNav 规则不删，由 tabRail/tabBar 类切换）。 */
+@container billing-dashboard (max-width: 600px) {
+  .dashboard {
+    grid-template-columns: 1fr;
+  }
+  .tabRail {
+    display: none;
+  }
+  .dashboardBody {
+    grid-column: 1;
+  }
+}
 
-/* 分段控件：内嵌轨道（--dsb 更深一档），激活段以 --dsb-3 实底 + 1px 内描边浮起。 */
-.tabNav {
+/* ── Tab 导航（v1.5：分段控件 → 左侧 200px 数据栏） ────────────── */
+
+/* 容器：dashboard grid 内的左侧栏（200px），与右侧 body 流体并列。
+   窄 modal（容器查询 ≤600px）退化回顶部 tabBar —— v1.4.x 视觉。 */
+.tabRail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  background: var(--dsb);
+  border: 1px solid var(--ds-border);
+  border-radius: var(--ds-r-2);
+  /* grid 列宽 = 200px + 流体 body；窄 modal 下 grid 自动塌成单列 */
+  align-self: start;
+  position: sticky;
+  top: 0;
+  max-height: min(720px, calc(88vh - 80px));
+  overflow-y: auto;
+}
+
+.tabRailItem {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ds-t-2);
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: background-color var(--ds-t-fast), color var(--ds-t-fast);
+}
+
+.tabRailItem:hover {
+  background: var(--dsb-3);
+  color: var(--ds-t-1);
+}
+
+.tabRailItem:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1.5px var(--ds-border-strong);
+}
+
+/* 激活态：浅蓝底 + 主色文字 + 字重 + 左侧 2px 蓝色描边。
+   ::before 描边不挤布局（绝对定位）。 */
+.tabRailItemActive,
+.tabRailItemActive:hover {
+  background: color-mix(in srgb, var(--ds-blue) 14%, transparent);
+  color: var(--ds-t-1);
+  font-weight: 600;
+}
+
+.tabRailItemActive::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  background: var(--ds-blue);
+  border-radius: 0 2px 2px 0;
+}
+
+/* 图标槽：14×14 容器，颜色随激活态继承 */
+.tabRailIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--ds-t-3);
+}
+
+.tabRailItemActive .tabRailIcon {
+  color: var(--ds-blue);
+}
+
+.tabRailIcon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.tabRailLabel {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 数据徽章：右对齐，等宽字体，4 种色调。语义色由 tabBadgeFor 决定。 */
+.tabBadge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--dsb-3);
+  color: var(--ds-t-3);
+  font-family: var(--font-num);
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.tabBadgeWarn {
+  background: color-mix(in srgb, var(--ds-amber) 18%, transparent);
+  color: var(--ds-amber);
+}
+
+.tabBadgeHot {
+  background: color-mix(in srgb, var(--ds-red) 18%, transparent);
+  color: var(--ds-red);
+}
+
+/* violet 第二强调色：费率同步超期用此色调，与「默认蓝」「警告琥珀」区分开 */
+.tabBadgeViolet {
+  background: var(--ds-violet-soft);
+  color: var(--ds-violet);
+}
+
+/* 旧 .tabNav/.tabButton 类保留作为兼容兜底（窄 modal 退化用） */
+.tabBar {
   display: flex;
   align-items: center;
   gap: 4px;
@@ -1658,6 +1821,136 @@ body {
 }
 
 /* ── 性能曲线工具条：指标 tab（复用 rangeToggle）+ 模型 chips ───────── */
+
+/* v1.5 Hero 块：4 列核心指标（总样本 / 平均 TTFT / 平均 TPS / 平均延迟）。
+   每格配 4px 进度条显示相对全局基线的位置。容器查询 ≤480px 退化为 2×2。 */
+.perfHero {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin-bottom: 12px;
+  container-type: inline-size;
+  container-name: billing-perf;
+}
+
+.perfHeroCell {
+  padding: 12px 14px;
+  border: 1px solid var(--ds-border);
+  border-radius: var(--ds-r-1);
+  background: var(--dsb-glass);
+}
+
+.perfHeroLbl {
+  font-size: 10.5px;
+  color: var(--ds-t-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 500;
+}
+
+.perfHeroVal {
+  margin-top: 4px;
+  font-family: var(--font-num);
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--ds-t-1);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+}
+
+.perfHeroUnit {
+  font-size: 11px;
+  color: var(--ds-t-3);
+  margin-left: 3px;
+  font-weight: 500;
+}
+
+.perfHeroBar {
+  margin-top: 6px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--dsb-3);
+  position: relative;
+  overflow: hidden;
+}
+
+.perfHeroBar i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  transition: width var(--ds-t-fast);
+}
+
+@container billing-perf (max-width: 480px) {
+  .perfHero { grid-template-columns: 1fr 1fr; }
+}
+
+/* v1.5 横向对比列表：每行 = 模型名 + P50 进度条 + P50 数值 + TPS 数值。
+   一眼排名——最快模型进度条最长。 */
+.perfCompareList {
+  margin-top: 10px;
+  border: 1px solid var(--ds-border);
+  border-radius: var(--ds-r-1);
+  background: var(--dsb-glass);
+  overflow: hidden;
+}
+
+.perfCompareRow {
+  display: grid;
+  grid-template-columns: 1fr 80px 56px 56px;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--ds-border);
+  font-size: 12px;
+}
+
+.perfCompareRow:last-child {
+  border-bottom: 0;
+}
+
+.perfCompareName {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.perfCompareDot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.perfCompareBar {
+  position: relative;
+  height: 6px;
+  background: var(--dsb-3);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.perfCompareBar i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  transition: width var(--ds-t-fast);
+}
+
+.perfCompareNum {
+  font-family: var(--font-num);
+  font-size: 11.5px;
+  color: var(--ds-t-1);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  font-weight: 600;
+}
 
 .perfBar {
   display: flex;
@@ -2614,6 +2907,39 @@ span.bandDot { cursor: default; }
   transition: border-color var(--ds-t-fast);
 }
 
+/* v1.5 升级版订阅卡（蓝色调专属视觉）。
+   与 .providerGroup 同款蓝色饰条 + 蓝底玻璃——形成「订阅生态」识别。
+   应用在 JSX 侧通过 clsx 叠加，不替换原 .subscriptionCard 以保兼容。 */
+.subscriptionCardUpgraded {
+  border-color: color-mix(in srgb, var(--ds-blue) 30%, transparent);
+  border-radius: var(--ds-r-3);
+  padding: 16px 18px;
+  background:
+    linear-gradient(135deg,
+      color-mix(in srgb, var(--ds-blue) 8%, transparent),
+      transparent 60%),
+    var(--dsb-glass);
+  backdrop-filter: blur(12px) saturate(1.4);
+  -webkit-backdrop-filter: blur(12px) saturate(1.4);
+}
+
+/* 顶部 1.5px 蓝色饰条（与 hero gauge 同款语言；装饰性，不拦截指针） */
+.subscriptionCardUpgraded::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 1.5px;
+  background: linear-gradient(90deg, transparent 10%, var(--ds-blue) 50%, transparent 90%);
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+/* 升级版右侧百分比作为 Hero 数字：从 13px 升到 18px、加粗 */
+.subscriptionCardUpgraded .subscriptionPct {
+  font-size: 18px;
+  font-weight: 600;
+}
+
 .subscriptionHead {
   display: flex;
   align-items: baseline;
@@ -2756,6 +3082,61 @@ span.bandDot { cursor: default; }
   border-radius: var(--ds-r-2);
   padding: 12px 14px;
   background: var(--dsb-glass);
+  /* v1.5：启用容器查询，让 stat row 在窄 modal（<480px）下 2×2 降级 */
+  container-type: inline-size;
+  container-name: billing-pg;
+}
+
+/* v1.5 摘要行：4 列核心数据（调用/输入/输出/费用），常驻不折叠。 */
+.providerStatRow {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  padding: 10px 12px;
+  margin-top: 10px;
+  border-radius: var(--ds-r-1);
+  background: var(--dsb-2);
+  border: 1px solid var(--ds-border);
+}
+
+.providerStatCell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.providerStatLbl {
+  font-size: 10.5px;
+  color: var(--ds-t-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 500;
+}
+
+.providerStatVal {
+  font-family: var(--font-num);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ds-t-1);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.providerStatSub {
+  font-family: var(--font-num);
+  font-size: 10.5px;
+  color: var(--ds-t-3);
+}
+
+/* 窄 modal（容器查询 ≤480px）摘要行 2×2 降级 */
+@container billing-pg (max-width: 480px) {
+  .providerStatRow {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 /* 厂商组头部：左侧厂商名 + 健康点，右侧订阅套数 + 厂商余额。 */
@@ -3072,6 +3453,19 @@ span.bandDot { cursor: default; }
 .heatmapCell[data-level='3'],
 .heatmapCell[data-level='4'] {
   color: var(--dsw-static-neutral-bluish-00);
+}
+
+/* v1.5：当日格子 1.5px 琥珀描边（功能性指示，非装饰发光）。
+   level 0 灰色不描边，避免无活动日也被高亮误导；用属性选择器精确锁定。 */
+.heatmapCell[data-today='true'] {
+  outline: 1.5px solid color-mix(in srgb, var(--ds-amber) 70%, transparent);
+  outline-offset: 1px;
+  z-index: 1;
+}
+.heatmapYearCell[data-today='true'] {
+  outline: 1.5px solid color-mix(in srgb, var(--ds-amber) 70%, transparent);
+  outline-offset: 1px;
+  z-index: 1;
 }
 
 .heatmapFooter {
