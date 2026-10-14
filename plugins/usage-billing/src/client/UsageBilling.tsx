@@ -139,44 +139,14 @@ export const DASHBOARD_TABS: readonly { id: DashboardTab; labelKey: UsageBilling
   { id: 'settings', labelKey: 'tabSettings' },
 ]
 
-/** v1.5 Tab 内联 SVG 图标（14×14，无外部依赖；保持 stroke 风格统一） */
+/** v1.5 Tab 内联 SVG 图标（14×14，无外部依赖；用 stroke="currentColor" 复用单 CSS 规则）. */
 const TAB_ICONS: Record<DashboardTab, React.ReactNode> = {
-  overview: (
-    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <path d="M2 13 L2 3 M2 13 L14 13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-      <path d="M4 10 L8 7 L10 9 L14 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  ),
-  providers: (
-    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.5" />
-      <path d="M5 7 L7 9 L11 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  ),
-  token: (
-    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <circle cx="6" cy="6" r="3" stroke="currentColor" strokeWidth="1.5" />
-      <circle cx="11" cy="11" r="3" stroke="currentColor" strokeWidth="1.5" />
-    </svg>
-  ),
-  trends: (
-    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <path d="M2 4 L6 8 L9 5 L14 10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M11 10 L14 10 L14 7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  ),
-  pricing: (
-    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <path d="M8 2 L14 5 L14 11 L8 14 L2 11 L2 5 Z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
-      <path d="M8 2 L8 14 M2 5 L14 5" stroke="currentColor" strokeWidth="1.5" />
-    </svg>
-  ),
-  settings: (
-    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <circle cx="8" cy="8" r="2.5" stroke="currentColor" strokeWidth="1.5" />
-      <path d="M8 1.5 L8 3.5 M8 12.5 L8 14.5 M1.5 8 L3.5 8 M12.5 8 L14.5 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-    </svg>
-  ),
+  overview: <svg viewBox="0 0 16 16" fill="none" aria-hidden="true" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M2 13V3M2 13H14M4 10l4-3 2 2 4-5"/></svg>,
+  providers: <svg viewBox="0 0 16 16" fill="none" aria-hidden="true" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M5 7l2 2 4-4"/></svg>,
+  token: <svg viewBox="0 0 16 16" fill="none" aria-hidden="true" stroke="currentColor" strokeWidth="1.5"><circle cx="6" cy="6" r="3"/><circle cx="11" cy="11" r="3"/></svg>,
+  trends: <svg viewBox="0 0 16 16" fill="none" aria-hidden="true" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M2 4l4 4 3-3 5 5M11 10h3V7"/></svg>,
+  pricing: <svg viewBox="0 0 16 16" fill="none" aria-hidden="true" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"><path d="M8 2l6 3v6l-6 3-6-3V5z"/><path d="M8 2v12M2 5h12"/></svg>,
+  settings: <svg viewBox="0 0 16 16" fill="none" aria-hidden="true" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><circle cx="8" cy="8" r="2.5"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2"/></svg>,
 }
 
 /** v1.5 Tab 徽章数据信号：空字符串 / 数字 / 状态字。`kind` 决定色调。 */
@@ -2085,17 +2055,14 @@ function BillingDashboard({
      触发 documentElement.dataset.density/motion 重写 CSS 变量。 */
   const [density, setDensityState] = useState<DensityPref>(loadDensity)
   const [motion, setMotionState] = useState<MotionPref>(loadMotion)
-  /* v1.5 设置页当前活动组（左侧锚点高亮跟随）。无 scroll-spy——alpha.1
-     只在点击 nav 时切换；后续 v1.5.1 用 IntersectionObserver。 */
+  /* v1.5 设置页当前活动组（左侧锚点高亮跟随）。alpha.1 用 click-set
+     + 滚动；v1.5.1 加 IntersectionObserver 跟随滚动反向高亮。 */
   const [activeSettingsGroup, setActiveSettingsGroup] = useState<string>('budget')
   const scrollToSettingsGroup = useCallback((id: string) => {
     setActiveSettingsGroup(id)
-    /* dashboardBody 是滚动容器；用 querySelector 找锚点并滚动入视。 */
     if (typeof document === 'undefined') return
     const target = document.getElementById(`settings-${id}`)
-    if (target !== null) {
-      target.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    }
+    if (target !== null) target.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }, [])
   const setDensity = useCallback((d: DensityPref) => {
     setDensityState(d)
@@ -3165,8 +3132,8 @@ function BillingDashboard({
           {tab === 'settings' && (
             <div className={css.tabPanel} data-testid="billing-tab-panel-settings">
               {/* v1.5 设置页布局：左侧 180px 锚点 + 右侧分组 pane。5 组分类——预算 / 提醒 /
-                  显示 / 高级 / 关于。每组对应原 section（id 兼容）。锚点导航仅滚动到
-                  目标（无 scroll-spy：alpha.1 先做基础可达性，scroll-spy 留 v1.5.1）。 */}
+                  显示 / 高级 / 关于。每组对应原 section（id 兼容）。锚点导航点击
+                  滚动；alpha.1 无 scroll-spy——v1.5.1 加 IntersectionObserver。 */}
               <div className={css.settingsLayout}>
                 <aside className={css.settingsNav} data-testid="billing-settings-nav" role="navigation" aria-label="settings">
                   {[

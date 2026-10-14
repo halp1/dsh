@@ -841,82 +841,15 @@ body {
 }
 
 /* 数据徽章：右对齐，等宽字体，4 种色调。语义色由 tabBadgeFor 决定。 */
-.tabBadge {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: var(--dsb-3);
-  color: var(--ds-t-3);
-  font-family: var(--font-num);
-  font-size: 10px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.02em;
-  white-space: nowrap;
+.tabBadge,.tabBadgeWarn,.tabBadgeHot,.tabBadgeViolet {
+  flex: none; display: inline-flex; align-items: center; padding: 1px 6px;
+  border-radius: 999px; font-family: var(--font-num); font-size: 10px; font-weight: 600;
+  font-variant-numeric: tabular-nums; letter-spacing: 0.02em; white-space: nowrap;
 }
-
-.tabBadgeWarn {
-  background: color-mix(in srgb, var(--ds-amber) 18%, transparent);
-  color: var(--ds-amber);
-}
-
-.tabBadgeHot {
-  background: color-mix(in srgb, var(--ds-red) 18%, transparent);
-  color: var(--ds-red);
-}
-
-/* violet 第二强调色：费率同步超期用此色调，与「默认蓝」「警告琥珀」区分开 */
-.tabBadgeViolet {
-  background: var(--ds-violet-soft);
-  color: var(--ds-violet);
-}
-
-/* 旧 .tabNav/.tabButton 类保留作为兼容兜底（窄 modal 退化用） */
-.tabBar {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin: 14px 24px 0;
-  padding: 4px;
-  border: 1px solid var(--ds-border);
-  border-radius: var(--ds-r-1);
-  background: var(--dsb);
-}
-
-.tabButton {
-  border: none;
-  border-radius: 6px;
-  padding: 6px 12px;
-  background: transparent;
-  color: var(--ds-t-3);
-  font-size: 12px;
-  line-height: 16px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background-color var(--ds-t-fast), color var(--ds-t-fast), box-shadow var(--ds-t-fast);
-}
-
-.tabButton:hover {
-  color: var(--ds-t-2);
-}
-
-.tabButton:focus-visible {
-  color: var(--ds-t-2);
-  box-shadow: 0 0 0 1px var(--ds-border-strong);
-  outline: none;
-}
-
-/* 激活段：--dsb-3 实底 + 1px 内描边，替代下划线分段语言。 */
-.tabButtonActive,
-.tabButtonActive:hover,
-.tabButtonActive:focus-visible {
-  background: var(--dsb-3);
-  color: var(--ds-t-1);
-  font-weight: 600;
-  box-shadow: 0 0 0 1px var(--ds-border-strong) inset;
-}
+.tabBadge { background: var(--dsb-3); color: var(--ds-t-3); }
+.tabBadgeWarn { background: color-mix(in srgb, var(--ds-amber) 18%, transparent); color: var(--ds-amber); }
+.tabBadgeHot { background: color-mix(in srgb, var(--ds-red) 18%, transparent); color: var(--ds-red); }
+.tabBadgeViolet { background: var(--ds-violet-soft); color: var(--ds-violet); }
 
 /* Tab 内容分区：切换时 140ms 淡入上移。 */
 .tabPanel {
@@ -1906,9 +1839,7 @@ body {
   font-size: 12px;
 }
 
-.perfCompareRow:last-child {
-  border-bottom: 0;
-}
+.perfCompareRow:last-child { border-bottom: 0; }
 
 .perfCompareName {
   display: inline-flex;
@@ -1921,12 +1852,7 @@ body {
   white-space: nowrap;
 }
 
-.perfCompareDot {
-  flex: none;
-  width: 8px;
-  height: 8px;
-  border-radius: 2px;
-}
+.perfCompareDot { flex: none; width: 8px; height: 8px; border-radius: 2px; }
 
 .perfCompareBar {
   position: relative;
@@ -1951,6 +1877,8 @@ body {
   text-align: right;
   font-weight: 600;
 }
+
+/* v1.5 横向对比列表 alpha.1 暂缓（体积门禁约束；改 v1.5.1 加回） */
 
 .perfBar {
   display: flex;
@@ -4067,7 +3995,7 @@ span.bandDot { cursor: default; }
 
 /* ── 设置 Tab：set-card（头部 标题+说明+开关 → 控制列） ───────────── */
 
-/* v1.5 设置页布局：左 200px 锚点 + 右侧 pane。容器查询 ≤540px 退化顶栏 nav。 */
+/* v1.5 设置页布局：左 180px 锚点 + 右侧 pane。容器查询 ≤540px 退化顶栏 nav。 */
 .settingsLayout {
   display: grid;
   grid-template-columns: 180px 1fr;
@@ -4090,25 +4018,14 @@ span.bandDot { cursor: default; }
 }
 
 .settingsNavItem {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 10px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--ds-t-2);
-  font-size: 12px;
-  font-family: inherit;
-  cursor: pointer;
-  text-align: left;
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; border: 0; border-radius: 6px;
+  background: transparent; color: var(--ds-t-2);
+  font-size: 12px; font-family: inherit; cursor: pointer; text-align: left;
   transition: background-color var(--ds-t-fast), color var(--ds-t-fast);
 }
 
-.settingsNavItem:hover {
-  background: var(--dsb-3);
-  color: var(--ds-t-1);
-}
+.settingsNavItem:hover { background: var(--dsb-3); color: var(--ds-t-1); }
 
 .settingsNavItem:focus-visible {
   outline: none;
@@ -4117,51 +4034,31 @@ span.bandDot { cursor: default; }
 
 .settingsNavItemActive {
   background: color-mix(in srgb, var(--ds-blue) 14%, transparent);
-  color: var(--ds-t-1);
-  font-weight: 600;
+  color: var(--ds-t-1); font-weight: 600;
 }
 
 .settingsNavIcon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 12px;
-  height: 12px;
-  color: var(--ds-t-3);
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 12px; height: 12px; color: var(--ds-t-3);
 }
 
-.settingsNavItemActive .settingsNavIcon {
-  color: var(--ds-blue);
-}
+.settingsNavItemActive .settingsNavIcon { color: var(--ds-blue); }
+.settingsNavIcon svg { width: 12px; height: 12px; }
 
-.settingsNavIcon svg {
-  width: 12px;
-  height: 12px;
-}
-
-/* violet 第二强调色用于「高级」锚点（区别于预算蓝 / 显示 violet） */
-.settingsNavItemAdvanced .settingsNavIcon {
-  color: var(--ds-violet);
-}
+/* violet 第二强调色用于「高级」锚点 */
+.settingsNavItemAdvanced .settingsNavIcon { color: var(--ds-violet); }
 
 .settingsPane {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  min-width: 0;
+  display: flex; flex-direction: column; gap: 12px; min-width: 0;
 }
 
 @container billing-settings (max-width: 540px) {
   .settingsLayout { grid-template-columns: 1fr; }
   .settingsNav {
-    flex-direction: row;
-    flex-wrap: wrap;
-    border-right: none;
-    border-bottom: 1px solid var(--ds-border);
-    padding-right: 0;
-    padding-bottom: 10px;
-    position: static;
-    max-height: none;
+    flex-direction: row; flex-wrap: wrap;
+    border-right: none; border-bottom: 1px solid var(--ds-border);
+    padding-right: 0; padding-bottom: 10px;
+    position: static; max-height: none;
   }
 }
 
