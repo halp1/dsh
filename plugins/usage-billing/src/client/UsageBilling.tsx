@@ -2062,6 +2062,26 @@ function BillingDashboard({
     setReconcileDismissedDay(day)
     try { window.localStorage.setItem('dsh-billing:reconcile-dismissed', day) } catch { /* 写入失败可忽略 */ }
   }, [])
+  /* v1.5：概览提示条关闭（用户反馈「黄色说明挡视线」）——三条公告各自按天
+     持久化（同 reconcile 模式），次日自动恢复显示。key 前缀 dsh-billing:。 */
+  const [dismissedNotices, setDismissedNotices] = useState<ReadonlySet<string>>(() => {
+    const keys = ['unpriced', 'search-estimate', 'unreadable']
+    const out = new Set<string>()
+    const today = new Date()
+    const pad = (n: number): string => String(n).padStart(2, '0')
+    const day = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`
+    try {
+      for (const key of keys) {
+        if (window.localStorage.getItem(`dsh-billing:notice-${key}-dismissed`) === day) out.add(key)
+      }
+    } catch { /* 读取失败按未关闭处理 */ }
+    return out
+  })
+  const dismissNotice = useCallback((key: string): void => {
+    const day = dayStampLocal()
+    setDismissedNotices(prev => new Set(prev).add(key))
+    try { window.localStorage.setItem(`dsh-billing:notice-${key}-dismissed`, day) } catch { /* 写入失败可忽略 */ }
+  }, [])
   // 概览用量热力图范围：月（日历月）/ 半年（26 周大格，截图友好的主视觉图）/
   // 年（GitHub 风格年度贡献图，含月份与周几标注）；指标：费用 / Token 双口径。
   const [heatmapRange, setHeatmapRange] = useState<'month' | 'half' | 'year'>('month')
@@ -2998,26 +3018,49 @@ function BillingDashboard({
                 </div>
               </section>
 
-              {/* 未计价模型提示：目录外/无价模型费用按 0 计，提醒用户自查并反馈。 */}
-              {(stats.unpricedModels?.length ?? 0) > 0 && (
+              {/* 未计价模型提示：目录外/无价模型费用按 0 计，提醒用户自查并反馈。
+                  v1.5：加 × 关闭（按天持久化，次日恢复）。 */}
+              {(stats.unpricedModels?.length ?? 0) > 0 && !dismissedNotices.has('unpriced') && (
                 <div className={css.unpricedHint} data-testid="billing-unpriced-hint">
-                  {t('unpricedHint').replace('{count}', String(stats.unpricedModels?.length ?? 0))}
+                  <span className={css.unpricedHintBody}>
+                    {t('unpricedHint').replace('{count}', String(stats.unpricedModels?.length ?? 0))}
+                  </span>
+                  <button
+                    type="button"
+                    className={css.noticeDismiss}
+                    data-testid="billing-unpriced-dismiss"
+                    aria-label={t('close')}
+                    onClick={() => { dismissNotice('unpriced') }}
+                  >
+                    ×
+                  </button>
                 </div>
               )}
 
               {/* 联网搜索估算提示：搜索请求无用量事件，费用按次估值计入，口径透明。 */}
-              {(stats.total.searchCalls ?? 0) > 0 && (
+              {(stats.total.searchCalls ?? 0) > 0 && !dismissedNotices.has('search-estimate') && (
                 <div className={css.unpricedHint} data-testid="billing-search-estimate-hint">
-                  {t('searchEstimateHint')
-                    .replace('{count}', String(stats.total.searchCalls ?? 0))
-                    .replace('{each}', money(stats.searchCallEstimateCny ?? 0))}
+                  <span className={css.unpricedHintBody}>
+                    {t('searchEstimateHint')
+                      .replace('{count}', String(stats.total.searchCalls ?? 0))
+                      .replace('{each}', money(stats.searchCallEstimateCny ?? 0))}
+                  </span>
+                  <button
+                    type="button"
+                    className={css.noticeDismiss}
+                    data-testid="billing-search-estimate-dismiss"
+                    aria-label={t('close')}
+                    onClick={() => { dismissNotice('search-estimate') }}
+                  >
+                    ×
+                  </button>
                 </div>
               )}
 
               {/* 数据完整性提示：读时拒读的会话未完整计入（原始日志未动）——
                   让今日/累计偏低可自助归因。无存档子集（完全未计入）与格式拒读
                   子集（过新升级宿主 / 过旧需迁移）各给一行（issue #84）。 */}
-              {(stats.unreadableSessions ?? 0) > 0 && (
+              {(stats.unreadableSessions ?? 0) > 0 && !dismissedNotices.has('unreadable') && (
                 <div className={css.staleNotice} data-testid="billing-sessions-unreadable">
                   <div className={css.staleNoticeBody}>
                     {t('unreadableNotice').replace('{count}', String(stats.unreadableSessions))}
@@ -3032,6 +3075,15 @@ function BillingDashboard({
                       </div>
                     )}
                   </div>
+                  <button
+                    type="button"
+                    className={css.noticeDismiss}
+                    data-testid="billing-unreadable-dismiss"
+                    aria-label={t('close')}
+                    onClick={() => { dismissNotice('unreadable') }}
+                  >
+                    ×
+                  </button>
                 </div>
               )}
               {/* KPI 七卡 + 全局统计范围（issue #47 反馈）：概览与用量两处 KPI 合并到
