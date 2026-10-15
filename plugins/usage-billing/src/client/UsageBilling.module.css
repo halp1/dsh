@@ -3327,7 +3327,7 @@ span.bandDot { cursor: default; }
   }
 }
 
-/* 厂商组头部：左侧厂商名 + 健康点，右侧订阅套数 + 厂商余额。 */
+/* 厂商组头部：左侧 logo 方块 + 厂商名 + 健康点，右侧订阅套数 + 厂商余额。 */
 .providerGroupHead {
   display: flex;
   align-items: baseline;
@@ -3335,6 +3335,26 @@ span.bandDot { cursor: default; }
   gap: 12px;
   /* 与组列表 10px 间距同节奏：此前无 margin，头部行高残留 ~2px 偶然缝隙（issue #50）。 */
   margin-bottom: 10px;
+}
+
+/* v1.5：厂商身份方块（设计稿三段式头部）——36px 圆角，厂商名前 2 字符。
+   底色/文字色由 JSX 内联（随组内首个模型的图表色），此处只管形状与排版。 */
+.providerGroupLogo {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid color-mix(in srgb, var(--ds-blue) 30%, transparent);
+  border-radius: var(--ds-r-1);
+  background: color-mix(in srgb, var(--ds-blue) 16%, transparent);
+  color: var(--ds-blue);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  font-family: var(--font-num);
 }
 
 /* 可折叠厂商组头（issue #77）：整行可点；箭头由伪元素绘制（体积考量不放 span），
