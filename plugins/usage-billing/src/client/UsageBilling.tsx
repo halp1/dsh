@@ -3291,12 +3291,35 @@ function BillingDashboard({
                   滚动；alpha.1 无 scroll-spy——v1.5.1 加 IntersectionObserver。 */}
               <div className={css.settingsLayout}>
                 <aside className={css.settingsNav} data-testid="billing-settings-nav" role="navigation" aria-label="settings">
+                  {/* v1.5 alpha.1.5：锚点图标从 emoji/字符（🔔◐✱ⓘ 渲染不一致）换成
+                      与 TAB_ICONS 同风格的内联 stroke SVG。 */}
                   {[
-                    { id: 'budget', icon: '¥', label: t('settingsNavBudget') },
-                    { id: 'alert', icon: '🔔', label: t('settingsNavAlert') },
-                    { id: 'display', icon: '◐', label: t('settingsNavDisplay') },
-                    { id: 'advanced', icon: '✱', label: t('settingsNavAdvanced'), advanced: true },
-                    { id: 'about', icon: 'ⓘ', label: t('settingsNavAbout') },
+                    {
+                      id: 'budget',
+                      icon: <svg viewBox="0 0 16 16" fill="none" aria-hidden="true" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M5 3l3 4 3-4M8 7v6M5.5 9.5h5M5.5 12h5" /></svg>,
+                      label: t('settingsNavBudget'),
+                    },
+                    {
+                      id: 'alert',
+                      icon: <svg viewBox="0 0 16 16" fill="none" aria-hidden="true" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M8 2a4 4 0 0 1 4 4v3l1.5 2.5h-11L4 9V6a4 4 0 0 1 4-4z" /><path d="M6.5 13.5a1.5 1.5 0 0 0 3 0" /></svg>,
+                      label: t('settingsNavAlert'),
+                    },
+                    {
+                      id: 'display',
+                      icon: <svg viewBox="0 0 16 16" fill="none" aria-hidden="true" stroke="currentColor" strokeWidth="1.5"><circle cx="8" cy="8" r="6" /><path d="M8 2a6 6 0 0 1 0 12z" fill="currentColor" stroke="none" /></svg>,
+                      label: t('settingsNavDisplay'),
+                    },
+                    {
+                      id: 'advanced',
+                      icon: <svg viewBox="0 0 16 16" fill="none" aria-hidden="true" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M8 2v12M2.8 5l10.4 6M13.2 5L2.8 11" /></svg>,
+                      label: t('settingsNavAdvanced'),
+                      advanced: true,
+                    },
+                    {
+                      id: 'about',
+                      icon: <svg viewBox="0 0 16 16" fill="none" aria-hidden="true" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><circle cx="8" cy="8" r="6" /><path d="M8 7.5V11" /><circle cx="8" cy="5.2" r="0.9" fill="currentColor" stroke="none" /></svg>,
+                      label: t('settingsNavAbout'),
+                    },
                   ].map(item => (
                     <button
                       key={item.id}
