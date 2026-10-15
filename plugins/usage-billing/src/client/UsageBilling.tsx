@@ -3971,34 +3971,6 @@ function BillingDashboard({
                             }
                           } : undefined}
                         >
-                          {/* v1.5：厂商身份方块（设计稿三段式头部）——底色随组内首个模型
-                              的图表色 16% mix；纯订阅/余额组回落主色。文案规则：
-                              ASCII 名取前 2 字符大写（DE / AP），中文取首字（直 / 中），
-                              未知通道显示 ?（支出主体不可核实，不给假身份）。 */}
-                          {(() => {
-                            const displayName = providerName(group.name)
-                            const logoColor = group.models[0]?.color
-                            const label = group.channelKind === 'unknown'
-                              ? '?'
-                              : /^[A-Za-z]/.test(displayName)
-                                ? displayName.slice(0, 2).toUpperCase()
-                                : displayName.slice(0, 1)
-                            return (
-                              <span
-                                className={css.providerGroupLogo}
-                                aria-hidden="true"
-                                style={logoColor !== undefined && logoColor !== ''
-                                  ? {
-                                      background: `color-mix(in srgb, ${logoColor} 16%, transparent)`,
-                                      color: logoColor,
-                                      borderColor: `color-mix(in srgb, ${logoColor} 30%, transparent)`,
-                                    }
-                                  : undefined}
-                              >
-                                {label}
-                              </span>
-                            )
-                          })()}
                           <span className={css.providerGroupTitle}>
                             <span className={clsx(css.healthDot, group.dot)} aria-hidden="true" />
                             {(() => {
