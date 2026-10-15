@@ -345,11 +345,11 @@ export function LiveCostBar({ sessionId, t }: LiveCostBarProps): React.ReactNode
         <>
           <span className={css.feeSep} aria-hidden="true">·</span>
           <span className={css.feeItem} data-testid="billing-live-turn">
-            {t('liveTurn')} <span className={css.feeNum}>{money(turnCost)}</span>
+            {t('liveTurn')} <span className={css.feeNum} data-tick="turn">{money(turnCost)}</span>
           </span>
           <span className={css.feeSep} aria-hidden="true">·</span>
           <span className={css.feeItem} data-testid="billing-live-session">
-            {t('liveSession')} <span className={css.feeNum}>{money(sessionCost)}</span>
+            {t('liveSession')} <span className={css.feeNum} data-tick="session">{money(sessionCost)}</span>
           </span>
         </>
       )}

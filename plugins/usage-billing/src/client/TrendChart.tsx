@@ -15,6 +15,13 @@ import { zh } from './locales.ts'
 import { convertFromCny, formatMoney, type CostCurrency } from './pricing.ts'
 import { shortNumber } from './TokenPanel.tsx'
 
+/** 本地日期戳：YYYY-MM-DD（与 stats.byDay 的键一致）。 */
+function localDayStamp(): string {
+  const d = new Date()
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
 /** One model's legend identity: key, display name, and brand color. */
 export interface TrendSeriesModel {
   /** Stats key (`byModel` key), also the `byModel` map key. */
@@ -228,6 +235,44 @@ export function TrendChart({ data, models = [], currency = 'cny', metric = 'cost
 
         {/* Calls line (right axis): the daily call volume trend. */}
         <path d={linePath} fill="none" className={css.chartLine} />
+        {/* v1.5：今日竖虚线 + 渐变填充（面积图下垫）。 */}
+        {(() => {
+          const todayKey = localDayStamp()
+          const todayIdx = data.findIndex(d => d.date === todayKey)
+          return todayIdx >= 0 ? (
+            <>
+              <defs>
+                <linearGradient id="chartAreaGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+                  <stop offset="0%" stopColor="var(--ds-blue)" stopOpacity="0.35" />
+                  <stop offset="100%" stopColor="var(--ds-blue)" stopOpacity="0" />
+                </linearGradient>
+              </defs>
+              {/* 面积填充：折线下方到 0 的渐变 */}
+              <path
+                d={`${linePath} L ${inner(data.length - 1)} ${yCalls(0)} L ${inner(0)} ${yCalls(0)} Z`}
+                fill="url(#chartAreaGrad)"
+              />
+              {/* 今日竖虚线 + 顶部标记 */}
+              <line
+                x1={inner(todayIdx)} x2={inner(todayIdx)}
+                y1={PAD.top} y2={PAD.top + plotH}
+                stroke="var(--ds-amber)"
+                strokeWidth="1"
+                strokeDasharray="3 3"
+                opacity="0.6"
+              />
+              <text
+                x={inner(todayIdx) + 4}
+                y={PAD.top - 6}
+                fill="var(--ds-amber)"
+                fontSize="10"
+                fontFamily="var(--font-num)"
+              >
+                {shortDate(todayKey)}
+              </text>
+            </>
+          ) : null
+        })()}
         {/* Right-axis call labels. */}
         {callsTicks.map((value, idx) => {
           const y = yCalls(value)

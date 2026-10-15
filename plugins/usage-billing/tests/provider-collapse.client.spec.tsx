@@ -204,8 +204,8 @@ describe('today-only empty state keeps the toolbar reachable', () => {
     await openProvidersTab()
     await waitFor(() => expect(screen.getAllByTestId('billing-provider-group').length).toBeGreaterThan(0))
     await enableTodayOnly()
-    // 空态：今日专属文案（不是「暂无计费数据」）。
-    await waitFor(() => expect(screen.getByTestId('billing-provider-empty').textContent).toBe(t('todayNoConsumption')))
+    // 空态：今日专属文案（不是「暂无计费数据」）；v1.5 空态含插画引导副文案，断言前缀匹配。
+    await waitFor(() => expect(screen.getByTestId('billing-provider-empty').textContent).toContain(t('todayNoConsumption')))
     // 控制行（含开关）恒常显示——昨天「开关找不回来」的回归点。
     const controls = screen.getByTestId('billing-provider-controls')
     expect(controls.contains(screen.getByTestId('billing-provider-today-toggle'))).toBe(true)

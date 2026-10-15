@@ -339,6 +339,49 @@ body {
   text-overflow: ellipsis;
 }
 
+/* v1.5：触发卡涨跌徽章（值右侧）+ count-up 光晕（值下方）。 */
+.triggerDelta {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  padding: 1px 5px;
+  border-radius: 999px;
+  margin-left: 6px;
+  flex: none;
+}
+
+.triggerDeltaUp {
+  color: var(--ds-green);
+  background: color-mix(in srgb, var(--ds-green) 14%, transparent);
+}
+
+.triggerDeltaDown {
+  color: var(--ds-red);
+  background: color-mix(in srgb, var(--ds-red) 14%, transparent);
+}
+
+/* count-up 光晕：数字下方一道窄扫描线，1.2s 一次性（不打扰）。 */
+.triggerGlow {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 4px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--ds-blue) 40%, transparent), transparent);
+  opacity: 0;
+  animation: triggerGlowPulse var(--ds-t-pulse) ease-out 1;
+}
+
+@keyframes triggerGlowPulse {
+  0% { opacity: 0; transform: translateX(-30%); }
+  30% { opacity: 1; }
+  100% { opacity: 0; transform: translateX(30%); }
+}
+
 /* 近 7 天 sparkline：常驻迷你趋势，底对齐。 */
 .triggerSpark {
   display: flex;
@@ -1067,6 +1110,9 @@ body {
 
 .heroGaugeArc {
   fill: none;
+  /* v1.5：渐变弧——cyan(安全) → blue(警戒) → amber(危险)。
+     SVG gradient 引用必须在 JSX 里用 <defs> 内联定义，CSS 里引用 url() 不行。
+     这里保留 fallback；JSX 端用 stroke="url(#heroRingGrad)" 覆盖。 */
   stroke: var(--ds-blue);
   stroke-width: 7;
   stroke-linecap: round;
@@ -1075,6 +1121,14 @@ body {
 
 .heroGaugeArcOver {
   stroke: var(--ds-red);
+}
+
+/* v1.5：本月预计副行（hero 主读数下方，虚线箭头指向预测值） */
+.heroPred {
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--ds-t-3);
+  font-family: var(--font-num);
 }
 
 .heroGaugeCenter {
@@ -1288,6 +1342,47 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* v1.5：KPI 卡 delta 徽章（标签行右侧）+ mini sparkline（值下方） */
+.kpiLabelRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.kpiDelta {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  padding: 1px 5px;
+  border-radius: 999px;
+  flex: none;
+}
+
+.kpiDeltaUp {
+  color: var(--ds-green);
+  background: color-mix(in srgb, var(--ds-green) 14%, transparent);
+}
+
+.kpiDeltaDown {
+  color: var(--ds-red);
+  background: color-mix(in srgb, var(--ds-red) 14%, transparent);
+}
+
+.kpiDeltaFlat {
+  color: var(--ds-t-3);
+  background: var(--dsb-3);
+}
+
+.kpiSpark {
+  margin-top: 4px;
+  height: 12px;
 }
 
 /* ── Panels (chart / tables) ────────────────────────────────────────── */
@@ -1585,6 +1680,61 @@ body {
   text-align: center;
   font-size: 13px;
   color: var(--ds-t-3);
+}
+
+/* v1.5：空态插画（厂商列表空时）——坐标轴 SVG + 脉冲点 + 引导文案。 */
+.emptyState {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 32px 24px;
+  border: 1px dashed var(--ds-border);
+  border-radius: var(--ds-r-2);
+  background: color-mix(in srgb, var(--dsb-2) 50%, transparent);
+  text-align: center;
+}
+
+.emptyIll {
+  position: relative;
+  display: inline-block;
+  width: 96px;
+  height: 64px;
+}
+
+.emptyIll svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.emptyIllDot {
+  position: absolute;
+  right: 14px;
+  bottom: 8px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ds-blue);
+  animation: emptyDotPulse 2s ease-in-out infinite;
+}
+
+@keyframes emptyDotPulse {
+  0%, 100% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--ds-blue) 20%, transparent); }
+  50% { box-shadow: 0 0 0 10px color-mix(in srgb, var(--ds-blue) 0%, transparent); }
+}
+
+.emptyTitle {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ds-t-1);
+}
+
+.emptyDesc {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ds-t-3);
+  max-width: 320px;
 }
 
 .chartGrid {
@@ -2658,6 +2808,18 @@ span.bandDot { cursor: default; }
 .feeItem { color: var(--ds-t-2); white-space: nowrap; }
 /* 费用数字：主色 + 600 加重，是这条统计条的视觉锚点。 */
 .feeNum { color: var(--ds-t-1); font-weight: 600; }
+
+/* v1.5：即时代费条数值更新 tick pulse——每轮费用变化时数字短暂蓝脉冲。
+   纯 CSS 动画，data-tick 属性由 JSX 侧挂；动画 keyframes 定义 feeTickFlash。 */
+.feeNum[data-tick] {
+  animation: feeTickFlash var(--ds-t-pulse) ease-out 1;
+}
+
+@keyframes feeTickFlash {
+  0% { text-shadow: 0 0 0 color-mix(in srgb, var(--ds-blue) 0%, transparent); }
+  30% { text-shadow: 0 0 8px color-mix(in srgb, var(--ds-blue) 60%, transparent); }
+  100% { text-shadow: 0 0 0 color-mix(in srgb, var(--ds-blue) 0%, transparent); }
+}
 .feeSep { color: var(--ds-t-4); }
 
 /* 档位 / 额度预警 chip：小胶囊，--dsb-3 底 + 1px 描边，状态 chip 覆写语义色文字与 30% 语义色描边。 */
@@ -4026,11 +4188,11 @@ span.bandDot { cursor: default; }
 
 /* ── 设置 Tab：set-card（头部 标题+说明+开关 → 控制列） ───────────── */
 
-/* v1.5 设置页布局：左 180px 锚点 + 右侧 pane。容器查询 ≤540px 退化顶栏 nav。 */
+/* v1.5 设置页布局：左 120px 紧凑锚点 + 右侧 pane。容器查询 ≤540px 退化顶栏 nav。 */
 .settingsLayout {
   display: grid;
-  grid-template-columns: 180px 1fr;
-  gap: 18px;
+  grid-template-columns: 120px 1fr;
+  gap: 14px;
   container-type: inline-size;
   container-name: billing-settings;
 }
@@ -4049,10 +4211,10 @@ span.bandDot { cursor: default; }
 }
 
 .settingsNavItem {
-  display: flex; align-items: center; gap: 8px;
-  padding: 7px 10px; border: 0; border-radius: 6px;
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 8px; border: 0; border-radius: 6px;
   background: transparent; color: var(--ds-t-2);
-  font-size: 12px; font-family: inherit; cursor: pointer; text-align: left;
+  font-size: 11.5px; font-family: inherit; cursor: pointer; text-align: left;
   transition: background-color var(--ds-t-fast), color var(--ds-t-fast);
 }
 

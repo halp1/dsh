@@ -275,6 +275,7 @@ export type UsageBillingKey =
   | 'settingsNavAdvanced'
   | 'settingsNavAbout'
   | 'settingsSectionDisplay'
+  | 'emptyHint'
   | 'tokenDaily'
   | 'tokenByModel'
   | 'tokenMiss'
@@ -604,6 +605,7 @@ export const zh: Record<UsageBillingKey, string> = {
   'settingsNavAdvanced': '高级',
   'settingsNavAbout': '关于',
   'settingsSectionDisplay': '显示偏好',
+  'emptyHint': '运行第一次对话后，这里会自动出现按厂商的用量与费用明细',
   'tokenViewStructure': '按结构',
   'tokenViewModel': '按模型',
   'tokenHitShort': '命中',
@@ -925,6 +927,7 @@ export const en: Record<UsageBillingKey, string> = {
   'settingsNavAdvanced': 'Advanced',
   'settingsNavAbout': 'About',
   'settingsSectionDisplay': 'Display preferences',
+  'emptyHint': 'Run your first conversation and per-provider usage and cost breakdown will appear here automatically',
   'tokenHit': 'Input (cache hit)',
   'tokenOutput': 'Output',
   'tokenViewStructure': 'Structure',

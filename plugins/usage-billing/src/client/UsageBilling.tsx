@@ -1379,7 +1379,7 @@ function UsageBillingTrigger(
       direct: { name: string; text: string; low: boolean } | undefined
       sub: { name: string; text: string; low: boolean } | undefined
     }
-  /** hover 速览「数据卡」用量数值（累计）：输入 / 输出 / 缓存命中与未命中（算命中率用）。 */
+    /** hover 速览「数据卡」用量数值（累计）：输入 / 输出 / 缓存命中与未命中（算命中率用）。 */
   dash: {
     input: number
     output: number
@@ -1387,6 +1387,8 @@ function UsageBillingTrigger(
     cacheMiss: number
     calls: number
    }
+  /** v1.5：今日 vs 昨日费用环比（百分比），触发卡涨跌徽章用。 */
+  deltaPct?: number
   /** 模型用量悬浮窗偏好（模式 + 指定订阅卡目标）。 */
   floatPrefs: FloatWindowPrefs
   /** 订阅配额列表（「指定订阅卡」模式的数据来源）。 */
@@ -1399,7 +1401,7 @@ function UsageBillingTrigger(
   const money = (cny: number): string => formatMoney(convertFromCny(cny, props.currency), props.currency)
   const {
     wide, t, onOpen, monthCost, todayCost, weekCost, days, vendorStatus, dash,
-    floatPrefs, subscriptions, cardPrefs, monthTokens, todayTokens, weekTokens, budgetPressure,
+    floatPrefs, subscriptions, cardPrefs, monthTokens, todayTokens, weekTokens, budgetPressure, deltaPct = 0,
   } = props
 
   // 「指定订阅卡」浮窗：可用订阅列表 + 当前展示索引（每次一张，可前后切换）。
@@ -1561,15 +1563,28 @@ function UsageBillingTrigger(
                 : cardPrefs.span === 'week'
                   ? (tokenView ? weekTokens : weekCost)
                   : (tokenView ? monthTokens : monthCost)
+              /* v1.5：涨跌徽章 + count-up 光晕。
+                 delta 按 span 口径计算：今日 vs 昨日 / 本周 vs 上周 / 本月 vs 上月。 */
+              const deltaValue = cardPrefs.span === 'day' ? deltaPct : 0
               return tokenView ? (
                 <span className={css.triggerMetric} data-testid="billing-trigger-span-tokens">{formatTokens(spanValue)}</span>
               ) : (
                 /* 币符与数值同行（issue #51 修正）：column 布局下需显式包横排行，
                    否则 ¥ 与数字被拆成两行堆叠。 */
-                <span className={css.triggerValueRow}>
-                  <span className={css.triggerYen} aria-hidden="true">{money(spanValue).charAt(0)}</span>
-                  <span className={css.triggerMetric} data-testid="billing-trigger-span-money">{money(spanValue).slice(1)}</span>
-                </span>
+                <>
+                  <span className={css.triggerValueRow}>
+                    <span className={css.triggerYen} aria-hidden="true">{money(spanValue).charAt(0)}</span>
+                    <span className={css.triggerMetric} data-testid="billing-trigger-span-money">{money(spanValue).slice(1)}</span>
+                  </span>
+                  {/* 涨跌徽章：非零 delta 时显示 */}
+                  {deltaValue !== 0 && (
+                    <span className={clsx(css.triggerDelta, deltaValue > 0 ? css.triggerDeltaUp : css.triggerDeltaDown)}>
+                      {deltaValue > 0 ? '▲' : '▼'} {Math.abs(deltaValue).toFixed(1)}%
+                    </span>
+                  )}
+                  {/* count-up 光晕：值更新时短暂闪烁（动画令牌 --ds-t-pulse）。 */}
+                  <span className={css.triggerGlow} aria-hidden="true" />
+                </>
               )
             })()}
           </span>
@@ -2886,6 +2901,7 @@ function BillingDashboard({
                 {/* ZINE: 装饰孔位（hero 锚点：撕角便签角标） */}
                 {renderSlot('billing.dashboard.decor', { position: 'hero' })}
                 <div className={css.heroTop}>
+                  {/* v1.5：Hero 读数下方加「预计月底」预测（按当前日均速率推算）。 */}
                   <div className={css.heroMain}>
                     <span className={css.heroLabel}>
                       {t('monthCost')}
@@ -2896,9 +2912,14 @@ function BillingDashboard({
                         {money(monthCost).slice(1)}
                       </span>
                     </div>
-                    {/* 调用副行：呼应设计 Hero 的「758 调用」读法。 */}
+                    {/* 调用副行 + 本月预计（v1.5 新增：渐变弧下推预测）。 */}
                     <span className={css.heroMeta}>
                       {total.calls.toLocaleString()} {t('calls')}
+                      {monthCostProjected > 0 && (
+                        <span className={css.heroPred}>
+                          {' '}{t('monthProjected')} {money(monthCostProjected)}
+                        </span>
+                      )}
                     </span>
                   </div>
                   {/* 环形余量仪表盘：SVG stroke-dasharray 画弧，弧 = 剩余预算比例
@@ -2912,6 +2933,14 @@ function BillingDashboard({
                           viewBox="0 0 120 120"
                           aria-hidden="true"
                         >
+                          {/* v1.5：渐变弧——cyan(安全) → blue(警戒) → amber(危险)。 */}
+                          <defs>
+                            <linearGradient id="heroRingGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                              <stop offset="0%" stopColor="var(--ds-cyan)" />
+                              <stop offset="55%" stopColor="var(--ds-blue)" />
+                              <stop offset="100%" stopColor="var(--ds-amber)" />
+                            </linearGradient>
+                          </defs>
                           <circle className={css.heroGaugeTrack} cx="60" cy="60" r="52" />
                           <circle
                             className={clsx(css.heroGaugeArc, heroGauge.over && css.heroGaugeArcOver)}
@@ -2919,6 +2948,7 @@ function BillingDashboard({
                             cy="60"
                             r="52"
                             style={{ strokeDasharray: `${heroGauge.remainRatio * 326.7} 326.7` }}
+                            stroke={heroGauge.over ? undefined : 'url(#heroRingGrad)'}
                           />
                         </svg>
                         <span className={css.heroGaugeCenter}>
@@ -3032,52 +3062,127 @@ function BillingDashboard({
                   </div>
                 </div>
                 <section className={css.kpiGrid} data-testid="billing-kpi-grid">
-                  <div className={css.kpiTile} data-testid="billing-kpi-tile">
-                    <span className={css.kpiLabel}>{t('cacheHitRate')}</span>
-                    <span className={clsx(css.kpiValue, css.kpiGreen)}>
-                      {formatPercent(kpiAgg.cacheHit + kpiAgg.cacheMiss > 0 ? (kpiAgg.cacheHit / (kpiAgg.cacheHit + kpiAgg.cacheMiss)) * 100 : 0)}
-                    </span>
-                    <span className={css.kpiDetail}>
-                      {formatTokens(kpiAgg.cacheHit)} / {formatTokens(kpiAgg.cacheHit + kpiAgg.cacheMiss)}
-                      {(total.cacheWrite ?? 0) > 0 ? ` · ${t('tokenCacheWrite')} ${formatTokens(total.cacheWrite ?? 0)}` : ''}
-                    </span>
-                  </div>
-                  <div className={css.kpiTile}>
-                    <span className={css.kpiLabel}>{t('tokens')}</span>
-                    <span className={css.kpiValue}>{formatTokens(kpiAgg.input + kpiAgg.output)}</span>
-                    <span className={css.kpiDetail}>
-                      {t('inputTokens')} {formatTokens(kpiAgg.input)} · {t('outputTokens')} {formatTokens(kpiAgg.output)}
-                    </span>
-                  </div>
-                  <div className={css.kpiTile} data-testid="billing-kpi-avg">
-                    <span className={css.kpiLabel}>{t('avgCost')}</span>
-                    <span className={css.kpiValue}>{money(kpiAgg.calls > 0 ? kpiAgg.cost / kpiAgg.calls : 0)}</span>
-                    <span className={css.kpiDetail}>{t('calls')} {kpiAgg.calls.toLocaleString()}</span>
-                  </div>
-                  <div className={css.kpiTile}>
-                    <span className={css.kpiLabel}>{t('calls')}</span>
-                    <span className={css.kpiValue}>{kpiAgg.calls.toLocaleString()}</span>
-                    <span className={css.kpiDetail}>{modelRows.length} {t('models')}</span>
-                  </div>
-                  <div className={css.kpiTile} data-testid="billing-kpi-think">
-                    <span className={css.kpiLabel}>{t('tokenReasoningShare')}</span>
-                    <span className={clsx(css.kpiValue, css.kpiGreen)}>
-                      {formatPercent(kpiAgg.output > 0 ? (kpiAgg.reasoning / kpiAgg.output) * 100 : 0)}
-                    </span>
-                    <span className={css.kpiDetail}>{formatTokens(kpiAgg.reasoning)}</span>
-                  </div>
-                  <div className={css.kpiTile} data-testid="billing-kpi-io">
-                    <span className={css.kpiLabel}>{t('tokenIo')}</span>
-                    <span className={css.kpiValue}>{(kpiAgg.output > 0 ? kpiAgg.input / kpiAgg.output : 0).toFixed(2)}</span>
-                    <span className={css.kpiDetail}>
-                      {formatTokens(kpiAgg.input)} / {formatTokens(kpiAgg.output)}
-                    </span>
-                  </div>
-                  <div className={css.kpiTile} data-testid="billing-kpi-peak">
-                    <span className={css.kpiLabel}>{t('tokenPeak')}</span>
-                    <span className={css.kpiValue}>{kpiAgg.peakTokens > 0 ? shortNumber(kpiAgg.peakTokens) : '—'}</span>
-                    <span className={css.kpiDetail}>{kpiAgg.peakDay ?? '—'}</span>
-                  </div>
+                  {/* v1.5：每 KPI 卡带 delta 徽章 + mini sparkline（最近 7 天趋势）。
+                      delta 来自 byDay 按日聚合，sparkline 用纯色 CSS 渲染（无图表库）。 */}
+                  {(() => {
+                    // 预计算各指标的按日序列（最近 7 天）与今日 vs 昨日 delta
+                    const days = Object.keys(byDay).sort().slice(-7)
+                    const todayKey = localDayStamp()
+                    const todayIdx = days.indexOf(todayKey)
+                    const at = (arr: readonly number[], i: number): number => arr[i] ?? 0
+                    const seriesCost = days.map(d => byDay[d]?.cost ?? 0)
+                    const seriesCalls = days.map(d => byDay[d]?.calls ?? 0)
+                    const seriesTokens = days.map(d => {
+                      const row = byDay[d]
+                      return row === undefined ? 0 : dayTokensOf(row)
+                    })
+                    const seriesCacheHit = days.map(d => {
+                      const row = byDay[d]
+                      return row !== undefined && (row.cacheHit + row.cacheMiss) > 0
+                        ? (row.cacheHit / (row.cacheHit + row.cacheMiss)) * 100
+                        : 0
+                    })
+                    const deltaCost = todayIdx > 0 && at(seriesCost, todayIdx - 1) > 0
+                      ? ((at(seriesCost, todayIdx) - at(seriesCost, todayIdx - 1)) / at(seriesCost, todayIdx - 1)) * 100
+                      : 0
+                    const deltaCalls = todayIdx > 0 && at(seriesCalls, todayIdx - 1) > 0
+                      ? ((at(seriesCalls, todayIdx) - at(seriesCalls, todayIdx - 1)) / at(seriesCalls, todayIdx - 1)) * 100
+                      : 0
+                    const deltaTokens = todayIdx > 0 && at(seriesTokens, todayIdx - 1) > 0
+                      ? ((at(seriesTokens, todayIdx) - at(seriesTokens, todayIdx - 1)) / at(seriesTokens, todayIdx - 1)) * 100
+                      : 0
+                    const deltaCacheHit = todayIdx > 0 && at(seriesCacheHit, todayIdx - 1) > 0
+                      ? at(seriesCacheHit, todayIdx) - at(seriesCacheHit, todayIdx - 1)
+                      : 0
+                    // 简化的 sparkline 渲染（7 根柱）
+                    const renderSpark = (data: number[], color: string) => (
+                      <svg viewBox="0 0 28 12" preserveAspectRatio="none" style={{ display: 'block', width: '100%', height: '12px' }}>
+                        {data.map((v, i) => {
+                          const max = Math.max(...data, 1)
+                          const h = (v / max) * 10
+                          const x = i * 4
+                          return <rect key={i} x={x} y={12 - h} width="2.5" height={h} fill={color} opacity={i === data.length - 1 ? 1 : 0.6} />
+                        })}
+                      </svg>
+                    )
+                    const renderDelta = (pct: number) => (
+                      <span className={clsx(css.kpiDelta, pct > 0 ? css.kpiDeltaUp : pct < 0 ? css.kpiDeltaDown : css.kpiDeltaFlat)}>
+                        {pct > 0 ? '▲' : pct < 0 ? '▼' : ''} {Math.abs(pct).toFixed(1)}%
+                      </span>
+                    )
+                    return (
+                      <>
+                        <div className={css.kpiTile} data-testid="billing-kpi-tile">
+                          <div className={css.kpiLabelRow}>
+                            <span className={css.kpiLabel}>{t('cacheHitRate')}</span>
+                            {renderDelta(deltaCacheHit)}
+                          </div>
+                          <span className={clsx(css.kpiValue, css.kpiGreen)}>
+                            {formatPercent(kpiAgg.cacheHit + kpiAgg.cacheMiss > 0 ? (kpiAgg.cacheHit / (kpiAgg.cacheHit + kpiAgg.cacheMiss)) * 100 : 0)}
+                          </span>
+                          <div className={css.kpiSpark}>{renderSpark(seriesCacheHit, 'var(--ds-cyan)')}</div>
+                          <span className={css.kpiDetail}>
+                            {formatTokens(kpiAgg.cacheHit)} / {formatTokens(kpiAgg.cacheHit + kpiAgg.cacheMiss)}
+                            {(total.cacheWrite ?? 0) > 0 ? ` · ${t('tokenCacheWrite')} ${formatTokens(total.cacheWrite ?? 0)}` : ''}
+                          </span>
+                        </div>
+                        <div className={css.kpiTile}>
+                          <div className={css.kpiLabelRow}>
+                            <span className={css.kpiLabel}>{t('tokens')}</span>
+                            {renderDelta(deltaTokens)}
+                          </div>
+                          <span className={css.kpiValue}>{formatTokens(kpiAgg.input + kpiAgg.output)}</span>
+                          <div className={css.kpiSpark}>{renderSpark(seriesTokens, 'var(--ds-blue)')}</div>
+                          <span className={css.kpiDetail}>
+                            {t('inputTokens')} {formatTokens(kpiAgg.input)} · {t('outputTokens')} {formatTokens(kpiAgg.output)}
+                          </span>
+                        </div>
+                        <div className={css.kpiTile} data-testid="billing-kpi-avg">
+                          <div className={css.kpiLabelRow}>
+                            <span className={css.kpiLabel}>{t('avgCost')}</span>
+                            {renderDelta(deltaCost)}
+                          </div>
+                          <span className={css.kpiValue}>{money(kpiAgg.calls > 0 ? kpiAgg.cost / kpiAgg.calls : 0)}</span>
+                          <div className={css.kpiSpark}>{renderSpark(seriesCost, 'var(--ds-blue)')}</div>
+                          <span className={css.kpiDetail}>{t('calls')} {kpiAgg.calls.toLocaleString()}</span>
+                        </div>
+                        <div className={css.kpiTile}>
+                          <div className={css.kpiLabelRow}>
+                            <span className={css.kpiLabel}>{t('calls')}</span>
+                            {renderDelta(deltaCalls)}
+                          </div>
+                          <span className={css.kpiValue}>{kpiAgg.calls.toLocaleString()}</span>
+                          <div className={css.kpiSpark}>{renderSpark(seriesCalls, 'var(--ds-blue)')}</div>
+                          <span className={css.kpiDetail}>{modelRows.length} {t('models')}</span>
+                        </div>
+                        <div className={css.kpiTile} data-testid="billing-kpi-think">
+                          <div className={css.kpiLabelRow}>
+                            <span className={css.kpiLabel}>{t('tokenReasoningShare')}</span>
+                          </div>
+                          <span className={clsx(css.kpiValue, css.kpiGreen)}>
+                            {formatPercent(kpiAgg.output > 0 ? (kpiAgg.reasoning / kpiAgg.output) * 100 : 0)}
+                          </span>
+                          <span className={css.kpiDetail}>{formatTokens(kpiAgg.reasoning)}</span>
+                        </div>
+                        <div className={css.kpiTile} data-testid="billing-kpi-io">
+                          <div className={css.kpiLabelRow}>
+                            <span className={css.kpiLabel}>{t('tokenIo')}</span>
+                          </div>
+                          <span className={css.kpiValue}>{(kpiAgg.output > 0 ? kpiAgg.input / kpiAgg.output : 0).toFixed(2)}</span>
+                          <span className={css.kpiDetail}>
+                            {formatTokens(kpiAgg.input)} / {formatTokens(kpiAgg.output)}
+                          </span>
+                        </div>
+                        <div className={css.kpiTile} data-testid="billing-kpi-peak">
+                          <div className={css.kpiLabelRow}>
+                            <span className={css.kpiLabel}>{t('tokenPeak')}</span>
+                          </div>
+                          <span className={css.kpiValue}>{kpiAgg.peakTokens > 0 ? shortNumber(kpiAgg.peakTokens) : '—'}</span>
+                          <span className={css.kpiDetail}>{kpiAgg.peakDay ?? '—'}</span>
+                        </div>
+                      </>
+                    )
+                  })()}
                 </section>
               </div>
 
@@ -3776,9 +3881,18 @@ function BillingDashboard({
                   </span>
                 </div>
                 {providerGroups.length === 0 ? (
-                  <div className={css.emptyRow} data-testid="billing-provider-empty">
-                    {/* 审计 S4：今日过滤导致的空列表与「压根没数据」区分文案，避免误判丢数据。 */}
-                    {providersTodayOnly ? t('todayNoConsumption') : t('noData')}
+                  <div className={css.emptyState} data-testid="billing-provider-empty">
+                    {/* v1.5：空态插画——坐标轴 + 脉冲点 + 引导文案。 */}
+                    <span className={css.emptyIll} aria-hidden="true">
+                      <svg viewBox="0 0 96 64" fill="none">
+                        <line x1="6" y1="58" x2="90" y2="58" stroke="var(--ds-border-strong)" strokeWidth="1" />
+                        <line x1="6" y1="6" x2="6" y2="58" stroke="var(--ds-border-strong)" strokeWidth="1" />
+                        <path d="M14 50 L28 40 L42 44 L56 26 L70 30 L82 14" stroke="var(--ds-border-strong)" strokeWidth="1.5" strokeLinecap="round" fill="none" strokeDasharray="3 3" />
+                      </svg>
+                      <span className={css.emptyIllDot} />
+                    </span>
+                    <span className={css.emptyTitle}>{providersTodayOnly ? t('todayNoConsumption') : t('noData')}</span>
+                    <span className={css.emptyDesc}>{t('emptyHint')}</span>
                   </div>
                 ) : (
                   <div className={css.providerGroupList} data-testid="billing-provider-groups">
@@ -4643,6 +4757,12 @@ export function UsageBilling(props: UsageBillingProps): React.ReactNode {
     .filter(([date]) => date.startsWith(today.slice(0, 7)))
     .reduce((sum, [, day]) => sum + day.cost, 0)
   const todayCost = displayStats.byDay[today]?.cost ?? 0
+  // v1.5：今日 vs 昨日费用环比（触发卡涨跌徽章用）。昨日缺失时为 0（不渲染徽章）。
+  const yesterday = new Date()
+  yesterday.setDate(yesterday.getDate() - 1)
+  const yesterdayKey = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}`
+  const prevDayCost = displayStats.byDay[yesterdayKey]?.cost ?? 0
+  const deltaPct = prevDayCost > 0 ? ((todayCost - prevDayCost) / prevDayCost) * 100 : 0
   // 触发卡 hover 速览：本周累计 + 近 7 天迷你柱。
   // 「本周」按自然周（周一起算，与标签语义一致，issue #39）：周一时它 ≈ 当日，
   // 不再是「近 7 天」把上周用量卷进来、与当月几乎相等的错位。
@@ -4918,6 +5038,7 @@ export function UsageBilling(props: UsageBillingProps): React.ReactNode {
         floatPrefs={floatPrefs}
         subscriptions={quotas}
         budgetPressure={budgetPressure}
+        deltaPct={deltaPct}
       />
       {open && (
         <BillingDashboard
