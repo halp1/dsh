@@ -899,6 +899,12 @@ export interface UsageLedgerSession {
    * 更早写入的行（配置不参与复用判定）；与当前指纹不一致的行不复用、全量重折。
    */
   fingerprint?: string
+  /**
+   * 该行最近一次折叠落盘的时刻（epoch 毫秒）。多实例共享同一账本文件时，
+   * save 侧按它做行级合并（后折覆盖先折），防止整份覆盖式落盘丢掉另一实例
+   * 刚写入的行；缺失 = 合并语义引入前的旧行，视为最旧。
+   */
+  foldedAt?: number
   fold: SerializedSessionFold
 }
 
@@ -909,6 +915,51 @@ export interface UsageLedgerDocument {
   sessions: UsageLedgerSession[]
   /** 已应用的一次性配置迁移 id 列表（随文档落盘；缺省 = 尚未跑过任何迁移）。 */
   appliedMigrations?: string[]
+}
+
+/**
+ * 账本行谁更新：{@link UsageLedgerSession.foldedAt} 新者胜（缺失视为 0 =
+ * 合并语义引入前的旧行）；时刻相同比 {@link UsageLedgerSession.foldVersion}
+ * （新算法胜）；再相同视为等价，取 incoming（本进程刚折出的当前视图）。
+ */
+function ledgerRowWins(incoming: UsageLedgerSession, existing: UsageLedgerSession): boolean {
+  const at = incoming.foldedAt ?? 0
+  const bt = existing.foldedAt ?? 0
+  if (at !== bt) return at > bt
+  return (incoming.foldVersion ?? 1) > (existing.foldVersion ?? 1)
+}
+
+/**
+ * 多实例账本合并（自审计延期项：save 路径 last-writer-wins 丢写）：同一
+ * DSH_HOME 下多个宿主实例各自持有内存账本，整份覆盖式落盘会让后写者抹掉
+ * 先写者刚保存的行。本进程要落的文档与磁盘现存文档按会话 id 行级合并：
+ * 双方都有的行按「谁更新谁胜」，仅磁盘有的行（他实例写入、本进程内存没有）
+ * 原样保留——账本行从不按 seen 剪除（见 aggregateOnce 尾部注释），合并不会
+ * 复活已删会话。合并只发生在落盘边界：跨实例的即时可见性仍靠重启重载，
+ * 此处保证的是磁盘上不丢数据（最终一致）。
+ * @param document - 本进程刚聚合出的完整账本文档。
+ * @param existing - 磁盘上现存（他实例可能写入过）的账本文档。
+ * @returns 合并后的文档（sessions 行序：incoming 在前、existing 独有行按原序追加）。
+ */
+export function mergeUsageLedgerDocuments(document: UsageLedgerDocument, existing: UsageLedgerDocument): UsageLedgerDocument {
+  const byId = new Map<string, UsageLedgerSession>()
+  for (const row of existing.sessions) byId.set(row.id, row)
+  const sessions: UsageLedgerSession[] = []
+  for (const row of document.sessions) {
+    const prev = byId.get(row.id)
+    sessions.push(prev !== undefined && ledgerRowWins(prev, row) ? prev : row)
+    byId.delete(row.id)
+  }
+  for (const row of byId.values()) sessions.push(row)
+  // appliedMigrations 取并集：任一实例已应用的迁移不需要其他实例重跑。
+  const applied = document.appliedMigrations === undefined && existing.appliedMigrations === undefined
+    ? undefined
+    : [...new Set([...(document.appliedMigrations ?? []), ...(existing.appliedMigrations ?? [])])]
+  return {
+    ...document,
+    sessions,
+    ...(applied === undefined ? {} : { appliedMigrations: applied }),
+  }
 }
 
 /**
@@ -981,7 +1032,11 @@ export interface UsageLedgerDocument {
 // commandcode）不再依赖白名单，合成直连路由视图按官方目录价计价（issue #91）；
 // 同时模型别名（modelKeyAliases）进折叠指纹，别名改动后历史行按新目录键重算。
 // bump 让存量 unknown 行升级后重折补齐费用，仅日志已删的行留在旧口径。
-export const FOLD_VERSION = 22
+// 23：聚合语义变更——峰谷分桶（byTier）不再把延迟档模型（tierSemantics =
+// 'latency'，Gemini Standard/Flex）按 DeepSeek 北京峰谷窗归桶：其计价与时刻
+// 无关（peakShare 混合），套窗分桶会让峰谷占比条虚含「时间窗计费」的流量。
+// bump 让日志仍在的会话重折出新峰谷口径；费用总额不受影响（byTier 仅展示层）。
+export const FOLD_VERSION = 23
 
 /**
  * 一次性账本迁移：id 唯一，apply 在加载边界对原始文档执行，已应用过的跳过。
@@ -1468,13 +1523,15 @@ function foldInto(
     if (!subscription && !isPriced(modelKey)) fold.unpricedModels.add(modelKey)
     // 本条消息折叠进 7 个桶 + 每轮明细，各桶费用完全相同：一次计价全程复用
     // （此前逐桶重算 computeCostAt/modelOf，折叠最热路径付出 9 倍计价常数）。
-    const entry = priced ? modelOf(modelKey) : undefined
-    const thisCost = entry === undefined ? undefined : computeCostAt(entry, {
+    // modelOf 无条件解析（含未计价/订阅通道）：峰谷分桶需要它的档位语义判断，
+    // 与计价共用同一次查找，不额外增加热路径成本。
+    const entry = modelOf(modelKey)
+    const thisCost = priced ? computeCostAt(entry, {
       input: (usage.cacheReadTokens ?? 0) + usage.inputTokens + (usage.cacheWriteTokens ?? 0),
       cacheHit: usage.cacheReadTokens ?? 0,
       cacheMiss: usage.inputTokens + (usage.cacheWriteTokens ?? 0),
       output: usage.outputTokens,
-    }, event.time)
+    }, event.time) : undefined
     foldUsage(fold.total, usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel)
     foldUsage(usageCell(fold.byModel, modelKey), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel)
     foldUsage(usageCell(fold.byDay, day), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel)
@@ -1483,7 +1540,12 @@ function foldInto(
     foldUsage(modelDaySiteCell(fold.byDayModelsSite, day, modelKey, siteBucket), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel)
     foldUsage(usageCell(fold.bySite, siteBucket), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel)
     // 峰谷分桶：与计费同口径逐调用判档（tierAt），峰谷占比因此是真实数据。
-    foldUsage(usageCell(fold.byTier, tierAt(event.time)), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel)
+    // 延迟档模型（tierSemantics='latency'，Gemini Standard/Flex）的计价与时刻
+    // 无关（peakShare 混合），不套北京峰谷窗分桶——否则峰谷占比条把无时间窗
+    // 语义的流量虚计入峰/谷（FOLD_VERSION 23）。
+    if (entry.tierSemantics !== 'latency') {
+      foldUsage(usageCell(fold.byTier, tierAt(event.time)), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel)
+    }
     if (subscription) fold.planCalls.set(modelKey, (fold.planCalls.get(modelKey) ?? 0) + 1)
     // 三维格同款计数：provider 视图的行 plan 按本格判定，键与 byDayModelsSite 对齐。
     if (subscription) {
@@ -1744,6 +1806,7 @@ export function configFingerprint(
   searchEstimate: number,
   modelKeyAliases: Readonly<Record<string, string>> = {},
   registeredProviders: ReadonlySet<string> = new Set(),
+  routeOrigins: Readonly<Record<string, string>> = {},
 ): string {
   const subs = typeof subscriptionMatcher === 'function'
     ? 'fn'
@@ -1761,7 +1824,13 @@ export function configFingerprint(
   // 已注册 adapter 集合决定插件注册通道的归位（issue #91 P1）：增删 provider 插件
   // 后历史行按新通道口径重算。
   const registered = [...registeredProviders].sort().join(',')
-  return [subs, officials, aliases, String(searchEstimate), modelKeys, registered].join('|')
+  // 路由 baseURL 影响折叠输出（站点归组、官方直连判定、未知通道零计价）：改
+  // baseURL 不进指纹会让历史行沿用旧站点口径（自审计延期项）。只收录有 baseURL
+  // 的路由——直连路由无 origin 语义，合成空路由视图变化不构成重折理由。
+  const origins = Object.keys(routeOrigins).sort()
+    .map(key => `${key}=${routeOrigins[key]}`)
+    .join(',')
+  return [subs, officials, aliases, String(searchEstimate), modelKeys, registered, origins].join('|')
 }
 
 /** 会话格式拒读（宿主 SessionFormatUnsupportedError）：日志完好，仅本构建读不了。
@@ -1840,10 +1909,19 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
   // 配置指纹：进账本行的复用判定（配置变化 → 历史行失效重折，issue #37）。模型别名
   // 与已注册 adapter 集合同属折叠语义（issue #91）：改动后历史行按新口径重算。
   // 已注册集合随 provider 插件装卸变化，按聚合轮次求值——宿主 llm/adapters-updated
-  // 之后的第一轮聚合即按新通道口径重折，无需订阅事件。
-  const foldFingerprintOf = (registered: ReadonlySet<string>): string => configFingerprint(subscriptionMatcher, officialProviderIds, routeAliases, searchEstimate, options.modelKeyAliases, registered)
+  // 之后的第一轮聚合即按新通道口径重折，无需订阅事件。路由 baseURL 同属折叠语义
+  // （站点归组/官方判定依赖 origin）：与注册表共用同一份路由视图，不重复求值。
+  const routeOriginsOf = (routes: Readonly<Record<string, ProviderRouteView>>): Readonly<Record<string, string>> => {
+    const origins: Record<string, string> = {}
+    for (const [route, view] of Object.entries(routes)) {
+      if (view.baseURL !== undefined && view.baseURL !== '') origins[route] = view.baseURL
+    }
+    return origins
+  }
+  const foldFingerprintOf = (registered: ReadonlySet<string>, routes: Readonly<Record<string, ProviderRouteView>>): string =>
+    configFingerprint(subscriptionMatcher, officialProviderIds, routeAliases, searchEstimate, options.modelKeyAliases, registered, routeOriginsOf(routes))
   // 初值不带注册表（每轮聚合开始前刷新）：创建时刻不为指纹多读一次服务。
-  let foldFingerprint = foldFingerprintOf(new Set())
+  let foldFingerprint = foldFingerprintOf(new Set(), {})
   // 全量重折的分片大小：每片折叠后让出事件循环，超大会话不再连续阻塞宿主 RPC（issue #30）。
   const FOLD_CHUNK_EVENTS = 8000
 
@@ -1867,6 +1945,7 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
       ...(stamp === null ? {} : { stamp }),
       foldVersion: FOLD_VERSION,
       fingerprint: foldFingerprint,
+      foldedAt: Date.now(),
       fold: serializeFold(fold),
     }
     const row = ledger.get(id)
@@ -1951,12 +2030,13 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
       const now = Date.now()
 
       await ensureLedgerLoaded()
-      // 每轮刷新指纹与路由视图：已注册 adapter 集合变化（provider 插件装卸）即触发
-      // 历史行重折。注册表查询每轮只跑一次——此前 routesOf() 在每个分片折叠调用点
-      // 都走一次服务调用 + 集合合并，大会话分片会放大成调用风暴（issue #91 回退）。
+      // 每轮刷新指纹与路由视图：已注册 adapter 集合变化（provider 插件装卸）或路由
+      // baseURL 变化（站点归组依赖 origin）即触发历史行重折。注册表查询每轮只跑
+      // 一次——此前 routesOf() 在每个分片折叠调用点都走一次服务调用 + 集合合并，
+      // 大会话分片会放大成调用风暴（issue #91 回退）。
       const registeredProviders = options.resolveRegisteredProviders?.() ?? new Set<string>()
-      foldFingerprint = foldFingerprintOf(registeredProviders)
       const roundRoutes = routesOf(registeredProviders)
+      foldFingerprint = foldFingerprintOf(registeredProviders, roundRoutes)
 
       let metas: readonly SessionHeader[]
       try {

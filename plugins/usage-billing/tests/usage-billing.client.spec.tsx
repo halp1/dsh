@@ -234,3 +234,63 @@ describe('rechargeUrlOf (issue #47 账单页官方充值入口)', () => {
     expect(rechargeUrlOf('')).toBeUndefined()
   })
 })
+
+describe('UserPriceCard numeric input drafts (per-keystroke round-trip fix)', () => {
+  const openUserPriceRow = async (): Promise<HTMLInputElement> => {
+    const { container } = render(<UsageBilling {...makePropsForPrice()} />)
+    fireEvent.click(container.querySelector('button')!)
+    await screen.findByText('使用统计')
+    fireEvent.click(await screen.findByTestId('billing-tab-settings'))
+    fireEvent.click(await screen.findByTestId('billing-user-price-add'))
+    const line = await screen.findByTestId('billing-user-price-normal')
+    return line.querySelectorAll('input')[0] as HTMLInputElement
+  }
+  // makeProps 是上层 describe 的局部量，这里复用同一形状。
+  const makePropsForPrice = (): ComponentProps<typeof UsageBilling> => {
+    const budgetStore = createBillingBudgetStore().create()
+    return {
+      wide: true,
+      t,
+      checkModels: async () => ({
+        checked: true, available: true, models: 1, failures: 0, okProviders: [], badProviders: [],
+      }),
+      publishCosts: () => {},
+      registerOpen: () => () => {},
+      renderSlot: () => null,
+      useStore: bindSnapshotSelector(budgetStore),
+      actions: budgetStore.actions,
+    } as unknown as ComponentProps<typeof UsageBilling>
+  }
+
+  it('keeps the raw keystrokes while editing and normalizes only on blur', async () => {
+    const input = await openUserPriceRow()
+    // 逐键输入 1.50：浏览器对 number 输入把未完成的 "1." 报为空串（badInput），
+    // 有效串原样上报——草稿保留原始串。旧实现 parse→String 回填会把 "1.50" 的
+    // 尾零在键入瞬间归一成 "1.5"，显示与用户输入打架（本组断言的回归守卫点）。
+    const keystrokes: readonly [string, string][] = [
+      ['1', '1'],
+      ['', ''],      // 键入 "1." 的中间态：浏览器上报空串
+      ['1.5', '1.5'],
+      ['1.50', '1.50'],
+    ]
+    for (const [typed, visible] of keystrokes) {
+      fireEvent.change(input, { target: { value: typed } })
+      expect(input.value).toBe(visible)
+    }
+    // 失焦：草稿丢弃，显示回落到已提交值的规范形。
+    fireEvent.blur(input)
+    expect(input.value).toBe('1.5')
+  })
+
+  it('commits valid values immediately so the draft row stays usable', async () => {
+    const input = await openUserPriceRow()
+    fireEvent.change(input, { target: { value: '2.25' } })
+    // 清空再失焦：提交值已是 2.25（清空动作本身提交 0，不影响此前保存的语义验证），
+    // 但编辑中显示保留空串草稿，不再被立即回填为旧值。
+    fireEvent.change(input, { target: { value: '' } })
+    expect(input.value).toBe('')
+    fireEvent.change(input, { target: { value: '3' } })
+    fireEvent.blur(input)
+    expect(input.value).toBe('3')
+  })
+})

@@ -1909,10 +1909,31 @@ function UserPriceCard({ userPrices, onUserPrices, t }: {
       const { currency, ...rest } = row
       return cur === 'USD' ? { ...rest, currency: 'USD' } : rest
     }))
+  // 数字输入草稿（键 `${行}:main|off:${字段}`）：parse→String 每键回填会吞掉
+  // 输入中的尾零/未完成小数（"1.50" 的 0 键入即被归一回 "1.5"，与用户输入打架）。
+  // 草稿保留原始串，有效值照常即时提交（预览与保存不受影响），失焦丢弃草稿、
+  // 显示回落到已提交值的规范形。
+  const [numDrafts, setNumDrafts] = useState<Record<string, string>>({})
+  const draftKey = (i: number, scope: 'main' | 'off', field: string): string => `${i}:${scope}:${field}`
+  const clearNumDraft = (i: number, scope: 'main' | 'off', field: string): void =>
+    setNumDrafts(d => {
+      const key = draftKey(i, scope, field)
+      if (d[key] === undefined) return d
+      const next = { ...d }
+      delete next[key]
+      return next
+    })
   const num = (v: number): string => (Number.isFinite(v) && v !== 0 ? String(v) : '')
   const setNum = (i: number, field: 'input' | 'cacheHit' | 'output', raw: string): void => {
+    setNumDrafts(d => ({ ...d, [draftKey(i, 'main', field)]: raw }))
+    if (raw === '') {
+      // 清空 = 归零（原语义：主档三桶必填，0 显示为空占位）。
+      update(i, { [field]: 0 })
+      return
+    }
     const value = Number(raw)
-    update(i, { [field]: Number.isFinite(value) && value >= 0 ? value : 0 })
+    if (Number.isFinite(value) && value >= 0) update(i, { [field]: value })
+    // 非法串（如负数）只留草稿：行内保留上一有效值，失焦回落显示。
   }
   return (
     <section className={css.setCard} data-testid="billing-user-prices">
@@ -1985,9 +2006,24 @@ function UserPriceCard({ userPrices, onUserPrices, t }: {
             </div>
             {/* 主档/低谷档共用同一三桶输入行（标签、取值、回填不同，结构一致）。 */}
             {([
-              { label: t('userPriceNormal'), testid: 'billing-user-price-normal', valueOf: (kind: 'input' | 'cacheHit' | 'output') => num(row[kind]), onChange: (kind: 'input' | 'cacheHit' | 'output', raw: string) => setNum(i, kind, raw) },
+              {
+                scope: 'main' as const,
+                label: t('userPriceNormal'),
+                testid: 'billing-user-price-normal',
+                valueOf: (kind: 'input' | 'cacheHit' | 'output') => numDrafts[draftKey(i, 'main', kind)] ?? num(row[kind]),
+                onChange: (kind: 'input' | 'cacheHit' | 'output', raw: string) => setNum(i, kind, raw),
+              },
               // 低谷价子行：三桶留空 = 平档；三值有效即按峰/谷混合估算（issue #18）。
-              { label: t('userPriceOffPeak'), testid: 'billing-user-price-offpeak', valueOf: (kind: 'input' | 'cacheHit' | 'output') => offPeakOf(i)[kind], onChange: (kind: 'input' | 'cacheHit' | 'output', raw: string) => setOffPeak(i, kind, raw) },
+              {
+                scope: 'off' as const,
+                label: t('userPriceOffPeak'),
+                testid: 'billing-user-price-offpeak',
+                valueOf: (kind: 'input' | 'cacheHit' | 'output') => numDrafts[draftKey(i, 'off', kind)] ?? offPeakOf(i)[kind],
+                onChange: (kind: 'input' | 'cacheHit' | 'output', raw: string) => {
+                  setNumDrafts(d => ({ ...d, [draftKey(i, 'off', kind)]: raw }))
+                  setOffPeak(i, kind, raw)
+                },
+              },
             ]).map(line => (
               <div key={line.testid} className={css.userPricePriceLine} data-testid={line.testid}>
                 <span className={css.ctlLabel}>{line.label}</span>
@@ -2004,6 +2040,7 @@ function UserPriceCard({ userPrices, onUserPrices, t }: {
                       aria-label={`${line.label} ${kindLabel}`}
                       value={line.valueOf(kind)}
                       onChange={e => line.onChange(kind, e.target.value)}
+                      onBlur={() => clearNumDraft(i, line.scope, kind)}
                     />
                   )
                 })}

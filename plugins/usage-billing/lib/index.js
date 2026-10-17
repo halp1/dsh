@@ -2876,6 +2876,46 @@ function perfDigestsOf(samples) {
 	};
 }
 /**
+* 账本行谁更新：{@link UsageLedgerSession.foldedAt} 新者胜（缺失视为 0 =
+* 合并语义引入前的旧行）；时刻相同比 {@link UsageLedgerSession.foldVersion}
+* （新算法胜）；再相同视为等价，取 incoming（本进程刚折出的当前视图）。
+*/
+function ledgerRowWins(incoming, existing) {
+	const at = incoming.foldedAt ?? 0;
+	const bt = existing.foldedAt ?? 0;
+	if (at !== bt) return at > bt;
+	return (incoming.foldVersion ?? 1) > (existing.foldVersion ?? 1);
+}
+/**
+* 多实例账本合并（自审计延期项：save 路径 last-writer-wins 丢写）：同一
+* DSH_HOME 下多个宿主实例各自持有内存账本，整份覆盖式落盘会让后写者抹掉
+* 先写者刚保存的行。本进程要落的文档与磁盘现存文档按会话 id 行级合并：
+* 双方都有的行按「谁更新谁胜」，仅磁盘有的行（他实例写入、本进程内存没有）
+* 原样保留——账本行从不按 seen 剪除（见 aggregateOnce 尾部注释），合并不会
+* 复活已删会话。合并只发生在落盘边界：跨实例的即时可见性仍靠重启重载，
+* 此处保证的是磁盘上不丢数据（最终一致）。
+* @param document - 本进程刚聚合出的完整账本文档。
+* @param existing - 磁盘上现存（他实例可能写入过）的账本文档。
+* @returns 合并后的文档（sessions 行序：incoming 在前、existing 独有行按原序追加）。
+*/
+function mergeUsageLedgerDocuments(document, existing) {
+	const byId = /* @__PURE__ */ new Map();
+	for (const row of existing.sessions) byId.set(row.id, row);
+	const sessions = [];
+	for (const row of document.sessions) {
+		const prev = byId.get(row.id);
+		sessions.push(prev !== void 0 && ledgerRowWins(prev, row) ? prev : row);
+		byId.delete(row.id);
+	}
+	for (const row of byId.values()) sessions.push(row);
+	const applied = document.appliedMigrations === void 0 && existing.appliedMigrations === void 0 ? void 0 : [.../* @__PURE__ */ new Set([...document.appliedMigrations ?? [], ...existing.appliedMigrations ?? []])];
+	return {
+		...document,
+		sessions,
+		...applied === void 0 ? {} : { appliedMigrations: applied }
+	};
+}
+/**
 * 账本迁移注册表。首条迁移给 1.0.6 及更早的行回填 foldVersion = 1（它们全部出自
 * header 归因算法）；perf 摘要化迁移把 v15 及更早行的逐样本 `perf` 数组转换为
 * `perfDigest`/`perfHourDigest` 摘要（日志已删的行不再被重折，迁移是它们唯一的
@@ -3236,20 +3276,20 @@ function foldInto(fold, machine, events, subscriptionProviders, officialProvider
 		const unverifiedChannel = siteBucket === "unknown";
 		const priced = !subscription && !unverifiedChannel && isPriced(modelKey);
 		if (!subscription && !isPriced(modelKey)) fold.unpricedModels.add(modelKey);
-		const entry = priced ? modelOf(modelKey) : void 0;
-		const thisCost = entry === void 0 ? void 0 : computeCostAt(entry, {
+		const entry = modelOf(modelKey);
+		const thisCost = priced ? computeCostAt(entry, {
 			input: (usage.cacheReadTokens ?? 0) + usage.inputTokens + (usage.cacheWriteTokens ?? 0),
 			cacheHit: usage.cacheReadTokens ?? 0,
 			cacheMiss: usage.inputTokens + (usage.cacheWriteTokens ?? 0),
 			output: usage.outputTokens
-		}, event.time);
+		}, event.time) : void 0;
 		foldUsage(fold.total, usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel);
 		foldUsage(usageCell(fold.byModel, modelKey), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel);
 		foldUsage(usageCell(fold.byDay, day), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel);
 		foldUsage(modelDayCell(fold.byDayModels, day, modelKey), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel);
 		foldUsage(modelDaySiteCell(fold.byDayModelsSite, day, modelKey, siteBucket), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel);
 		foldUsage(usageCell(fold.bySite, siteBucket), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel);
-		foldUsage(usageCell(fold.byTier, tierAt(event.time)), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel);
+		if (entry.tierSemantics !== "latency") foldUsage(usageCell(fold.byTier, tierAt(event.time)), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel);
 		if (subscription) fold.planCalls.set(modelKey, (fold.planCalls.get(modelKey) ?? 0) + 1);
 		if (subscription) {
 			const sitePlanKey = planSiteKey(day, modelKey, siteBucket);
@@ -3410,19 +3450,21 @@ function hourPerfOf(digest) {
 * 订阅豁免），历史账本行立即失效并全量重折，配置变更即时生效（issue #37）。
 * 判定函数无法序列化，统一记为 `fn`（任何函数形态互视为同一指纹）。
 */
-function configFingerprint(subscriptionMatcher, officialProviderIds, routeAliases, searchEstimate, modelKeyAliases = {}, registeredProviders = /* @__PURE__ */ new Set()) {
+function configFingerprint(subscriptionMatcher, officialProviderIds, routeAliases, searchEstimate, modelKeyAliases = {}, registeredProviders = /* @__PURE__ */ new Set(), routeOrigins = {}) {
 	const subs = typeof subscriptionMatcher === "function" ? "fn" : [...subscriptionMatcher].sort().join(",");
 	const officials = officialProviderIds === void 0 ? "" : [...officialProviderIds].sort().join(",");
 	const aliases = Object.keys(routeAliases).sort().map((key) => `${key}=${routeAliases[key]}`).join(",");
 	const modelKeys = Object.keys(modelKeyAliases).sort().map((key) => `${key}=${modelKeyAliases[key]}`).join(",");
 	const registered = [...registeredProviders].sort().join(",");
+	const origins = Object.keys(routeOrigins).sort().map((key) => `${key}=${routeOrigins[key]}`).join(",");
 	return [
 		subs,
 		officials,
 		aliases,
 		String(searchEstimate),
 		modelKeys,
-		registered
+		registered,
+		origins
 	].join("|");
 }
 /** 会话格式拒读（宿主 SessionFormatUnsupportedError）：日志完好，仅本构建读不了。
@@ -3473,8 +3515,13 @@ function createUsageAggregator(persistence, options = {}) {
 		return routes;
 	};
 	const searchEstimate = options.searchCallEstimateCny ?? .02;
-	const foldFingerprintOf = (registered) => configFingerprint(subscriptionMatcher, officialProviderIds, routeAliases, searchEstimate, options.modelKeyAliases, registered);
-	let foldFingerprint = foldFingerprintOf(/* @__PURE__ */ new Set());
+	const routeOriginsOf = (routes) => {
+		const origins = {};
+		for (const [route, view] of Object.entries(routes)) if (view.baseURL !== void 0 && view.baseURL !== "") origins[route] = view.baseURL;
+		return origins;
+	};
+	const foldFingerprintOf = (registered, routes) => configFingerprint(subscriptionMatcher, officialProviderIds, routeAliases, searchEstimate, options.modelKeyAliases, registered, routeOriginsOf(routes));
+	let foldFingerprint = foldFingerprintOf(/* @__PURE__ */ new Set(), {});
 	const FOLD_CHUNK_EVENTS = 8e3;
 	/** 惰性失效（价目表时序）：账本/缓存行若以「当时不可计价」的模型落盘，
 	*  而价目表现在能计价了，该行必须重折——否则显示层按实时价算出的
@@ -3492,8 +3539,9 @@ function createUsageAggregator(persistence, options = {}) {
 			id,
 			...cwd === void 0 ? {} : { cwd },
 			...stamp === null ? {} : { stamp },
-			foldVersion: 22,
+			foldVersion: 23,
 			fingerprint: foldFingerprint,
+			foldedAt: Date.now(),
 			fold: serializeFold(fold)
 		};
 		const row = ledger.get(id);
@@ -3557,8 +3605,8 @@ function createUsageAggregator(persistence, options = {}) {
 		const now = Date.now();
 		await ensureLedgerLoaded();
 		const registeredProviders = options.resolveRegisteredProviders?.() ?? /* @__PURE__ */ new Set();
-		foldFingerprint = foldFingerprintOf(registeredProviders);
 		const roundRoutes = routesOf(registeredProviders);
+		foldFingerprint = foldFingerprintOf(registeredProviders, roundRoutes);
 		let metas;
 		try {
 			metas = await persistence.list();
@@ -3590,7 +3638,7 @@ function createUsageAggregator(persistence, options = {}) {
 			try {
 				const cwd = meta.cwd;
 				const ledgerRow = ledger.get(id);
-				if (ledgerRow !== void 0 && ledgerRow.stamp !== void 0 && stamp !== null && ledgerRow.stamp === stamp && (ledgerRow.foldVersion ?? 1) === 22 && ledgerRow.fingerprint === foldFingerprint && !foldNeedsReprice(ledgerRow.fold)) {
+				if (ledgerRow !== void 0 && ledgerRow.stamp !== void 0 && stamp !== null && ledgerRow.stamp === stamp && (ledgerRow.foldVersion ?? 1) === 23 && ledgerRow.fingerprint === foldFingerprint && !foldNeedsReprice(ledgerRow.fold)) {
 					const fold = deserializedFoldOf(ledgerRow.fold);
 					folds.push({
 						id,
@@ -3691,7 +3739,7 @@ function createUsageAggregator(persistence, options = {}) {
 			for (const entry of ledger.values()) {
 				if (included.has(entry.id)) continue;
 				try {
-					const stale = (entry.foldVersion ?? 1) < 22 || entry.fingerprint !== foldFingerprint;
+					const stale = (entry.foldVersion ?? 1) < 23 || entry.fingerprint !== foldFingerprint;
 					folds.push({
 						id: entry.id,
 						...entry.cwd === void 0 ? {} : { cwd: entry.cwd },
@@ -6933,15 +6981,21 @@ function createFileUsageLedgerStore(ledgerPath) {
 				mode: 448
 			});
 			const commit = async () => {
+				let existing;
+				let existingDoc;
 				try {
-					const existing = await readFile(ledgerPath, "utf8");
-					JSON.parse(existing);
-					await writeFileAtomic(`${ledgerPath}.bak`, existing, {
-						mode: 384,
-						dirMode: 448
-					});
-				} catch {}
-				await writeFileAtomic(ledgerPath, JSON.stringify(document), {
+					existing = await readFile(ledgerPath, "utf8");
+					const parsed = JSON.parse(existing);
+					if (parsed.version === 1 && Array.isArray(parsed.sessions)) existingDoc = parsed;
+				} catch {
+					existing = void 0;
+				}
+				if (existing !== void 0) await writeFileAtomic(`${ledgerPath}.bak`, existing, {
+					mode: 384,
+					dirMode: 448
+				});
+				const merged = existingDoc === void 0 ? document : mergeUsageLedgerDocuments(document, existingDoc);
+				await writeFileAtomic(ledgerPath, JSON.stringify(merged), {
 					mode: 384,
 					dirMode: 448
 				});
@@ -7665,69 +7719,78 @@ function apply(ctx, config = {}) {
 		at: 0,
 		doc: { balances: [] }
 	};
+	let balanceInflight;
+	const refreshBalance = async () => {
+		const piProviders = await readPiAiProviders(ctx.settings);
+		const providers = { ...piProviders };
+		const deepseekKey = providers["deepseek"]?.apiKeyEnv;
+		if (deepseekKey === void 0 || deepseekKey === "") providers["deepseek"] = {
+			...providers["deepseek"],
+			apiKeyEnv: config.balanceApiKeyEnv ?? DEFAULT_BALANCE_API_KEY_ENV
+		};
+		const balances = await queryBalances(ctx, providers);
+		const custom = await queryCustomBalances(ctx, config.customBalances ?? []);
+		const declared = await queryDeclaredEndpoints(ctx, piProviders, config.declaredEndpoints ?? []);
+		for (const row of [
+			...balances,
+			...custom,
+			...declared
+		]) if (row.error === "unauthorized") warnAuthOnce("balance", row.provider, row.displayName);
+		const official = balances.find((row) => row.provider === "deepseek");
+		let reconcile;
+		const reconcilable = official !== void 0 && official.totalBalance !== void 0 && (official.currency === void 0 || official.currency.toUpperCase() === "CNY");
+		if (official !== void 0 && reconcilable) {
+			const now = Date.now();
+			const today = dayStamp(now);
+			let todayOfficialCost = 0;
+			try {
+				todayOfficialCost = (await aggregator.aggregate()).byDay[today]?.officialCost ?? 0;
+			} catch {}
+			const result = reconcileBalanceDelta(reconcileRef, official, todayOfficialCost, today, now);
+			const refChanged = result.ref !== null && result.ref !== reconcileRef;
+			reconcileRef = result.ref;
+			if (result.event !== null && result.event.kind !== "flat") reconcile = {
+				...result.event,
+				provider: official.displayName,
+				...official.currency === void 0 ? {} : { currency: official.currency }
+			};
+			if (refChanged) persistReconcileRef();
+		}
+		const doc = {
+			balances: [
+				...balances,
+				...custom,
+				...declared
+			],
+			...reconcile === void 0 ? {} : { reconcile }
+		};
+		balanceCache = {
+			at: Date.now(),
+			doc
+		};
+	};
+	const refreshBalanceOnce = () => {
+		balanceInflight ??= refreshBalance().finally(() => {
+			balanceInflight = void 0;
+		});
+		return balanceInflight;
+	};
 	ctx.effect(() => ctx.webServer.register({
 		kind: "exact",
 		path: "/api/billing/balance",
 		handler: async (req, res) => {
 			if (!guardLoopback(req, res, trustedHosts)) return;
 			res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-			const piProviders = await readPiAiProviders(ctx.settings);
-			const providers = { ...piProviders };
-			const deepseekKey = providers["deepseek"]?.apiKeyEnv;
-			if (deepseekKey === void 0 || deepseekKey === "") providers["deepseek"] = {
-				...providers["deepseek"],
-				apiKeyEnv: config.balanceApiKeyEnv ?? DEFAULT_BALANCE_API_KEY_ENV
-			};
 			if (Date.now() - balanceCache.at < BALANCE_CACHE_MS) {
 				res.end(JSON.stringify(balanceCache.doc));
 				return;
 			}
 			try {
-				const balances = await queryBalances(ctx, providers);
-				const custom = await queryCustomBalances(ctx, config.customBalances ?? []);
-				const declared = await queryDeclaredEndpoints(ctx, piProviders, config.declaredEndpoints ?? []);
-				for (const row of [
-					...balances,
-					...custom,
-					...declared
-				]) if (row.error === "unauthorized") warnAuthOnce("balance", row.provider, row.displayName);
-				const official = balances.find((row) => row.provider === "deepseek");
-				let reconcile;
-				const reconcilable = official !== void 0 && official.totalBalance !== void 0 && (official.currency === void 0 || official.currency.toUpperCase() === "CNY");
-				if (official !== void 0 && reconcilable) {
-					const now = Date.now();
-					const today = dayStamp(now);
-					let todayOfficialCost = 0;
-					try {
-						todayOfficialCost = (await aggregator.aggregate()).byDay[today]?.officialCost ?? 0;
-					} catch {}
-					const result = reconcileBalanceDelta(reconcileRef, official, todayOfficialCost, today, now);
-					const refChanged = result.ref !== null && result.ref !== reconcileRef;
-					reconcileRef = result.ref;
-					if (result.event !== null && result.event.kind !== "flat") reconcile = {
-						...result.event,
-						provider: official.displayName,
-						...official.currency === void 0 ? {} : { currency: official.currency }
-					};
-					if (refChanged) persistReconcileRef();
-				}
-				const doc = {
-					balances: [
-						...balances,
-						...custom,
-						...declared
-					],
-					...reconcile === void 0 ? {} : { reconcile }
-				};
-				balanceCache = {
-					at: Date.now(),
-					doc
-				};
-				res.end(JSON.stringify(doc));
+				await refreshBalanceOnce();
 			} catch (error) {
 				console.warn("[usage-billing] refreshBalances failed; serving cached balances:", error);
-				res.end(JSON.stringify(balanceCache.doc));
 			}
+			res.end(JSON.stringify(balanceCache.doc));
 		}
 	}), "usage-billing: balance route");
 	ctx.effect(() => ctx.webServer.register({
@@ -7822,6 +7885,13 @@ function apply(ctx, config = {}) {
 			quotas: rows
 		};
 	};
+	let quotasInflight;
+	const refreshQuotasOnce = () => {
+		quotasInflight ??= refreshQuotas().finally(() => {
+			quotasInflight = void 0;
+		});
+		return quotasInflight;
+	};
 	ctx.effect(() => ctx.webServer.register({
 		kind: "exact",
 		path: "/api/billing/subscriptions",
@@ -7829,7 +7899,7 @@ function apply(ctx, config = {}) {
 			if (!guardLoopback(req, res, trustedHosts)) return;
 			res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
 			if (Date.now() - quotaCache.at >= SUBSCRIPTION_CACHE_MS) try {
-				await refreshQuotas();
+				await refreshQuotasOnce();
 			} catch (error) {
 				console.warn("[usage-billing] refreshQuotas failed; serving cached quotas:", error);
 			}
@@ -7858,6 +7928,13 @@ function apply(ctx, config = {}) {
 			quotas: await queryRelayQuotas(ctx, routes)
 		};
 	};
+	let relayInflight;
+	const refreshRelayOnce = () => {
+		relayInflight ??= refreshRelay().finally(() => {
+			relayInflight = void 0;
+		});
+		return relayInflight;
+	};
 	ctx.effect(() => ctx.webServer.register({
 		kind: "exact",
 		path: "/api/billing/relay-quotas",
@@ -7865,7 +7942,7 @@ function apply(ctx, config = {}) {
 			if (!guardLoopback(req, res, trustedHosts)) return;
 			res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
 			if (Date.now() - relayCache.at >= SUBSCRIPTION_CACHE_MS) try {
-				await refreshRelay();
+				await refreshRelayOnce();
 			} catch (error) {
 				console.warn("[usage-billing] refreshRelay failed; serving cached relay quotas:", error);
 			}
@@ -7880,6 +7957,7 @@ function apply(ctx, config = {}) {
 			}));
 		}
 	}), "usage-billing: relay-quotas route");
+	let statsBodyCache;
 	ctx.effect(() => ctx.webServer.register({
 		kind: "exact",
 		path: "/api/billing/usage-stats",
@@ -7892,6 +7970,19 @@ function apply(ctx, config = {}) {
 				...config.monthlyBudget === void 0 ? {} : { budget: config.monthlyBudget },
 				...config.lowBalanceThreshold === void 0 ? {} : { lowBalanceThreshold: config.lowBalanceThreshold }
 			});
+			const statsBodyOf = (doc) => {
+				const budget = config.monthlyBudget;
+				const threshold = config.lowBalanceThreshold;
+				if (statsBodyCache !== void 0 && statsBodyCache.doc === doc && statsBodyCache.budget === budget && statsBodyCache.threshold === threshold) return statsBodyCache.body;
+				const body = JSON.stringify(decorate(doc));
+				statsBodyCache = {
+					doc,
+					budget,
+					threshold,
+					body
+				};
+				return body;
+			};
 			const aggregating = aggregator.aggregate();
 			aggregating.then((stats) => {
 				persistSnapshot(decorate(stats));
@@ -7907,7 +7998,7 @@ function apply(ctx, config = {}) {
 				console.error("[usage-billing] usage-stats aggregate failed, falling back to snapshot:", error);
 			}
 			if (fresh !== void 0) {
-				res.end(JSON.stringify(decorate(fresh)));
+				res.end(statsBodyOf(fresh));
 				return;
 			}
 			for (const candidate of candidates) {

@@ -2301,3 +2301,82 @@ describe('subscription matcher (default set vs explicit RE rule)', () => {
     expect(fold.total.cost).toBeGreaterThan(0)
   })
 })
+
+describe('route baseURL in the config fingerprint (history re-folds on endpoint change)', () => {
+  let root: string | undefined
+  afterEach(async () => {
+    if (root !== undefined) await rm(root, { recursive: true, force: true })
+    root = undefined
+  })
+
+  it('invalidates ledger rows when a route baseURL changes, and only then', async () => {
+    vi.useFakeTimers()
+    const logs: Record<string, SessionEvent[]> = { a: [header(1, 'deepseek-v4-flash'), message(2, 2_000, USAGE)] }
+    root = await mkdtemp(join(tmpdir(), 'dsh-billing-fp-'))
+    const reads: Record<string, number> = { a: 0 }
+    const path = join(root, 'a.jsonl')
+    await writeFile(path, JSON.stringify(1))
+    const persistence = {
+      list: async () => [{ id: 'a' }],
+      locate: (meta: { id: SessionId }) => ({ kind: 'jsonl', path }),
+      readFrom: async (id: SessionId, fromSeq: number) => {
+        reads[String(id)] += 1
+        return { meta: { id }, events: (logs.a ?? []).filter(event => event.seq >= fromSeq) }
+      },
+    } as unknown as UsagePersistence
+    let baseURL = 'https://relay-a.example'
+    const store = fakeLedgerStore([])
+    const aggregator = createUsageAggregator(persistence, {
+      ledger: store.store,
+      resolveRoutes: () => ({ relay: { baseURL } }),
+    })
+    await aggregator.aggregate()
+    expect(reads.a).toBe(1)
+    vi.advanceTimersByTime(AGGREGATE_TTL_MS + 1_000)
+    await aggregator.aggregate()
+    // baseURL 未变：指纹一致，账本行复用（零读取）。
+    expect(reads.a).toBe(1)
+    // baseURL 变化：站点归组/官方判定口径变化，历史行失效重折。
+    baseURL = 'https://relay-b.example'
+    vi.advanceTimersByTime(AGGREGATE_TTL_MS + 1_000)
+    await aggregator.aggregate()
+    expect(reads.a).toBe(2)
+    vi.useRealTimers()
+  })
+})
+
+describe('byTier latency-tier exclusion (FOLD_VERSION 23)', () => {
+  // 北京工作日 10:00 = 峰时（2026-10-14 是周三）。
+  const PEAK_TIME = Date.UTC(2026, 9, 14, 2, 0, 0)
+
+  it('keeps latency-tier (Gemini) traffic out of the peak/valley buckets', () => {
+    const events = [
+      header(1, 'deepseek-v4-flash', 'deepseek-official'),
+      message(2, PEAK_TIME, USAGE),
+      header(3, 'gemini-3.8-flash', 'gemini'),
+      message(4, PEAK_TIME, USAGE),
+    ]
+    const fold = foldSession(events, new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {})
+    // 峰谷桶只收 DeepSeek 一条：Gemini 延迟档与时刻无关（peakShare 混合计价），
+    // 套北京窗口分桶会把无时间窗语义的流量虚计入峰/谷。
+    expect(fold.byTier.get('peak')?.calls ?? 0).toBe(1)
+    expect(fold.byTier.get('offPeak')?.calls ?? 0).toBe(0)
+    // 其余桶不受影响：两条调用都按模型正常归账（deepseek-v4-flash 归一为目录键 flash）。
+    expect(fold.byModel.get('flash')?.calls).toBe(1)
+    expect(fold.byModel.get('gemini-3.8-flash')?.calls).toBe(1)
+  })
+
+  it('still buckets window-billed (DeepSeek) traffic by time of day', () => {
+    // 同一模型峰/谷两个时刻：byTier 分桶照常工作（回归保护）。
+    // 北京周四 00:00（10-15）落在峰窗外 = 谷时。
+    const OFFPEAK_TIME = Date.UTC(2026, 9, 14, 16, 0, 0)
+    const events = [
+      header(1, 'deepseek-v4-flash', 'deepseek-official'),
+      message(2, PEAK_TIME, USAGE),
+      message(3, OFFPEAK_TIME, USAGE),
+    ]
+    const fold = foldSession(events, new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {})
+    expect(fold.byTier.get('peak')?.calls ?? 0).toBe(1)
+    expect(fold.byTier.get('offPeak')?.calls ?? 0).toBe(1)
+  })
+})

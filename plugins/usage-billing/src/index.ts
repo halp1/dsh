@@ -36,7 +36,7 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import type { CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import z from '@deepseek-ai/schemastery'
-import { createUsageAggregator, dayStamp, sessionLogOffsetOf, sumSiteBuckets, type UsageLedgerStore, type UsagePersistence } from './aggregate.ts'
+import { createUsageAggregator, dayStamp, mergeUsageLedgerDocuments, sessionLogOffsetOf, sumSiteBuckets, type UsageLedgerDocument, type UsageLedgerStore, type UsagePersistence } from './aggregate.ts'
 import { applyBuiltinCatalog, applyLivePricing, applyUserModelAliases, formatMoney, formatTokens } from './client/pricing.ts'
 import { BUILTIN_MODEL_CATALOG, BUILTIN_MODEL_KEY_ALIASES } from './builtin-catalog.ts'
 import { queryBalances, queryCustomBalances } from './balance.ts'
@@ -379,15 +379,26 @@ export function createFileUsageLedgerStore(ledgerPath: string): UsageLedgerStore
       // 下时开锁会抛 ENOENT。
       await mkdir(dirname(ledgerPath), { recursive: true, mode: 0o700 })
       const commit = async (): Promise<void> => {
+        let existing: string | undefined
+        let existingDoc: UsageLedgerDocument | undefined
         try {
-          const existing = await readFile(ledgerPath, 'utf8')
-          // Never replace a known-good backup with malformed main-file bytes.
-          JSON.parse(existing)
-          await writeFileAtomic(`${ledgerPath}.bak`, existing, { mode: 0o600, dirMode: 0o700 })
+          existing = await readFile(ledgerPath, 'utf8')
+          const parsed = JSON.parse(existing) as { version?: unknown; sessions?: unknown }
+          // 版本/形状校验：不是本插件账本形状的旧文件只做备份基线，不做合并基线。
+          if (parsed.version === 1 && Array.isArray(parsed.sessions)) existingDoc = parsed as UsageLedgerDocument
         } catch {
-          // First write or unreadable old ledger: atomically write the new document.
+          existing = undefined // First write or unreadable old ledger: no merge base.
         }
-        await writeFileAtomic(ledgerPath, JSON.stringify(document), { mode: 0o600, dirMode: 0o700 })
+        if (existing !== undefined) {
+          // Never replace a known-good backup with malformed main-file bytes.
+          await writeFileAtomic(`${ledgerPath}.bak`, existing, { mode: 0o600, dirMode: 0o700 })
+        }
+        // 多实例合并（自审计延期项：save 路径 last-writer-wins 丢写）：锁内重读
+        // 磁盘现存文档，与本进程要落的文档按会话 id 行级合并（foldedAt 新者胜）。
+        // 同一 DSH_HOME 下两个宿主实例交替保存时，后写者不再抹掉先写者刚写入的行；
+        // 跨实例即时可见性仍靠重启重载，此处保证的是磁盘数据不丢（最终一致）。
+        const merged = existingDoc === undefined ? document : mergeUsageLedgerDocuments(document, existingDoc)
+        await writeFileAtomic(ledgerPath, JSON.stringify(merged), { mode: 0o600, dirMode: 0o700 })
       }
       try {
         await withFileLock(ledgerPath, commit, { waitMs: LEDGER_LOCK_WAIT_MS })
@@ -1212,6 +1223,65 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
   )
 
   let balanceCache: { at: number; doc: { balances: Awaited<ReturnType<typeof queryBalances>>; reconcile?: ReconcileEvent } } = { at: 0, doc: { balances: [] } }
+  // in-flight 去重（自审计延期项）：仪表盘、悬浮费用条、usage-stats 工具会并发
+  // 打本路由；缓存过期的瞬间多个请求各自全套上游查询（余额 + 自定义 + 声明端点
+  // + 对账），共享同一次进行中的刷新，上游只被打一遍。
+  let balanceInflight: Promise<void> | undefined
+  const refreshBalance = async (): Promise<void> => {
+    // 余额 key 复用 llm-pi-ai 的 providers（同订阅）：部署为某 provider 配一次即可。
+    // DeepSeek 保留 `balanceApiKeyEnv` 特例：llm-pi-ai 未配 deepseek key 时仍可用该 env 查余额。
+    // 注意不能只看路由是否存在——路由存在但 apiKeyEnv 缺失（只配了 baseURL 之类）时，
+    // 兜底同样要生效，否则余额会错标「未配置」。
+    const piProviders = await readPiAiProviders(ctx.settings)
+    const providers = { ...piProviders }
+    const deepseekKey = providers['deepseek']?.apiKeyEnv
+    if (deepseekKey === undefined || deepseekKey === '') {
+      providers['deepseek'] = { ...providers['deepseek'], apiKeyEnv: config.balanceApiKeyEnv ?? DEFAULT_BALANCE_API_KEY_ENV }
+    }
+    const balances = await queryBalances(ctx, providers)
+    // 自定义 Provider 余额（任意 HTTP 端点）：独立于内置三家，逐个成败。
+    const custom = await queryCustomBalances(ctx, config.customBalances ?? [])
+    // 声明端点（declarative）：为内置表没有的供应商自声明余额/额度接口。
+    // 绑定到某条已配置 provider 的同源地址，安全边界由 declarative.ts 强制执行。
+    const declared = await queryDeclaredEndpoints(ctx, piProviders, config.declaredEndpoints ?? [])
+    // P1-5 鉴权分类告警：区分「配置错了 key」与「上游不可达」，协助定位。
+    for (const row of [...balances, ...custom, ...declared]) {
+      if (row.error === 'unauthorized') warnAuthOnce('balance', row.provider, row.displayName)
+    }
+    // 余额差对账：用官方余额当日变动反推消费，与本地账本今日官方费用比对。
+    // 只对 DeepSeek 官方余额行做（订阅/第三方不动官方余额）；取不到余额时不打扰。
+    // 币种口径：余额差是原生币种，账本费用是人民币——USD 账户直接比对会永久
+    // 虚报漂移（约 6.8 倍差），只在人民币（或未标注币种的历史形状）下对账。
+    const official = balances.find(row => row.provider === 'deepseek')
+    let reconcile: ReconcileEvent | undefined
+    const reconcilable = official !== undefined && official.totalBalance !== undefined
+      && (official.currency === undefined || official.currency.toUpperCase() === 'CNY')
+    if (official !== undefined && reconcilable) {
+      const now = Date.now()
+      const today = dayStamp(now)
+      let todayOfficialCost = 0
+      try {
+        const stats = await aggregator.aggregate()
+        todayOfficialCost = stats.byDay[today]?.officialCost ?? 0
+      } catch {
+        // 聚合失败时不阻塞余额查询；对账基准确认可用后仍返回（消费计 0 下次再核）。
+      }
+      const result = reconcileBalanceDelta(reconcileRef, official, todayOfficialCost, today, now)
+      const refChanged = result.ref !== null && result.ref !== reconcileRef
+      reconcileRef = result.ref
+      if (result.event !== null && result.event.kind !== 'flat') {
+        reconcile = { ...result.event, provider: official.displayName, ...(official.currency === undefined ? {} : { currency: official.currency }) }
+      }
+      // 基准未变（ok/flat 保早间基线）不重复落盘；只在基准真正前移时写。
+      if (refChanged) persistReconcileRef()
+    }
+    const doc = { balances: [...balances, ...custom, ...declared], ...(reconcile === undefined ? {} : { reconcile }) }
+    balanceCache = { at: Date.now(), doc }
+  }
+  const refreshBalanceOnce = (): Promise<void> => {
+    balanceInflight ??= refreshBalance().finally(() => { balanceInflight = undefined })
+    return balanceInflight
+  }
   ctx.effect(
     () => ctx.webServer.register({
       kind: 'exact',
@@ -1219,67 +1289,18 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
       handler: async (req, res) => {
         if (!guardLoopback(req, res, trustedHosts)) return
         res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-        // 余额 key 复用 llm-pi-ai 的 providers（同订阅）：部署为某 provider 配一次即可。
-        // DeepSeek 保留 `balanceApiKeyEnv` 特例：llm-pi-ai 未配 deepseek key 时仍可用该 env 查余额。
-        // 注意不能只看路由是否存在——路由存在但 apiKeyEnv 缺失（只配了 baseURL 之类）时，
-        // 兜底同样要生效，否则余额会错标「未配置」。
-        const piProviders = await readPiAiProviders(ctx.settings)
-        const providers = { ...piProviders }
-        const deepseekKey = providers['deepseek']?.apiKeyEnv
-        if (deepseekKey === undefined || deepseekKey === '') {
-          providers['deepseek'] = { ...providers['deepseek'], apiKeyEnv: config.balanceApiKeyEnv ?? DEFAULT_BALANCE_API_KEY_ENV }
-        }
         // 外部余额 API 低频变化：缓存 5 分钟，命中直接返回，避免每 30 秒后台轮询都打上游。
         if (Date.now() - balanceCache.at < BALANCE_CACHE_MS) {
           res.end(JSON.stringify(balanceCache.doc))
           return
         }
         try {
-          const balances = await queryBalances(ctx, providers)
-          // 自定义 Provider 余额（任意 HTTP 端点）：独立于内置三家，逐个成败。
-          const custom = await queryCustomBalances(ctx, config.customBalances ?? [])
-          // 声明端点（declarative）：为内置表没有的供应商自声明余额/额度接口。
-          // 绑定到某条已配置 provider 的同源地址，安全边界由 declarative.ts 强制执行。
-          const declared = await queryDeclaredEndpoints(ctx, piProviders, config.declaredEndpoints ?? [])
-          // P1-5 鉴权分类告警：区分「配置错了 key」与「上游不可达」，协助定位。
-          for (const row of [...balances, ...custom, ...declared]) {
-            if (row.error === 'unauthorized') warnAuthOnce('balance', row.provider, row.displayName)
-          }
-          // 余额差对账：用官方余额当日变动反推消费，与本地账本今日官方费用比对。
-          // 只对 DeepSeek 官方余额行做（订阅/第三方不动官方余额）；取不到余额时不打扰。
-          // 币种口径：余额差是原生币种，账本费用是人民币——USD 账户直接比对会永久
-          // 虚报漂移（约 6.8 倍差），只在人民币（或未标注币种的历史形状）下对账。
-          const official = balances.find(row => row.provider === 'deepseek')
-          let reconcile: ReconcileEvent | undefined
-          const reconcilable = official !== undefined && official.totalBalance !== undefined
-            && (official.currency === undefined || official.currency.toUpperCase() === 'CNY')
-          if (official !== undefined && reconcilable) {
-            const now = Date.now()
-            const today = dayStamp(now)
-            let todayOfficialCost = 0
-            try {
-              const stats = await aggregator.aggregate()
-              todayOfficialCost = stats.byDay[today]?.officialCost ?? 0
-            } catch {
-              // 聚合失败时不阻塞余额查询；对账基准确认可用后仍返回（消费计 0 下次再核）。
-            }
-            const result = reconcileBalanceDelta(reconcileRef, official, todayOfficialCost, today, now)
-            const refChanged = result.ref !== null && result.ref !== reconcileRef
-            reconcileRef = result.ref
-            if (result.event !== null && result.event.kind !== 'flat') {
-              reconcile = { ...result.event, provider: official.displayName, ...(official.currency === undefined ? {} : { currency: official.currency }) }
-            }
-            // 基准未变（ok/flat 保早间基线）不重复落盘；只在基准真正前移时写。
-            if (refChanged) persistReconcileRef()
-          }
-          const doc = { balances: [...balances, ...custom, ...declared], ...(reconcile === undefined ? {} : { reconcile }) }
-          balanceCache = { at: Date.now(), doc }
-          res.end(JSON.stringify(doc))
+          await refreshBalanceOnce()
         } catch (error) {
           // 查询失败：保留上次成功快照（从未成功则为空余额），避免每 30 秒把偶发故障刷成「未配置」。
           console.warn('[usage-billing] refreshBalances failed; serving cached balances:', error)
-          res.end(JSON.stringify(balanceCache.doc))
         }
+        res.end(JSON.stringify(balanceCache.doc))
       },
     }),
     'usage-billing: balance route',
@@ -1403,6 +1424,12 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
     }
     quotaCache = { at: Date.now(), quotas: rows }
   }
+  // in-flight 去重：与 balance 路由同因——并发请求共享同一次进行中的订阅刷新。
+  let quotasInflight: Promise<void> | undefined
+  const refreshQuotasOnce = (): Promise<void> => {
+    quotasInflight ??= refreshQuotas().finally(() => { quotasInflight = undefined })
+    return quotasInflight
+  }
   ctx.effect(
     () => ctx.webServer.register({
       kind: 'exact',
@@ -1412,7 +1439,7 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
         res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
         if (Date.now() - quotaCache.at >= SUBSCRIPTION_CACHE_MS) {
           try {
-            await refreshQuotas()
+            await refreshQuotasOnce()
           } catch (error) {
             // 刷新意外抛错时仍用旧缓存响应，绝不让已 writeHead 的响应挂起。
             console.warn('[usage-billing] refreshQuotas failed; serving cached quotas:', error)
@@ -1446,6 +1473,12 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
     }
     relayCache = { at: Date.now(), quotas: await queryRelayQuotas(ctx, routes) }
   }
+  // in-flight 去重：与 balance 路由同因——并发请求共享同一次进行中的中转站探测。
+  let relayInflight: Promise<void> | undefined
+  const refreshRelayOnce = (): Promise<void> => {
+    relayInflight ??= refreshRelay().finally(() => { relayInflight = undefined })
+    return relayInflight
+  }
   ctx.effect(
     () => ctx.webServer.register({
       kind: 'exact',
@@ -1455,7 +1488,7 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
         res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
         if (Date.now() - relayCache.at >= SUBSCRIPTION_CACHE_MS) {
           try {
-            await refreshRelay()
+            await refreshRelayOnce()
           } catch (error) {
             // 刷新意外抛错时仍用旧缓存响应，绝不让已 writeHead 的响应挂起。
             console.warn('[usage-billing] refreshRelay failed; serving cached relay quotas:', error)
@@ -1469,6 +1502,16 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
     'usage-billing: relay-quotas route',
   )
 
+  // usage-stats 响应体缓存（对齐 pricing 路由的 pricingBodyCache）：聚合器在
+  // 5s 文档 TTL 内返回同一对象引用，而客户端 30s 轮询每次都到这——按文档对象
+  // 身份 + 注入配置（预算/阈值，随宿主 Config 实时变）缓存 decorate+序列化
+  // 结果，大账本（数百 KiB）不再每请求重复序列化。
+  let statsBodyCache: {
+    doc: Record<string, unknown>
+    budget: number | undefined
+    threshold: number | undefined
+    body: string
+  } | undefined
   ctx.effect(
     () => ctx.webServer.register({
       kind: 'exact',
@@ -1484,6 +1527,17 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
           ...(config.monthlyBudget === undefined ? {} : { budget: config.monthlyBudget }),
           ...(config.lowBalanceThreshold === undefined ? {} : { lowBalanceThreshold: config.lowBalanceThreshold }),
         })
+        const statsBodyOf = (doc: Record<string, unknown>): string => {
+          const budget = config.monthlyBudget
+          const threshold = config.lowBalanceThreshold
+          if (statsBodyCache !== undefined && statsBodyCache.doc === doc
+            && statsBodyCache.budget === budget && statsBodyCache.threshold === threshold) {
+            return statsBodyCache.body
+          }
+          const body = JSON.stringify(decorate(doc))
+          statsBodyCache = { doc, budget, threshold, body }
+          return body
+        }
         // stale-while-revalidate：聚合是全量扫描（重度用户上万条会话的冷启动折叠
         // 以分钟计），HTTP 请求绝不全程等它——只给 RESPONSE_BUDGET_MS 的等待预算，
         // 超预算立即回最近一次快照；后台折叠完成后快照随之刷新（挂在聚合 promise
@@ -1507,7 +1561,7 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
           console.error('[usage-billing] usage-stats aggregate failed, falling back to snapshot:', error)
         }
         if (fresh !== undefined) {
-          res.end(JSON.stringify(decorate(fresh)))
+          res.end(statsBodyOf(fresh))
           return
         }
         for (const candidate of candidates) {

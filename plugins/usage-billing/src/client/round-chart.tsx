@@ -11,7 +11,7 @@ import { useMemo } from 'react'
 import clsx from 'clsx'
 import type { AnomalyFlag } from './anomaly.ts'
 import css from './UsageBilling.module.css'
-import { convertFromCny, formatMoney, tierAt, type CostCurrency } from './pricing.ts'
+import { convertFromCny, formatMoney, rateChannelOf, tierAt, type CostCurrency } from './pricing.ts'
 
 /** 每轮费用图的一行（TurnUsageRow 的展示子集）。 */
 export interface RoundChartRow {
@@ -76,8 +76,11 @@ export function RoundCostChart({ rounds, flags, currency, t }: {
         {visible.map((round) => {
           const flagged = flagKey.has(`${round.sessionId}:${round.turn}`)
           const height = Math.max(1, (round.cost / maxCost) * 100)
-          // 该轮起始时刻落在峰时/平价的背景色带（峰=琥珀、平价=中性）。
-          const peak = tierAt(round.startedAt) === 'peak'
+          // 该轮起始时刻落在峰时/平价的背景色带（峰=琥珀、平价=中性）。峰谷窗
+          // 只对 DeepSeek 按量模型有意义——延迟档（Gemini）与平价模型的轮次
+          // 不套北京窗口着色，避免暗示不存在的时间窗计费（与 rateChannelOf
+          // 「峰谷提示严格跟随实际计费通道」同口径）。
+          const peak = rateChannelOf(round.model, false) === 'deepseek-metered' && tierAt(round.startedAt) === 'peak'
           return (
             <div key={`${round.sessionId}:${round.turn}`} className={clsx(css.roundsBarCol, peak ? css.roundsBarColPeak : css.roundsBarColOff)}>
               {/* 每根柱子顶部的费用数字：随柱高定位（bottom = height%），紧贴各自柱顶上方。 */}

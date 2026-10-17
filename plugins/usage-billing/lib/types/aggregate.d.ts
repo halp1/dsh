@@ -575,6 +575,12 @@ export interface UsageLedgerSession {
      * 更早写入的行（配置不参与复用判定）；与当前指纹不一致的行不复用、全量重折。
      */
     fingerprint?: string;
+    /**
+     * 该行最近一次折叠落盘的时刻（epoch 毫秒）。多实例共享同一账本文件时，
+     * save 侧按它做行级合并（后折覆盖先折），防止整份覆盖式落盘丢掉另一实例
+     * 刚写入的行；缺失 = 合并语义引入前的旧行，视为最旧。
+     */
+    foldedAt?: number;
     fold: SerializedSessionFold;
 }
 /** On-disk durable usage ledger. Versioned independently from the dashboard document. */
@@ -585,6 +591,19 @@ export interface UsageLedgerDocument {
     /** 已应用的一次性配置迁移 id 列表（随文档落盘；缺省 = 尚未跑过任何迁移）。 */
     appliedMigrations?: string[];
 }
+/**
+ * 多实例账本合并（自审计延期项：save 路径 last-writer-wins 丢写）：同一
+ * DSH_HOME 下多个宿主实例各自持有内存账本，整份覆盖式落盘会让后写者抹掉
+ * 先写者刚保存的行。本进程要落的文档与磁盘现存文档按会话 id 行级合并：
+ * 双方都有的行按「谁更新谁胜」，仅磁盘有的行（他实例写入、本进程内存没有）
+ * 原样保留——账本行从不按 seen 剪除（见 aggregateOnce 尾部注释），合并不会
+ * 复活已删会话。合并只发生在落盘边界：跨实例的即时可见性仍靠重启重载，
+ * 此处保证的是磁盘上不丢数据（最终一致）。
+ * @param document - 本进程刚聚合出的完整账本文档。
+ * @param existing - 磁盘上现存（他实例可能写入过）的账本文档。
+ * @returns 合并后的文档（sessions 行序：incoming 在前、existing 独有行按原序追加）。
+ */
+export declare function mergeUsageLedgerDocuments(document: UsageLedgerDocument, existing: UsageLedgerDocument): UsageLedgerDocument;
 /**
  * 折叠算法版本：归账语义变化时递增。v1 = 按 request/header 归账（稀疏 header 把
  * 两次 header 之间的用量串到上一个模型，订阅模型首当其冲，issue #14）；v2 =
@@ -599,7 +618,7 @@ export interface UsageLedgerDocument {
  * 会话费用只剩最近一段，issue #29）。
  * 持久账本行据此区分新旧算法：日志已删/不可读而只能沿用旧行时，UI 标注置信度提示。
  */
-export declare const FOLD_VERSION = 22;
+export declare const FOLD_VERSION = 23;
 /**
  * 一次性账本迁移：id 唯一，apply 在加载边界对原始文档执行，已应用过的跳过。
  * 未来账本/schema 字段变更（重命名、拆桶、语义调整）时，在此追加一条迁移并
@@ -695,7 +714,7 @@ export interface SessionUsageSummary {
  * 订阅豁免），历史账本行立即失效并全量重折，配置变更即时生效（issue #37）。
  * 判定函数无法序列化，统一记为 `fn`（任何函数形态互视为同一指纹）。
  */
-export declare function configFingerprint(subscriptionMatcher: SubscriptionMatcher, officialProviderIds: ReadonlySet<string> | undefined, routeAliases: Readonly<Record<string, string>>, searchEstimate: number, modelKeyAliases?: Readonly<Record<string, string>>, registeredProviders?: ReadonlySet<string>): string;
+export declare function configFingerprint(subscriptionMatcher: SubscriptionMatcher, officialProviderIds: ReadonlySet<string> | undefined, routeAliases: Readonly<Record<string, string>>, searchEstimate: number, modelKeyAliases?: Readonly<Record<string, string>>, registeredProviders?: ReadonlySet<string>, routeOrigins?: Readonly<Record<string, string>>): string;
 /**
  * Create the incremental usage aggregator.
  * @param persistence - the session persistence service.
