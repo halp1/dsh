@@ -281,6 +281,14 @@ export type UsageBillingKey =
   | 'settingsNavDisplay'
   | 'settingsNavAdvanced'
   | 'settingsNavAbout'
+  | 'settingsSearchPlaceholder'
+  | 'settingsSearchEmpty'
+  | 'sessionsViewAll'
+  | 'sessionViewerSearch'
+  | 'modelBudgetTitle'
+  | 'modelBudgetHint'
+  | 'modelBudgetBody'
+  | 'modelBudgetPlaceholder'
   | 'settingsSectionDisplay'
   | 'emptyHint'
   | 'tokenDaily'
@@ -618,6 +626,14 @@ export const zh: Record<UsageBillingKey, string> = {
   'settingsNavDisplay': '显示',
   'settingsNavAdvanced': '高级',
   'settingsNavAbout': '关于',
+  'settingsSearchPlaceholder': '搜索设置…（如：预算、峰谷、单价）',
+  'settingsSearchEmpty': '没有匹配「{query}」的设置项',
+  'sessionsViewAll': '查看全部 {count} 个会话',
+  'sessionViewerSearch': '搜索会话…（标题 / 项目 / id）',
+  'modelBudgetTitle': '按模型预算',
+  'modelBudgetHint': '为单个模型设本月上限（人民币元）；跨 80% / 100% 各提醒一次，留空 = 不限。',
+  'modelBudgetBody': '「{model}」本月已 {cost}（预算 {budget} 的 {pct}%）',
+  'modelBudgetPlaceholder': '上限',
   'settingsSectionDisplay': '显示偏好',
   'emptyHint': '运行第一次对话后，这里会自动出现按厂商的用量与费用明细',
   'tokenViewStructure': '按结构',
@@ -947,6 +963,14 @@ export const en: Record<UsageBillingKey, string> = {
   'settingsNavDisplay': 'Display',
   'settingsNavAdvanced': 'Advanced',
   'settingsNavAbout': 'About',
+  'settingsSearchPlaceholder': 'Search settings… (e.g. budget, peak, price)',
+  'settingsSearchEmpty': 'No settings match "{query}"',
+  'sessionsViewAll': 'View all {count} sessions',
+  'sessionViewerSearch': 'Search sessions… (title / project / id)',
+  'modelBudgetTitle': 'Per-model budget',
+  'modelBudgetHint': 'Set a monthly cap per model (CNY); alerts fire once each at 80% / 100%. Empty = unlimited.',
+  'modelBudgetBody': '"{model}" has spent {cost} this month ({pct}% of {budget})',
+  'modelBudgetPlaceholder': 'Cap',
   'settingsSectionDisplay': 'Display preferences',
   'emptyHint': 'Run your first conversation and per-provider usage and cost breakdown will appear here automatically',
   'tokenHit': 'Input (cache hit)',

@@ -4733,3 +4733,43 @@ span.bandDot { cursor: default; }
 }
 
 
+
+/* U-7 会话全屏查看器：fixed 浮层覆盖仪表盘（不超出宿主 Modal 层级——宿主
+   Modal 是顶层 portal，z-index 取插件内部最高即可）。列表沿用 ubTable 行样式。 */
+.sessionViewer {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 20px;
+  background: var(--dsb-2);
+  overflow: hidden;
+}
+
+.sessionViewerHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sessionViewerTitle {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.sessionViewerHead .ubSearch {
+  margin-left: auto;
+  width: 260px;
+  max-width: 55%;
+}
+
+.sessionViewerList {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--ds-border);
+  border-radius: var(--ds-r-2, 8px);
+}

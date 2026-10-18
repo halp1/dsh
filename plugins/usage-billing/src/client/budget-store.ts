@@ -20,6 +20,10 @@ export interface BudgetPrefsState {
   lastBalanceAlertDay: string
   /** 最近一次峰谷切换提醒的切换点时刻（毫秒）：同一切换点只提醒一次。 */
   lastTierSwitchAt: number
+  /** 按模型月度预算（模型目录键 → 人民币元/月；U-3）。缺键 = 该模型不限。 */
+  modelBudgets: Record<string, number>
+  /** 按模型预算提醒的最后通知日期戳（`${model}:${tier}` → YYYY-MM-DD）：每模型每档每天最多一次。 */
+  modelTierAlertDays: Record<string, string>
 }
 
 /** 预算偏好的完整写面（组件只能经这些 action 写入）；type 别名以兼容 ActionsDecl 的索引签名约束。 */
@@ -29,6 +33,8 @@ export type BudgetPrefsActions = {
   markTierAlerted: (d: BudgetPrefsState, tiers: readonly number[], day: string) => void
   markBalanceAlerted: (d: BudgetPrefsState, day: string) => void
   markTierSwitchAlerted: (d: BudgetPrefsState, at: number) => void
+  setModelBudget: (d: BudgetPrefsState, key: string, value: number) => void
+  markModelTierAlerted: (d: BudgetPrefsState, marks: readonly string[], day: string) => void
 }
 
 /**
@@ -37,7 +43,7 @@ export type BudgetPrefsActions = {
  */
 export function createBillingBudgetStore(): EngineStoreHandle<BudgetPrefsState, BudgetPrefsActions> {
   return defineStore({
-    init: (): BudgetPrefsState => ({ enabled: false, amount: 0, tierAlertDays: {}, lastBalanceAlertDay: '', lastTierSwitchAt: 0 }),
+    init: (): BudgetPrefsState => ({ enabled: false, amount: 0, tierAlertDays: {}, lastBalanceAlertDay: '', lastTierSwitchAt: 0, modelBudgets: {}, modelTierAlertDays: {} }),
     persist: 'dsh.ui-usage-billing.budget',
     actions: {
       setEnabled: (d, on) => { d.enabled = on },
@@ -50,6 +56,17 @@ export function createBillingBudgetStore(): EngineStoreHandle<BudgetPrefsState, 
       },
       markBalanceAlerted: (d, day) => { d.lastBalanceAlertDay = day },
       markTierSwitchAlerted: (d, at) => { d.lastTierSwitchAt = at },
+      // U-3 按模型预算：正数写入，0/负数/非有限值 = 移除该模型限额。
+      setModelBudget: (d, key, value) => {
+        d.modelBudgets ??= {}
+        if (Number.isFinite(value) && value > 0) d.modelBudgets[key] = value
+        else delete d.modelBudgets[key]
+      },
+      // U-3 一次把多个 `${model}:${tier}` 标记为当日已提醒（旧持久化缺字段就地补）。
+      markModelTierAlerted: (d, marks, day) => {
+        d.modelTierAlertDays ??= {}
+        for (const mark of marks) d.modelTierAlertDays[mark] = day
+      },
     },
   })
 }

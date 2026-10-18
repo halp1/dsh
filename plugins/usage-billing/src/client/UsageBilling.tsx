@@ -122,12 +122,15 @@ import { BillingChevronDown } from './domain/host-version.ts'
 import { dailyBurnRate, projectMonthCost } from './domain/forecast.ts'
 import { activeDaysOf, dayTokensOf, streakDaysOf } from './domain/streak.ts'
 import { lastSevenDays, sinceMondayOf, sumByDayRange } from './domain/week.ts'
+import { crossedModelBudgetTiers, monthCostByModel } from './domain/model-budget.ts'
 import { normalizeProvider, providerFromModelKey } from './domain/provider-aliases.ts'
 import { subscriptionVendorOf } from './domain/subscription-vendors.ts'
 import { rechargeUrlOf } from './domain/recharge.ts'
 import { recostWithUserPrices } from './domain/recost.ts'
 import { notifyAcrossInstances, notifyAllowed } from './domain/notify.ts'
 import { buildSessionDisplay } from './domain/provider-merge.ts'
+import { filterSessionsForViewer } from './domain/session-viewer.ts'
+import { settingsSectionHidden } from './settings-search.ts'
 import { formatClock, providerCostOf, providerDot, relayKindText, RELAY_KIND_CLASS, subFamilyOf, subscriptionStatusText, subscriptionWindowLabel } from './domain/kpi.ts'
 import { loadUsageStats } from './api/usage-stats.ts'
 import { fetchBalanceDoc } from './api/balance.ts'
@@ -619,6 +622,12 @@ interface BillingDashboardProps {
   budgetAmount: number
   onToggleBudget: () => void
   onBudgetAmount: (value: number) => void
+  /** U-3 按模型月度预算（模型目录键 → 人民币元）；缺键 = 不限。 */
+  modelBudgets: Record<string, number>
+  /** U-3 本月每模型消耗（用户价重估后口径）。 */
+  monthModelCost: Record<string, number>
+  /** U-3 按模型预算更新（value ≤ 0 = 移除限额）。 */
+  onModelBudget: (key: string, value: number) => void
   /** 峰谷提醒偏好（由父组件从 localStorage 读下传）。 */
   peakConfig: PeakAlertConfig
   /** 峰谷提醒偏好更新（父组件持久化）。 */
@@ -939,6 +948,7 @@ function UserPriceCard({ userPrices, onUserPrices, t }: {
 function BillingDashboard({
   stats, t, onClose, userPrices, onUserPrices, health, balances, reconcile, quotas, relayQuotas, currency, onCurrency, language, onLanguage, turns,
   renderSlot, budgetEnabled, budgetAmount, onToggleBudget, onBudgetAmount,
+  modelBudgets, monthModelCost, onModelBudget,
   peakConfig, onPeakConfig, onPreviewPeak, floatPrefs, onFloatPrefs, cardPrefs, onCardPrefs, sitePrefs, onSitePrefs,
   liveCostPrefs, onLiveCostPrefs, quotasStale,
 }: BillingDashboardProps): React.ReactNode {
@@ -995,6 +1005,10 @@ function BillingDashboard({
   /* v1.5 设置页当前活动组（左侧锚点高亮跟随）。alpha.1 用 click-set
      + 滚动；v1.5.1 加 IntersectionObserver 跟随滚动反向高亮。 */
   const [activeSettingsGroup, setActiveSettingsGroup] = useState<string>('budget')
+  // 设置页全文搜索（U-4）：查询非空时，关键词未命中的分区隐藏（hidden 属性，
+  // 保留 DOM 与锚点 id——清空搜索即恢复，锚点导航不受影响）。
+  const [settingsQuery, setSettingsQuery] = useState('')
+  const settingsSectionHiddenBy = (keywords: readonly string[]): boolean => settingsSectionHidden(settingsQuery, keywords)
   const scrollToSettingsGroup = useCallback((id: string) => {
     setActiveSettingsGroup(id)
     if (typeof document === 'undefined') return
@@ -1058,6 +1072,9 @@ function BillingDashboard({
 
   // 合并会话的展开状态（issue #42）：一级默认收起，点击主行切换。
   const [expandedSessions, setExpandedSessions] = useState<ReadonlySet<string>>(new Set())
+  // U-7 会话全屏查看器：开关 + 搜索查询；列表走原始 bySession（全量、平铺无折叠）。
+  const [sessionViewerOpen, setSessionViewerOpen] = useState(false)
+  const [sessionViewerQuery, setSessionViewerQuery] = useState('')
   const toggleSession = useCallback((id: string) => {
     setExpandedSessions(prev => {
       const next = new Set(prev)
@@ -1068,6 +1085,23 @@ function BillingDashboard({
   }, [])
   // 同名会话合并行一次计算（此前渲染期调用两次：空态判断 + 行渲染各一遍全量排序）。
   const mergedSessions = useMemo(() => buildSessionDisplay(stats.bySession ?? []), [stats.bySession])
+  // U-7 全屏查看器行：原始 bySession 全量（不做标题合并——搜索场景下平铺直接）
+  // 按查询过滤标题 / 项目 / id。
+  const viewerRows = useMemo(
+    () => filterSessionsForViewer(stats.bySession ?? [], sessionViewerQuery),
+    [stats.bySession, sessionViewerQuery],
+  )
+  // U-3 按模型预算行：本月有消耗的模型 ∪ 已设预算的模型，按本月消耗降序；
+  // 目录内模型显示人类名，「其他」兜底条目显示原始 key。
+  const modelBudgetRows = useMemo(() => {
+    const keys = new Set<string>([...Object.keys(monthModelCost), ...Object.keys(modelBudgets)])
+    return [...keys]
+      .map(key => {
+        const entry = modelOf(key)
+        return { key, name: entry.key === 'other' ? undefined : entry.name, cost: monthModelCost[key] ?? 0 }
+      })
+      .sort((a, b) => b.cost - a.cost)
+  }, [monthModelCost, modelBudgets])
 
   // 厂商（提供商）组展开状态（issue #77）：默认收起，点击组头展开模型明细与
   // 订阅额度。按稳定组 id 作 key（不随语言变），展开集合 localStorage 持久化。
@@ -2247,8 +2281,23 @@ function BillingDashboard({
                   ))}
                 </aside>
                 <div className={css.settingsPane}>
+                  {/* U-4 设置页全文搜索：按关键词过滤分区（hidden 属性，锚点 id 保留）。 */}
+                  <input
+                    className={css.ubSearch}
+                    type="search"
+                    value={settingsQuery}
+                    placeholder={t('settingsSearchPlaceholder')}
+                    aria-label={t('settingsSearchPlaceholder')}
+                    data-testid="billing-settings-search"
+                    onChange={event => { setSettingsQuery(event.target.value) }}
+                  />
+                  {settingsQuery.trim() !== '' && allSettingsSectionsHidden(settingsQuery) && (
+                    <p className={css.setCardDesc} data-testid="billing-settings-search-empty">
+                      {t('settingsSearchEmpty').replace('{query}', settingsQuery.trim())}
+                    </p>
+                  )}
                   {/* v1.5 新增：密度模式与动效强度开关（设置 - 显示分组最前） */}
-                  <div className={clsx(css.setCard, css.densityCard)} data-testid="billing-density-motion-card">
+                  <div hidden={settingsSectionHiddenBy(SETTINGS_KEYWORDS.display)} className={clsx(css.setCard, css.densityCard)} data-testid="billing-density-motion-card">
                     <div className={css.setCardHead}>
                       <div className={css.setCardMeta}>
                         <h3 className={css.setCardTitle}>{t('settingsSectionDisplay')}</h3>
@@ -2298,7 +2347,7 @@ function BillingDashboard({
                     </div>
                   </div>
               {/* 1. 月度预算：set-card——头部(标题+说明+开关) + 控制列(金额/进度/说明)。 */}
-              <section className={css.setCard} data-testid="billing-budget" id="settings-budget">
+              <section hidden={settingsSectionHiddenBy(SETTINGS_KEYWORDS.budget)} className={css.setCard} data-testid="billing-budget" id="settings-budget">
                 <div className={css.setCardHead}>
                   <div className={css.setCardMeta}>
                     <h3 className={css.setCardTitle}>{t('budget')}</h3>
@@ -2366,10 +2415,40 @@ function BillingDashboard({
                     )}
                   </div>
                 )}
+                {/* U-3 按模型预算：本月消耗模型逐个设月度上限；与全局预算开关独立。 */}
+                <div className={css.ctlCol} data-testid="billing-model-budgets">
+                  <span className={css.ctlLabel}>{t('modelBudgetTitle')}</span>
+                  <p className={css.setCardDesc}>{t('modelBudgetHint')}</p>
+                  {modelBudgetRows.length === 0 && (
+                    <p className={css.setCardDesc}>{t('emptyHint')}</p>
+                  )}
+                  {modelBudgetRows.map(row => (
+                    <div key={row.key} className={css.ctlRow}>
+                      <span className={css.ctlLabel}>{row.name ?? row.key}</span>
+                      <span className={css.setCardDesc} data-testid={`billing-model-budget-cost-${row.key}`}>
+                        {money(row.cost)}
+                      </span>
+                      <span className={css.inp}>
+                        <span className={css.affix} aria-hidden="true">¥</span>
+                        <input
+                          className={css.budgetInput}
+                          type="number"
+                          min={0}
+                          step={1}
+                          value={modelBudgets[row.key] ?? ''}
+                          placeholder={t('modelBudgetPlaceholder')}
+                          aria-label={`${t('modelBudgetTitle')} · ${row.name ?? row.key}`}
+                          data-testid={`billing-model-budget-${row.key}`}
+                          onChange={e => { onModelBudget(row.key, e.target.valueAsNumber) }}
+                        />
+                      </span>
+                    </div>
+                  ))}
+                </div>
               </section>
 
               {/* 2. 峰谷切换提醒：set-card——头部 + 控制列(提前量/位置/模式/系统通知/预览)。 */}
-              <section className={css.setCard} data-testid="billing-peak-alert-settings" id="settings-alert">
+              <section hidden={settingsSectionHiddenBy(SETTINGS_KEYWORDS.alert)} className={css.setCard} data-testid="billing-peak-alert-settings" id="settings-alert">
                 <div className={css.setCardHead}>
                   <div className={css.setCardMeta}>
                     <h3 className={css.setCardTitle}>{t('peakAlert')}</h3>
@@ -2464,7 +2543,7 @@ function BillingDashboard({
 
               {/* 3. 功能开关：三个纯显隐/工具开关聚合为一行三列（usage_stats 工具 /
                   平价消耗胶囊 / 中转站列表），缩短设置页纵向长度。 */}
-              <section className={css.setCard} data-testid="billing-toggle-setting" id="settings-display">
+              <section hidden={settingsSectionHiddenBy(SETTINGS_KEYWORDS.toggles)} className={css.setCard} data-testid="billing-toggle-setting" id="settings-display">
                 <div className={css.setGrid3}>
                   <div className={css.setCell} data-testid="billing-usage-stats-tool-setting">
                     <div className={css.setCardHead}>
@@ -2534,7 +2613,7 @@ function BillingDashboard({
 
               {/* 4. 展示内容：模型用量悬浮窗（模式 / 订阅目标）与计费卡主指标聚合为
                   一行两列；订阅目标多选随模式展开在本 cell 内，不跨列。 */}
-              <section className={css.setCard} data-testid="billing-display-setting" id="settings-display-extra">
+              <section hidden={settingsSectionHiddenBy(SETTINGS_KEYWORDS.displayExtra)} className={css.setCard} data-testid="billing-display-setting" id="settings-display-extra">
                 <div className={css.setGrid2}>
                   <div className={css.setCell} data-testid="billing-float-setting">
                     <div className={css.setCardHead}>
@@ -2677,10 +2756,10 @@ function BillingDashboard({
               </section>
 
               {/* 5. 自定义单价：set-card——已存价列表 + 新增行；显示层重估，口径差异见说明。 */}
-              <div id="settings-advanced"><UserPriceCard userPrices={userPrices} onUserPrices={onUserPrices} t={t} /></div>
+              <div hidden={settingsSectionHiddenBy(SETTINGS_KEYWORDS.advanced)} id="settings-advanced"><UserPriceCard userPrices={userPrices} onUserPrices={onUserPrices} t={t} /></div>
 
               {/* 6. 插件信息卡：作者 / 仓库 / 版本 / 许可证（设置 Tab 常驻）。 */}
-              <div id="settings-about"><PluginInfoCard t={t} version={stats.pluginVersion} /></div>
+              <div hidden={settingsSectionHiddenBy(SETTINGS_KEYWORDS.about)} id="settings-about"><PluginInfoCard t={t} version={stats.pluginVersion} /></div>
                 </div>{/* settingsPane */}
               </div>{/* settingsLayout */}
             </div>
@@ -3210,6 +3289,17 @@ function BillingDashboard({
                           .replace('{total}', String(stats.bySession.length))
                         : `${stats.bySession.length}`}
                     </span>
+                    {/* U-7 会话全屏查看器：面板只显示前 20 行，全量（服务端封顶 100）+ 搜索走浮层。 */}
+                    {stats.bySession.length > 0 && (
+                      <button
+                        type="button"
+                        className={css.exportButton}
+                        data-testid="billing-sessions-view-all"
+                        onClick={() => { setSessionViewerOpen(true) }}
+                      >
+                        {t('sessionsViewAll').replace('{count}', String(stats.bySession.length))}
+                      </button>
+                    )}
                   </div>
                   {/* 置信度提示：部分会话数据出自旧版算法的账本行（原日志已删，无法重算）。 */}
                   {(stats.staleLedgerSessions ?? 0) > 0 && (
@@ -3312,6 +3402,70 @@ function BillingDashboard({
                       </tbody>
                     </table>
                   </div>
+                  {/* U-7 会话全屏查看器：fixed 浮层覆盖仪表盘，全量列表（服务端封顶 100 行）
+                      + 标题/项目/id 子串搜索。平铺无折叠——搜索场景下平铺比逐组展开更直接。 */}
+                  {sessionViewerOpen && (
+                    <div className={css.sessionViewer} data-testid="billing-session-viewer">
+                      <div className={css.sessionViewerHead}>
+                        <h3 className={css.sessionViewerTitle}>{t('sessions')}</h3>
+                        <input
+                          className={css.ubSearch}
+                          type="search"
+                          value={sessionViewerQuery}
+                          placeholder={t('sessionViewerSearch')}
+                          aria-label={t('sessionViewerSearch')}
+                          data-testid="billing-session-viewer-search"
+                          onChange={event => { setSessionViewerQuery(event.target.value) }}
+                        />
+                        <button
+                          type="button"
+                          className={css.exportButton}
+                          data-testid="billing-session-viewer-close"
+                          onClick={() => { setSessionViewerOpen(false); setSessionViewerQuery('') }}
+                        >
+                          {t('close')}
+                        </button>
+                      </div>
+                      <div className={css.sessionViewerList} data-testid="billing-session-viewer-list">
+                        <table className={css.ubTable}>
+                          <thead>
+                            <tr>
+                              <th>{t('sessionTitle')}</th>
+                              <th className={css.numCol}>{t('calls')}</th>
+                              <th className={css.numCol}>{t('actual')}</th>
+                              <th className={css.numCol}>{t('lastActive')}</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {viewerRows.length === 0 && (
+                              <tr><td colSpan={4} className={css.emptyRow}>{t('noData')}</td></tr>
+                            )}
+                            {viewerRows.map(row => (
+                              <tr key={row.id}>
+                                <td>
+                                  <span className={css.modelName}>
+                                    {row.title ?? `${t('sessionUntitled')} · ${row.id.slice(0, 8)}`}
+                                    {(row.mergedCount ?? 1) > 1 ? ` ×${row.mergedCount}` : ''}
+                                  </span>
+                                  {row.cwd !== undefined && (
+                                    <span className={css.modelProvider}>{workspaceTailOf(row.cwd)}</span>
+                                  )}
+                                  {row.stale === true && (
+                                    <span className={clsx(css.ubTag, css.ubTagNeutral)}>{t('sessionStaleBadge')}</span>
+                                  )}
+                                </td>
+                                <td className={css.numCol}>{row.calls.toLocaleString()}</td>
+                                <td className={css.numCol}>{money(row.cost)}</td>
+                                <td className={css.numCol}>
+                                  {row.lastActive > 0 ? `${localDayStamp(row.lastActive)} ${formatClock(row.lastActive)}` : '—'}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
                 </section>
               )}
             </div>
@@ -3550,6 +3704,29 @@ function BillingDashboard({
 }
 
 /** 胶囊可落点的槽位（below 为默认值，与 usage-billing-settings 的回退一致）。 */
+/** U-7 会话查看器的项目路径尾段：cwd 末级目录名（与工作区聚合同口径）；空回退 em dash。 */
+function workspaceTailOf(cwd: string): string {
+  const parts = cwd.split(/[\\/]/).filter(Boolean)
+  return parts.at(-1) ?? '—'
+}
+
+/** U-4 设置页分区关键词：搜索查询对每组分词做大小写不敏感子串匹配，
+ *  覆盖分区标题、说明与常见同义词（中英双份，避免依赖当前界面语言）。 */
+const SETTINGS_KEYWORDS = {
+  display: ['显示', '密度', '动效', '紧凑', '舒适', '克制', '丰富', 'display', 'density', 'motion', 'compact', 'comfortable'],
+  budget: ['预算', '金额', '本月', '花费', '进度', 'budget', 'amount', 'spend', 'progress'],
+  alert: ['峰谷', '峰', '谷', '提醒', '通知', '预览', '切换', 'peak', 'off-peak', 'alert', 'notify', 'preview'],
+  toggles: ['usage_stats', '工具', '即时代费', '胶囊', '中转站', '站点', '隐藏', 'relay', 'site', 'live', 'cost', 'hide'],
+  displayExtra: ['悬浮', '订阅', '计费卡', '指标', '环比', '主数字', 'float', 'subscription', 'card', 'metric', 'delta'],
+  advanced: ['自定义', '单价', '价格', '低谷', 'custom', 'price'],
+  about: ['关于', '版本', '作者', '许可', '仓库', 'about', 'version', 'author', 'license', 'repo'],
+} as const
+
+/** 全部分区是否都被搜索过滤隐藏（用于显示「没有匹配」空态提示）。 */
+function allSettingsSectionsHidden(query: string): boolean {
+  return Object.values(SETTINGS_KEYWORDS).every(keywords => settingsSectionHidden(query, keywords))
+}
+
 const LIVE_COST_POSITIONS = ['below', 'above', 'toolbar'] as const
 
 /**
@@ -3915,6 +4092,13 @@ export function UsageBilling(props: UsageBillingProps): React.ReactNode {
   // 余额不足告警：任一提供方余额低于阈值（折算人民币）时每天提醒一次；
   // 与预算开关无关——余额是硬性约束，无论是否开启预算都要提醒。
   const lastBalanceAlertDay = useStore(s => s.lastBalanceAlertDay)
+  // U-3 按模型预算：预算表 + 提醒标记；本月每模型消耗（用户价重估口径）。
+  const modelBudgets = useStore(s => s.modelBudgets)
+  const modelTierAlertDays = useStore(s => s.modelTierAlertDays)
+  const monthModelCost = useMemo(
+    () => monthCostByModel(displayStats.byDayModels, today.slice(0, 7)),
+    [displayStats.byDayModels, today],
+  )
   const lowThreshold = displayStats.lowBalanceThreshold ?? DEFAULT_LOW_BALANCE_THRESHOLD
   const lowBalanceRow = useMemo(() => {
     if (balances.length === 0) return undefined
@@ -3944,6 +4128,33 @@ export function UsageBilling(props: UsageBillingProps): React.ReactNode {
     // 认领失败 = 另一实例刚发过当日余额提醒，本实例跳过（issue #44）。
     notifyAcrossInstances(`balance:${today}`, () => { new Notification(t('balance'), { body }) })
   }, [lowBalanceRow, lastBalanceAlertDay, today, actions, t])
+
+  // U-3 按模型预算分档提醒：任一模型本月消耗跨 80% / 100% 时桌面通知
+  // （每模型每档每天最多一次，跨多档只发最高档；标记与全局预算同套 store）。
+  useEffect(() => {
+    const marks: string[] = []
+    let top: { model: string; tier: number; cost: number; budget: number } | undefined
+    for (const [model, budget] of Object.entries(modelBudgets)) {
+      if (!(budget > 0)) continue
+      const cost = monthModelCost[model] ?? 0
+      for (const tier of crossedModelBudgetTiers(cost, budget)) {
+        const mark = `${model}:${tier}`
+        if (modelTierAlertDays[mark] === today) continue
+        marks.push(mark)
+        if (top === undefined || tier > top.tier) top = { model, tier, cost, budget }
+      }
+    }
+    if (marks.length === 0 || top === undefined) return
+    actions.markModelTierAlerted(marks, today)
+    if (!notifyAllowed()) return
+    const body = t('modelBudgetBody')
+      .replace('{model}', top.model)
+      .replace('{cost}', formatMoney(top.cost))
+      .replace('{budget}', formatMoney(top.budget))
+      .replace('{pct}', String(top.tier))
+    // 认领失败 = 另一实例刚发过同模型同档提醒，本实例跳过（issue #44 同款）。
+    notifyAcrossInstances(`model-budget:${top.model}:${top.tier}:${today}`, () => { new Notification(t('modelBudgetTitle'), { body }) })
+  }, [modelBudgets, monthModelCost, modelTierAlertDays, today, actions, t])
 
   // hover 速览「主力直联/订阅消耗」：本月按厂商聚合消耗，区分按量（直联）与订阅，
   // 并附余额/配额状态——余额仅按量厂商有意义，配额仅订阅厂商有意义。
@@ -4088,6 +4299,9 @@ export function UsageBilling(props: UsageBillingProps): React.ReactNode {
           renderSlot={renderSlot}
           budgetEnabled={budgetEnabled}
           budgetAmount={effectiveBudget}
+          modelBudgets={modelBudgets}
+          monthModelCost={monthModelCost}
+          onModelBudget={actions.setModelBudget}
           onToggleBudget={toggleBudget}
           onBudgetAmount={actions.setAmount}
           peakConfig={peakConfig}
