@@ -36,7 +36,8 @@
 **跳过**（有据）：S-5 全量拆 CSS Module（41 个跨引用选择器会被哈希静默打断，改为 parity 守卫 + TOC）；U-1 会话行跳转（宿主无 API）；U-2 小时粒度 / U-5 周报（留后续功能批）
 
 - 测试：655 全绿（较 v1.5.1 +43：API contract 3 / UI 组件 6 / 路由防护 5 / 形状金丝雀 6 / 静默日志 4 / a11y 3 / 设置搜索 6 / 会话查看器 5 / 按模型预算 5 / lowQuota 3 / heatmap 三档 2 等）
-- 构建：lib/client.js 301,940 字节、lib/index.js 301,700 字节（320 KiB 强警告线内；本仓自设防线，DSH Store 仅对图标限 256 KiB）
+- 构建：lib/client.js 303,094 字节、lib/index.js 301,700 字节（320 KiB 强警告线内；本仓自设防线，DSH Store 仅对图标限 256 KiB）
+- 修复：设置搜索过滤在真机失效（hidden 属性被 .setCard 的 display:flex 覆盖）与按模型预算行布局错位——均为真机浏览器验收抓出，见 commit 0c43d2b
 
 ### v1.5.1（2026-10-18）
 
