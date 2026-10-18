@@ -662,7 +662,7 @@ export const zh: Record<UsageBillingKey, string> = {
   'tokenMissShort': '未命中',
   'tokenTotal': '总 Token',
   'tokenShare': '占比',
-  'usageStatsTool': '注入用量查询工具',
+  'usageStatsTool': '注入用量查询',
   'usageStatsToolHint': '让模型可在对话中查询用量/费用；会占用模型每次请求的上下文，coding 场景建议关闭（切换即时生效）',
   'balanceGranted': '赠金余额',
   'balanceTopped': '充值余额',

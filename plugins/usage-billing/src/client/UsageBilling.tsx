@@ -207,6 +207,19 @@ function SubscriptionWindowRow({ window, t }: { window: SubscriptionQuota['windo
   )
 }
 
+/** V-2 同款「?」提示：把设置卡的长描述收进悬停气泡，卡面只留标题。 */
+function HelpTip({ label, t }: {
+  label: string
+  t: (key: UsageBillingKey) => string
+}): React.ReactNode {
+  void t
+  return (
+    <Tooltip label={label} side="top" maxWidth={280}>
+      <span className={css.helpTip} role="note" aria-label={label}>?</span>
+    </Tooltip>
+  )
+}
+
 /** 预算 store 的 props 份额（useStore 读取 + actions 写面）。 */
 type BillingBudgetStoreProps = PropsStore<ReturnType<typeof createBillingBudgetStore>>
 
@@ -342,7 +355,7 @@ function UsageBillingTrigger(
   // gaugeWater 伸缩）+ 五档主刻度与细分刻度 + 数据驱动指针。圆心 (20,29)、量程
   // 半径 15、扫角 ±80°，弧长 = 15 × 160° ≈ 41.9。
   const cardIcon = (
-    <svg viewBox="0 0 40 40" fill="none" stroke="currentColor" strokeLinecap="round" aria-hidden="true">
+    <svg viewBox="3.5 10 34 22" fill="none" stroke="currentColor" strokeLinecap="round" aria-hidden="true">
       {/* 全程轨道弧（量程 -80° → +80°） */}
       <path d="M5.23 26.4A15 15 0 0 1 34.77 26.4" strokeWidth={3} opacity={0.16} />
       {/* 进度弧：当日水位占量程比例，弧长随 30s 轮询平滑伸缩 */}
@@ -821,8 +834,7 @@ function UserPriceCard({ userPrices, onUserPrices, t }: {
     <section className={css.setCard} data-testid="billing-user-prices">
       <div className={css.setCardHead}>
         <div className={css.setCardMeta}>
-          <h3 className={css.setCardTitle}>{t('userPrices')}</h3>
-          <p className={css.setCardDesc}>{t('userPricesHint')}</p>
+          <h3 className={css.setCardTitle}>{t('userPrices')}<HelpTip label={t('userPricesHint')} t={t} /></h3>
         </div>
       </div>
       <div className={css.ctlCol}>
@@ -2378,8 +2390,7 @@ function BillingDashboard({
               <section hidden={settingsSectionHiddenBy(SETTINGS_KEYWORDS.budget)} className={css.setCard} data-testid="billing-budget" id="settings-budget">
                 <div className={css.setCardHead}>
                   <div className={css.setCardMeta}>
-                    <h3 className={css.setCardTitle}>{t('budget')}</h3>
-                    <p className={css.setCardDesc}>{t('budgetHint')}</p>
+                    <h3 className={css.setCardTitle}>{t('budget')}<HelpTip label={t('budgetHint')} t={t} /></h3>
                   </div>
                   <button
                     type="button"
@@ -2445,8 +2456,10 @@ function BillingDashboard({
                 )}
                 {/* U-3 按模型预算：本月消耗模型逐个设月度上限；与全局预算开关独立。 */}
                 <div className={css.ctlCol} data-testid="billing-model-budgets">
-                  <span className={css.modelBudgetTitle}>{t('modelBudgetTitle')}</span>
-                  <p className={css.modelBudgetHint}>{t('modelBudgetHint')}</p>
+                  <span className={css.modelBudgetTitle}>
+                    {t('modelBudgetTitle')}
+                    <HelpTip label={t('modelBudgetHint')} t={t} />
+                  </span>
                   {modelBudgetRows.length === 0 && (
                     <p className={css.modelBudgetHint}>{t('emptyHint')}</p>
                   )}
@@ -2483,8 +2496,7 @@ function BillingDashboard({
               <section hidden={settingsSectionHiddenBy(SETTINGS_KEYWORDS.alert)} className={css.setCard} data-testid="billing-peak-alert-settings" id="settings-alert">
                 <div className={css.setCardHead}>
                   <div className={css.setCardMeta}>
-                    <h3 className={css.setCardTitle}>{t('peakAlert')}</h3>
-                    <p className={css.setCardDesc}>{t('peakAlertHint')}</p>
+                    <h3 className={css.setCardTitle}>{t('peakAlert')}<HelpTip label={t('peakAlertHint')} t={t} /></h3>
                   </div>
                   <button
                     type="button"
@@ -2580,8 +2592,7 @@ function BillingDashboard({
                   <div className={css.setCell} data-testid="billing-usage-stats-tool-setting">
                     <div className={css.setCardHead}>
                       <div className={css.setCardMeta}>
-                        <h3 className={css.setCardTitle}>{t('usageStatsTool')}</h3>
-                        <p className={css.setCardDesc}>{t('usageStatsToolHint')}</p>
+                        <h3 className={css.setCardTitle}>{t('usageStatsTool')}<HelpTip label={t('usageStatsToolHint')} t={t} /></h3>
                       </div>
                       <button
                         type="button"
@@ -2599,8 +2610,7 @@ function BillingDashboard({
                   <div className={css.setCell} data-testid="billing-livecost-setting">
                     <div className={css.setCardHead}>
                       <div className={css.setCardMeta}>
-                        <h3 className={css.setCardTitle}>{t('liveCostBar')}</h3>
-                        <p className={css.setCardDesc}>{t('liveCostBarHint')}</p>
+                        <h3 className={css.setCardTitle}>{t('liveCostBar')}<HelpTip label={t('liveCostBarHint')} t={t} /></h3>
                       </div>
                       <button
                         type="button"
@@ -2624,8 +2634,7 @@ function BillingDashboard({
                   <div className={css.setCell} data-testid="billing-site-list-setting">
                     <div className={css.setCardHead}>
                       <div className={css.setCardMeta}>
-                        <h3 className={css.setCardTitle}>{t('siteListDisplay')}</h3>
-                        <p className={css.setCardDesc}>{t('siteListDisplayHint')}</p>
+                        <h3 className={css.setCardTitle}>{t('siteListDisplay')}<HelpTip label={t('siteListDisplayHint')} t={t} /></h3>
                       </div>
                       <button
                         type="button"
@@ -2650,8 +2659,7 @@ function BillingDashboard({
                   <div className={css.setCell} data-testid="billing-float-setting">
                     <div className={css.setCardHead}>
                       <div className={css.setCardMeta}>
-                        <h3 className={css.setCardTitle}>{t('floatWindow')}</h3>
-                        <p className={css.setCardDesc}>{t('floatWindowHint')}</p>
+                        <h3 className={css.setCardTitle}>{t('floatWindow')}<HelpTip label={t('floatWindowHint')} t={t} /></h3>
                       </div>
                     </div>
                     <div className={css.ctlCol}>
@@ -2710,8 +2718,7 @@ function BillingDashboard({
                   <div className={css.setCell} data-testid="billing-card-setting">
                     <div className={css.setCardHead}>
                       <div className={css.setCardMeta}>
-                        <h3 className={css.setCardTitle}>{t('cardDisplay')}</h3>
-                        <p className={css.setCardDesc}>{t('cardDisplayHint')}</p>
+                        <h3 className={css.setCardTitle}>{t('cardDisplay')}<HelpTip label={t('cardDisplayHint')} t={t} /></h3>
                       </div>
                     </div>
                     <div className={css.ctlCol}>
