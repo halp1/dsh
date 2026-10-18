@@ -132,6 +132,9 @@ export type UsageBillingKey =
   | 'cardSpanDay'
   | 'cardSpanWeek'
   | 'cardSpanMonth'
+  | 'cardDeltaBadge'
+  | 'cardDeltaShow'
+  | 'cardDeltaHide'
   | 'triggerMonthTokens'
   | 'triggerTodayTokens'
   | 'triggerWeekTokens'
@@ -451,7 +454,7 @@ export const zh: Record<UsageBillingKey, string> = {
   'floatPrimaryMonth': '本月',
 
   'cardDisplay': '计费卡显示',
-  'cardDisplayHint': '切换左下角计费卡的主指标与主数字统计范围（迷你柱跟随视角，悬浮窗不受影响）。',
+  'cardDisplayHint': '切换左下角计费卡的主指标与主数字统计范围（迷你柱跟随视角，悬浮窗不受影响）；「今日环比」徽章太醒目可在此隐藏。',
   'cardMetric': '主指标',
   'cardMetricMoney': '花费金额',
   'cardMetricTokens': 'Token 消耗',
@@ -459,6 +462,9 @@ export const zh: Record<UsageBillingKey, string> = {
   'cardSpanDay': '日',
   'cardSpanWeek': '周',
   'cardSpanMonth': '月',
+  'cardDeltaBadge': '今日环比徽章',
+  'cardDeltaShow': '显示',
+  'cardDeltaHide': '隐藏',
   'floatNoTargets': '未指定订阅通道，请在设置中勾选要展示的订阅。',
   'floatNoTargetsHint': '暂无可选的订阅通道。',
   'subscriptionsStale': '订阅额度刷新失败，以下为缓存数据',
@@ -779,7 +785,7 @@ export const en: Record<UsageBillingKey, string> = {
   'floatPrimaryMonth': 'Month',
 
   'cardDisplay': 'Billing card',
-  'cardDisplayHint': 'Switch the bottom-left billing card between cost and token usage, and pick the figure range (sparkline follows; the popover is unaffected).',
+  'cardDisplayHint': 'Switch the bottom-left billing card between cost and token usage, and pick the figure range (sparkline follows; the popover is unaffected). The day-over-day badge can be hidden here.',
   'cardMetric': 'Main metric',
   'cardMetricMoney': 'Cost',
   'cardMetricTokens': 'Token usage',
@@ -787,6 +793,9 @@ export const en: Record<UsageBillingKey, string> = {
   'cardSpanDay': 'Day',
   'cardSpanWeek': 'Week',
   'cardSpanMonth': 'Month',
+  'cardDeltaBadge': 'Day-over-day badge',
+  'cardDeltaShow': 'Show',
+  'cardDeltaHide': 'Hide',
   'floatNoTargets': 'No subscription selected — pick some in Settings.',
   'floatNoTargetsHint': 'No subscription channel available.',
   'subscriptionsStale': 'Subscription refresh failed — showing cached data',

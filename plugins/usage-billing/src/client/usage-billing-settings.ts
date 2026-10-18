@@ -116,10 +116,12 @@ export interface BillingCardPrefs {
   metric: BillingCardMetric
   /** 主数字统计范围：今日 / 本周 / 本月（默认今日）。 */
   span: BillingCardSpan
+  /** 是否显示「今日环比」涨跌徽章（默认显示；issue #93：部分用户觉得红色横条太醒目）。 */
+  showDelta: boolean
 }
 
-/** 默认计费卡偏好：花费金额 + 今日口径。 */
-export const DEFAULT_BILLING_CARD_PREFS: BillingCardPrefs = { metric: 'money', span: 'day' }
+/** 默认计费卡偏好：花费金额 + 今日口径 + 显示环比徽章（保持 v1.5.0 行为）。 */
+export const DEFAULT_BILLING_CARD_PREFS: BillingCardPrefs = { metric: 'money', span: 'day', showDelta: true }
 
 /** localStorage key（与 budget store 的 `dsh.ui-usage-billing.*` 命名空间一致）。 */
 export const BILLING_CARD_STORAGE_KEY = 'dsh.ui-usage-billing.card'
@@ -132,6 +134,8 @@ export function loadBillingCardPrefs(): BillingCardPrefs {
   return {
     metric: prefs.metric === 'tokens' ? 'tokens' : 'money',
     span: prefs.span === 'week' || prefs.span === 'month' ? prefs.span : 'day',
+    // 只有显式 false 才隐藏：老用户已存的偏好没有该字段，缺省保持显示（零感官变化）。
+    showDelta: prefs.showDelta !== false,
   }
 }
 

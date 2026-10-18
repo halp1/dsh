@@ -6,7 +6,7 @@
  * footer trigger disappears" symptom).
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ComponentProps } from 'react'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { bindSnapshotSelector } from './bind-snapshot-selector'
@@ -18,6 +18,7 @@ beforeEach(() => { localStorage.clear() })
 
 afterEach(() => {
   cleanup()
+  vi.unstubAllGlobals()
 })
 
 const t = (key: string): string => (zh as Record<string, string>)[key] ?? key
@@ -98,8 +99,8 @@ describe('UsageBilling surface', () => {
     await screen.findByText('使用统计')
     fireEvent.click(await screen.findByTestId('billing-tab-settings'))
     fireEvent.click(await screen.findByTestId('billing-card-tokens'))
-    // 修改即写入 localStorage（span 字段一并持久化，默认日口径）。
-    expect(JSON.parse(localStorage.getItem('dsh.ui-usage-billing.card')!)).toEqual({ metric: 'tokens', span: 'day' })
+    // 修改即写入 localStorage（span/showDelta 字段一并持久化，默认日口径+显示徽章）。
+    expect(JSON.parse(localStorage.getItem('dsh.ui-usage-billing.card')!)).toEqual({ metric: 'tokens', span: 'day', showDelta: true })
     // 弹窗开着 trigger 也常驻：主行切为缩写 token（K/M/B），金额币符消失。
     expect(screen.getByTestId('billing-trigger-span-tokens').textContent).toBe('0')
     expect(screen.getByTestId('billing-trigger').textContent).not.toContain('¥')
@@ -107,6 +108,57 @@ describe('UsageBilling surface', () => {
     fireEvent.click(await screen.findByTestId('billing-card-money'))
     expect(screen.queryByTestId('billing-trigger-span-tokens')).toBeNull()
     expect(screen.getByTestId('billing-trigger').textContent).toContain('¥')
+  })
+
+  it('hides the trigger day-over-day badge from the billing-card settings (issue #93)', async () => {
+    // 喂两天数据（昨日 2 元 / 今日 1 元）让环比非零：默认显示 ▼ 50.0%。
+    const pad = (n: number): string => String(n).padStart(2, '0')
+    const stamp = (d: Date): string => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+    const today = new Date()
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
+    const dayRow = (cost: number) => ({ calls: 1, input: 0, output: 0, cacheHit: 0, cacheMiss: 0, cost })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      JSON.stringify({ total: dayRow(3), byDay: { [stamp(yesterday)]: dayRow(2), [stamp(today)]: dayRow(1) } }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    )))
+    render(<UsageBilling {...makeProps()} />)
+    // 数据到达后徽章默认渲染（昨日缺失时不渲染，所以先等它出现）。
+    expect(await screen.findByTestId('billing-trigger-delta').then(el => el.textContent)).toBe('▼ 50.0%')
+    // 设置 Tab → 计费卡显示：关掉「今日环比」徽章。
+    fireEvent.click(screen.getByTestId('billing-trigger'))
+    fireEvent.click(await screen.findByTestId('billing-tab-settings'))
+    fireEvent.click(await screen.findByTestId('billing-card-delta-hide'))
+    // 修改即持久化（showDelta: false），且卡面徽章立即消失。
+    expect(JSON.parse(localStorage.getItem('dsh.ui-usage-billing.card')!)).toEqual({ metric: 'money', span: 'day', showDelta: false })
+    expect(screen.queryByTestId('billing-trigger-delta')).toBeNull()
+    // 重新打开开关徽章恢复。
+    fireEvent.click(await screen.findByTestId('billing-card-delta-show'))
+    expect(screen.getByTestId('billing-trigger-delta').textContent).toBe('▼ 50.0%')
+  })
+
+  it('scrolls only the plugin dashboard body when a settings anchor is clicked (issue #94)', async () => {
+    // scrollIntoView 会滚动所有可滚动祖先：宿主 modal 外壳被波及、标题栏错位。
+    // 回归锁：锚点点击只允许走 dashboardBody 的 scrollTo，禁止 scrollIntoView。
+    const scrollSpy = vi.fn()
+    const scrollIntoViewSpy = vi.fn()
+    const proto = Element.prototype as unknown as Record<string, unknown>
+    const origScrollTo = proto.scrollTo
+    const origScrollIntoView = proto.scrollIntoView
+    proto.scrollTo = scrollSpy
+    proto.scrollIntoView = scrollIntoViewSpy
+    try {
+      render(<UsageBilling {...makeProps()} />)
+      fireEvent.click(screen.getByTestId('billing-trigger'))
+      await screen.findByText('使用统计')
+      fireEvent.click(await screen.findByTestId('billing-tab-settings'))
+      fireEvent.click(screen.getByTestId('billing-settings-nav-alert'))
+      expect(scrollIntoViewSpy).not.toHaveBeenCalled()
+      expect(scrollSpy).toHaveBeenCalledTimes(1)
+      expect(scrollSpy.mock.calls[0]?.[0]).toMatchObject({ behavior: 'smooth' })
+    } finally {
+      proto.scrollTo = origScrollTo
+      proto.scrollIntoView = origScrollIntoView
+    }
   })
 
   it('shows the hover quick-view cache-hit cell as a hit-rate percentage (issue #47 feedback)', () => {

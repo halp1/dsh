@@ -372,9 +372,12 @@ body {
   text-overflow: ellipsis;
 }
 
-/* v1.5：触发卡涨跌徽章（值右侧）+ count-up 光晕（值下方）。 */
+/* v1.5：触发卡涨跌徽章（值下方独行小胶囊）+ count-up 光晕（值下方）。 */
 .triggerDelta {
   display: inline-flex;
+  /* 父级 .triggerPrimary 是 flex column（默认 stretch）：不缩回内容宽度会被
+     拉成横跨整卡的横条（issue #93），flex-start 收成小胶囊。 */
+  align-self: flex-start;
   align-items: center;
   gap: 1px;
   font-size: 10px;
@@ -383,7 +386,6 @@ body {
   font-variant-numeric: tabular-nums;
   padding: 1px 5px;
   border-radius: 999px;
-  margin-left: 6px;
   flex: none;
 }
 

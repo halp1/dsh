@@ -1641,9 +1641,12 @@ function UsageBillingTrigger(
                     <span className={css.triggerYen} aria-hidden="true">{money(spanValue).charAt(0)}</span>
                     <span className={css.triggerMetric} data-testid="billing-trigger-span-money">{money(spanValue).slice(1)}</span>
                   </span>
-                  {/* 涨跌徽章：非零 delta 时显示 */}
-                  {deltaValue !== 0 && (
-                    <span className={clsx(css.triggerDelta, deltaValue > 0 ? css.triggerDeltaUp : css.triggerDeltaDown)}>
+                  {/* 涨跌徽章：设置里「今日环比」开关（issue #93）+ 非 zero delta 才显示 */}
+                  {cardPrefs.showDelta && deltaValue !== 0 && (
+                    <span
+                      className={clsx(css.triggerDelta, deltaValue > 0 ? css.triggerDeltaUp : css.triggerDeltaDown)}
+                      data-testid="billing-trigger-delta"
+                    >
                       {deltaValue > 0 ? '▲' : '▼'} {Math.abs(deltaValue).toFixed(1)}%
                     </span>
                   )}
@@ -2199,7 +2202,14 @@ function BillingDashboard({
     setActiveSettingsGroup(id)
     if (typeof document === 'undefined') return
     const target = document.getElementById(`settings-${id}`)
-    if (target !== null) target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    if (target === null) return
+    // 不用 scrollIntoView：它会滚动所有可滚动祖先，目标在面板内已可见时宿主
+    // modal 外壳仍被继续滚动，标题栏随之错位（issue #94）。改为只滚本面板的
+    // dashboardBody 容器，宿主结构零波及。
+    const scroller = target.closest(`.${css.dashboardBody}`)
+    if (scroller === null) return
+    const delta = target.getBoundingClientRect().top - scroller.getBoundingClientRect().top
+    scroller.scrollTo({ top: scroller.scrollTop + delta, behavior: 'smooth' })
   }, [])
   const setDensity = useCallback((d: DensityPref) => {
     setDensityState(d)
@@ -3838,6 +3848,30 @@ function BillingDashboard({
                               {t(key)}
                             </button>
                           ))}
+                        </div>
+                      </div>
+                      {/* 「今日环比」涨跌徽章显隐（issue #93）：红色横条太醒目可关。 */}
+                      <div className={css.ctlRow}>
+                        <span className={css.ctlLabel}>{t('cardDeltaBadge')}</span>
+                        <div className={css.ctlGroup} data-testid="billing-card-delta">
+                          <button
+                            type="button"
+                            className={clsx(css.floatModeBtn, cardPrefs.showDelta && css.floatModeBtnOn)}
+                            data-testid="billing-card-delta-show"
+                            aria-pressed={cardPrefs.showDelta}
+                            onClick={() => onCardPrefs({ ...cardPrefs, showDelta: true })}
+                          >
+                            {t('cardDeltaShow')}
+                          </button>
+                          <button
+                            type="button"
+                            className={clsx(css.floatModeBtn, !cardPrefs.showDelta && css.floatModeBtnOn)}
+                            data-testid="billing-card-delta-hide"
+                            aria-pressed={!cardPrefs.showDelta}
+                            onClick={() => onCardPrefs({ ...cardPrefs, showDelta: false })}
+                          >
+                            {t('cardDeltaHide')}
+                          </button>
                         </div>
                       </div>
                     </div>
