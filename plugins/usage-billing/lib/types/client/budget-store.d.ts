@@ -33,6 +33,10 @@ export type BudgetPrefsActions = {
     setModelBudget: (d: BudgetPrefsState, key: string, value: number) => void;
     markModelTierAlerted: (d: BudgetPrefsState, marks: readonly string[], day: string) => void;
 };
+/** 读取兜底：v1.5.x 老持久化状态缺 `modelBudgets` 键（模块级常量，引用稳定不触发重渲染）。 */
+export declare const EMPTY_MODEL_BUDGETS: Readonly<Record<string, number>>;
+/** 读取兜底：v1.5.x 老持久化状态缺 `modelTierAlertDays` 键（同上）。 */
+export declare const EMPTY_MODEL_TIER_ALERT_DAYS: Readonly<Record<string, string>>;
 /**
  * Declare the budget-preferences store handle.
  * @returns the store handle for the register call's store seat.
