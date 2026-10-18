@@ -2296,7 +2296,7 @@ function BillingDashboard({
                   {[
                     {
                       id: 'display-pref',
-                      icon: <svg viewBox="0 0 16 16" fill="none" aria-hidden="true" stroke="currentColor" strokeWidth="1.5"><circle cx="8" cy="8" r="6" /><path d="M8 2a6 6 0 0 1 0 12z" fill="currentColor" stroke="none" /></svg>,
+                      icon: <svg viewBox="0 0 16 16" fill="none" aria-hidden="true" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M5 3v10M11 3v10" /><circle cx="5" cy="6.5" r="1.8" /><circle cx="11" cy="9.5" r="1.8" /></svg>,
                       label: t('settingsNavDisplayPref'),
                     },
                     {
