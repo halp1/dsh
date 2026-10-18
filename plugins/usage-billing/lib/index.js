@@ -8081,31 +8081,6 @@ function apply(ctx, config = {}) {
 		body: pricingBody,
 		refresh: refreshPricing
 	});
-	ctx.effect(() => ctx.webServer.register({
-		kind: "exact",
-		path: "/api/billing/pricing/refresh",
-		handler: async (req, res) => {
-			if (!guardLoopback(req, res, trustedHosts)) return;
-			if (req.method !== "POST") {
-				res.writeHead(405, { "content-type": "application/json; charset=utf-8" });
-				res.end(JSON.stringify({ error: "method not allowed" }));
-				return;
-			}
-			if (!isLoopbackOrigin(req.headers.origin)) {
-				res.writeHead(403, { "content-type": "application/json; charset=utf-8" });
-				res.end(JSON.stringify({ error: "forbidden: loopback only" }));
-				return;
-			}
-			if (!(req.headers["content-type"] ?? "").toLowerCase().includes("application/json")) {
-				res.writeHead(415, { "content-type": "application/json; charset=utf-8" });
-				res.end(JSON.stringify({ error: "unsupported content-type" }));
-				return;
-			}
-			await refreshPricing();
-			res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-			res.end(pricingBody());
-		}
-	}), "usage-billing: pricing refresh route");
 	let balanceCache = {
 		at: 0,
 		doc: { balances: [] }

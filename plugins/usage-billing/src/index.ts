@@ -48,7 +48,7 @@ import { collectSubscriptions, EMPTY_SUBSCRIPTION_KEYS, identifySubscriptionPlan
 import { isOfficialBaseUrl, queryRelayQuotas, type RelayRoute } from './relay.ts'
 import { planTypeOf, subscriptionFeeCnyOf } from './client/plan-knowledge.ts'
 // v1.5.2 抽出：共享 loopback 守卫 + 9 条 HTTP 路由的注册块各自独立成文件，apply() 收缩为装配器。
-import { guardLoopback, isLoopbackOrigin, normalizeTrustedHosts } from './guard.ts'
+import { normalizeTrustedHosts } from './guard.ts'
 import { registerNotifyClaimRoute } from './routes/notify-claim.ts'
 import { registerPricingRoutes } from './routes/pricing.ts'
 import { registerBalanceRoute } from './routes/balance.ts'

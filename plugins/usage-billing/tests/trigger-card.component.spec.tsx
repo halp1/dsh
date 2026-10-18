@@ -1,0 +1,70 @@
+// @vitest-environment jsdom
+/**
+ * UI 剧本 1（jsdom + @testing-library）：侧栏触发卡存在（v1.5.2 P0-4）。
+ *
+ * v1.5.0 视觉大改版后，billing-trigger testid 是 sidebar footer 触发卡
+ * 的稳定 hook（v1.5.0 alpha.3 锁定）。本剧本仅断言渲染存在 + 宽栏（wide）
+ * 模式下触发卡可见、点击能展开 Modal 容器。
+ */
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/react'
+import { UsageBilling } from '../src/client/UsageBilling.tsx'
+import { notifiedKeys } from '../src/client/domain/notify.ts'
+import { createBillingBudgetStore } from '../src/client/budget-store.ts'
+import { bindSnapshotSelector } from './bind-snapshot-selector'
+import { zh } from '../src/client/locales.ts'
+
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+})
+
+beforeEach(() => {
+  localStorage.clear()
+  notifiedKeys.clear()
+})
+
+const t = (key: string): string => (zh as Record<string, string>)[key] ?? key
+
+describe('侧栏触发卡', () => {
+  it('wide 模式渲染 billing-trigger testid + 点击打开 Modal 容器', async () => {
+    // stub fetch：返回最小 stats（空聚合），仪表盘打开即可
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/billing/usage-stats')) {
+        return new Response(JSON.stringify({
+          total: { calls: 0, input: 0, output: 0, cacheHit: 0, cacheMiss: 0, cost: 0, reasoning: 0 },
+          byModel: {}, byDay: {}, byDayModels: {}, byDayModelsSite: {},
+        }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })
+    }) as unknown as typeof fetch)
+
+    const budgetStore = createBillingBudgetStore().create()
+    const props = {
+      wide: true,
+      t,
+      checkModels: async () => ({
+        checked: true, available: true, models: 0, failures: 0, okProviders: [], badProviders: [],
+      }),
+      publishCosts: () => {},
+      registerOpen: () => () => {},
+      renderSlot: () => null,
+      useStore: bindSnapshotSelector(budgetStore),
+      actions: budgetStore.actions,
+    } as unknown as Parameters<typeof UsageBilling>[0]
+
+    const { getByTestId } = render(<UsageBilling {...props} />)
+
+    // 触发卡 testid 存在
+    const trigger = getByTestId('billing-trigger')
+    expect(trigger).toBeTruthy()
+
+    // 点击触发卡：openDashboard 状态切换 → billing-dashboard 容器渲染
+    fireEvent.click(trigger)
+    await waitFor(() => {
+      expect(getByTestId('billing-dashboard')).toBeTruthy()
+    })
+  })
+})
