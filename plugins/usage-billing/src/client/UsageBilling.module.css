@@ -1715,16 +1715,18 @@ body {
   height: 18px;
   flex: none;
   padding: 0;
-  border: 1px solid var(--ds-border);
+  border: 1px solid var(--ds-border-strong);
   border-radius: 999px;
-  background: var(--dsb-3);
+  /* 状态审计：OFF 轨道原 dsb-3 与卡底几乎同色，看不出是开关 */
+  background: color-mix(in srgb, var(--ds-t-1) 10%, var(--dsb-3));
   cursor: pointer;
   transition: background-color var(--ds-t-fast), border-color var(--ds-t-fast);
 }
 
 .switchOn {
   border-color: transparent;
-  background: color-mix(in srgb, var(--ds-blue) 60%, transparent);
+  /* 状态审计：60% 透明偏淡，改实色蓝 */
+  background: var(--ds-blue);
 }
 
 .switchKnob {
@@ -1735,6 +1737,8 @@ body {
   height: 12px;
   border-radius: 50%;
   background: #fff;
+  /* 状态审计：白旋钮无描边在浅轨道上不可见 */
+  box-shadow: 0 0 0 1px var(--ds-border-strong);
   transition: transform var(--ds-t-fast);
 }
 
@@ -3106,8 +3110,10 @@ span.bandDot { cursor: default; }
 }
 
 .currencyButtonActive {
-  background: var(--dsw-alias-bg-layer-2);
+  /* 状态审计：原 layer-2 叠容器 layer-3 几乎不可见 */
+  background: var(--dsb-1);
   color: var(--dsw-alias-label-primary);
+  box-shadow: 0 0 0 1px var(--ds-border-strong);
 }
 
 /* ── 订阅套餐额度 ──────────────────────────────────────────────────── */
@@ -3740,9 +3746,12 @@ span.bandDot { cursor: default; }
 }
 
 .heatmapRangeButtonActive {
+  /* 状态审计：原仅边框加深+字重，选中态太弱 */
+  background: var(--dsb-2);
   border-color: var(--ds-border-strong);
   color: var(--ds-t-1);
   font-weight: 600;
+  box-shadow: 0 0 0 1px var(--ds-border-strong);
 }
 
 .heatmapYear {
