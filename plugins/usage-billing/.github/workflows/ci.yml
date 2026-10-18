@@ -29,4 +29,7 @@ jobs:
       # tsdown 的 lib entry（lib/types/*.js）是 tsc 中间产物，.gitignore 不入库——
       # 干净 checkout 必须先跑 tsc，否则 bundle 报 UNRESOLVED_ENTRY。
       - run: pnpm run build
+      # E-5 纪律守卫（类型/日志/空 catch）+ E-8 种子漂移检测（CI 无宿主
+      # monorepo 时后者自动 skip，本地与 watch 每日任务负责真校验）。
+      - run: pnpm run lint
       - run: pnpm test

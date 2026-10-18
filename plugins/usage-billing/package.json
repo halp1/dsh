@@ -86,6 +86,7 @@
     "build": "tsc -b tsconfig.json && tsdown",
     "bundle": "tsdown",
     "watch": "tsdown --watch",
+    "lint": "node scripts/lint.mjs && node scripts/check-clientbundle-sync.mjs",
     "test": "vitest run",
     "test:e2e": "playwright test",
     "test:e2e:install": "playwright install chromium"
