@@ -554,12 +554,73 @@ export interface SessionUsageRow {
   title?: string
   /** 会话创建时的工作目录（项目路径）；未知时缺失。 */
   cwd?: string
+  /**
+   * 直接父会话 id（仅子智能体会话携带）：宿主 header 的 `origin: "subagent"`
+   * 会话经 parentSession 指向委派它的对话。fork/resume 的种子血缘
+   * （isSeeded）不满足子智能体门，不带本字段。旧宿主 header 无标记，
+   * 按顶层会话处理。
+   */
+  parentId?: string
+  /** 全部后代子会话的费用合计（人民币元，多级委派整链递归）；无后代或后代全免费时缺失。 */
+  subCost?: number
+  /** 全部后代子会话的调用数；无后代时缺失。 */
+  subCalls?: number
   calls: number
   cost: number
   /** 最后一个事件的时间戳（毫秒）。 */
   lastActive: number
   /** 数据来自旧算法折叠的持久账本行（日志已删/不可读，无法重算）；UI 据此标注置信度。 */
   stale?: boolean
+}
+
+/**
+ * 从会话 header 提取子智能体归并标记（直接父会话 id）：`origin: "subagent"`
+ * （宿主的产品分类）或 `delegationDepth > 0`（持久化委派深度）任一命中即视为
+ * 子会话。子会话但 header 无 parentSession（异常数据）返回 undefined——无法
+ * 归位就按顶层会话处理，保守不标。导出供测试。
+ */
+export function subParentOf(meta: SessionHeader): string | undefined {
+  if (meta.origin !== 'subagent' && !((meta.delegationDepth ?? 0) > 0)) return undefined
+  const parent = meta.parentSession
+  return typeof parent === 'string' && parent !== '' ? parent : undefined
+}
+
+/**
+ * 给会话行补后代合计（subCost/subCalls）：按 parentId 建子索引，对每行递归
+ * 汇总全部后代子会话（多级委派整链计入根对话）。纯展示层归因——不改任何
+ * 总额桶（子会话费用本就在 total/byDay/byModel 里，行级只是拆出来给人看）。
+ * 环引用（异常数据）按 visited 跳过，不死循环。原地修改传入行。导出供测试。
+ */
+export function foldSubagentFamilies(rows: SessionUsageRow[]): void {
+  const subsOf = new Map<string, SessionUsageRow[]>()
+  for (const row of rows) {
+    const parent = row.parentId
+    if (parent === undefined) continue
+    const list = subsOf.get(parent)
+    if (list !== undefined) list.push(row)
+    else subsOf.set(parent, [row])
+  }
+  const familyOf = (id: string, visited: Set<string>): { cost: number; calls: number } => {
+    let cost = 0
+    let calls = 0
+    for (const child of subsOf.get(id) ?? []) {
+      if (visited.has(child.id)) continue
+      visited.add(child.id)
+      cost += child.cost
+      calls += child.calls
+      const nested = familyOf(child.id, visited)
+      cost += nested.cost
+      calls += nested.calls
+    }
+    return { cost, calls }
+  }
+  for (const row of rows) {
+    const family = familyOf(row.id, new Set([row.id]))
+    if (family.calls > 0) {
+      row.subCalls = family.calls
+      if (family.cost > 0) row.subCost = family.cost
+    }
+  }
 }
 
 /** 每轮费用明细行：仪表盘「每轮费用」图的数据源。 */
@@ -887,6 +948,12 @@ export interface SerializedSessionFold {
 export interface UsageLedgerSession {
   id: string
   cwd?: string
+  /**
+   * 子智能体归并标记（直接父会话 id）：仅宿主 header 带 `origin: "subagent"`
+   * 的会话行携带。日志已删、只剩账本行时仍能归位到父对话；缺失 = 顶层会话
+   * （含 fork/resume 血缘）。可选字段，旧账本行缺失按顶层处理，无需迁移。
+   */
+  subOf?: string
   /** Stable log stamp (mtime + size) when the persistence backend exposes it. */
   stamp?: string
   /**
@@ -1937,11 +2004,12 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
     fold.unpricedModels.some(key => isPriced(key))
 
   /** 把一份（全量或增量）折叠结果登记进 durable ledger；内容无变化时不落盘。 */
-  const recordLedger = (id: string, cwd: string | undefined, stamp: string | null, fold: SessionFold): void => {
+  const recordLedger = (id: string, cwd: string | undefined, stamp: string | null, fold: SessionFold, subOf?: string): void => {
     if (options.ledger === undefined) return
     const entry: UsageLedgerSession = {
       id,
       ...(cwd === undefined ? {} : { cwd }),
+      ...(subOf === undefined ? {} : { subOf }),
       ...(stamp === null ? {} : { stamp }),
       foldVersion: FOLD_VERSION,
       fingerprint: foldFingerprint,
@@ -1956,6 +2024,7 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
     const changed = row === undefined
       || row.stamp !== entry.stamp
       || row.cwd !== entry.cwd
+      || row.subOf !== entry.subOf
       || row.foldVersion !== entry.foldVersion
       || row.fingerprint !== entry.fingerprint
       || (stamp === null && JSON.stringify(row.fold) !== JSON.stringify(entry.fold))
@@ -2050,7 +2119,9 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
       }
       const seen = new Set<string>()
       const included = new Set<string>()
-      const folds: { id: string; cwd?: string; fold: SessionFold; staleLedger?: true }[] = []
+      // subOf：子智能体归并标记（header origin/parentSession；账本兜底行出自
+      // 持久化的 subOf 字段）——只进 bySession 行的 parentId，不影响任何总额桶。
+      const folds: { id: string; cwd?: string; subOf?: string; fold: SessionFold; staleLedger?: true }[] = []
       // skipped：记录本轮新失败的会话 id（stderr 明细；负缓存命中不重复打印），
       // 聚合末尾统一告警。carriedUnreadable 计负缓存命中的历史失败会话，与本轮
       // 新失败合成 unreadableSessions——计数跨轮次稳定，面板的「未统计」通知
@@ -2082,6 +2153,7 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
         // 跳到下一个会话，避免面板整体归零。失败会话放进 skipped 末尾告警。
         try {
           const cwd = meta.cwd
+          const subOf = subParentOf(meta)
           // 重启首折快路径：账本行的失效键与当前日志完全一致（同算法版本）时
           // 零读取复用——几十个历史会话的重启不再各自全量解压一遍。
           // 放在 cache 命中之前：惰性失效（价目表就绪）须让账本行优先拦截，否则
@@ -2093,7 +2165,7 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
             && ledgerRow.fingerprint === foldFingerprint
             && !foldNeedsReprice(ledgerRow.fold)) {
             const fold = deserializedFoldOf(ledgerRow.fold)
-            folds.push({ id, ...(cwd === undefined ? {} : { cwd }), fold })
+            folds.push({ id, ...(cwd === undefined ? {} : { cwd }), ...(subOf === undefined ? {} : { subOf }), fold })
             included.add(id)
             continue
           }
@@ -2110,7 +2182,7 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
             // LRU touch：复用命中的会话移到缓存末尾，供上方上限清理优先淘汰最久未用。
             cache.delete(id)
             cache.set(id, hit)
-            folds.push({ id, ...(meta.cwd === undefined ? {} : { cwd: meta.cwd }), fold: hit.fold })
+            folds.push({ id, ...(meta.cwd === undefined ? {} : { cwd: meta.cwd }), ...(subOf === undefined ? {} : { subOf }), fold: hit.fold })
             included.add(id)
             continue
           }
@@ -2149,9 +2221,9 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
             // LRU touch：增量命中的会话移到缓存末尾，避免被上限清理误淘汰后退化全量。
             cache.delete(id)
             cache.set(id, previous)
-            folds.push({ id, ...(cwd === undefined ? {} : { cwd }), fold: previous.fold })
+            folds.push({ id, ...(cwd === undefined ? {} : { cwd }), ...(subOf === undefined ? {} : { subOf }), fold: previous.fold })
             included.add(id)
-            recordLedger(id, cwd, stamp, previous.fold)
+            recordLedger(id, cwd, stamp, previous.fold, subOf)
             continue
           }
           // 全量重折（首次 / 缓存淘汰 / 日志重写）：分片折叠并周期性让出事件循环，
@@ -2173,9 +2245,9 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
           refreshTurns(fold, machine)
           const last = events[events.length - 1] as { seq?: number } | undefined
           cache.set(id, { stamp, fold, machine, ...(last !== undefined && typeof last.seq === 'number' ? { lastSeq: last.seq } : {}), fingerprint: foldFingerprint })
-          folds.push({ id, ...(cwd === undefined ? {} : { cwd }), fold })
+          folds.push({ id, ...(cwd === undefined ? {} : { cwd }), ...(subOf === undefined ? {} : { subOf }), fold })
           included.add(id)
-          recordLedger(id, cwd, stamp, fold)
+          recordLedger(id, cwd, stamp, fold, subOf)
         } catch (error) {
           skipped.push(id)
           const format = isFormatUnsupportedError(error)
@@ -2214,6 +2286,7 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
             folds.push({
               id: entry.id,
               ...(entry.cwd === undefined ? {} : { cwd: entry.cwd }),
+              ...(entry.subOf === undefined ? {} : { subOf: entry.subOf }),
               ...(stale ? { staleLedger: true as const } : {}),
               fold: deserializedFoldOf(entry.fold),
             })
@@ -2254,7 +2327,7 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
       const perfHourModel = new Map<string, Map<string, PerfHourAccum>>()
       const perfModelDigest = new Map<string, PerfModelDigest>()
       const perfHourDigest = new Map<string, Map<string, PerfHourDigest>>()
-      for (const { id: sessionId, cwd, fold, staleLedger } of folds) {
+      for (const { id: sessionId, cwd, subOf, fold, staleLedger } of folds) {
         mergeUsageInto(total, fold.total)
         roles.userChars += fold.roles.userChars
         roles.toolChars += fold.roles.toolChars
@@ -2337,6 +2410,7 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
             // exactOptionalPropertyTypes：缺失的可选字段不带 key。
             ...(fold.title !== undefined ? { title: fold.title } : {}),
             ...(cwd !== undefined ? { cwd } : {}),
+            ...(subOf !== undefined ? { parentId: subOf } : {}),
             ...(staleLedger === true ? { stale: true } : {}),
             calls: fold.total.calls,
             cost: fold.total.cost,
@@ -2344,6 +2418,8 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
           })
         }
       }
+      // 子智能体归并（纯展示层）：行级 parentId + 后代合计，先于排序计算。
+      foldSubagentFamilies(sessionRows)
       sessionRows.sort((a, b) => b.cost - a.cost || b.lastActive - a.lastActive)
       turnRows.sort((a, b) => b.startedAt - a.startedAt)
       const workspaces = [...workspaceMap.values()].sort((a, b) => b.cost - a.cost || b.lastActive - a.lastActive)

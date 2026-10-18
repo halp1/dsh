@@ -35,7 +35,18 @@ describe('sessionRowsCsv', () => {
 
   it('falls back to empty cells when title/cwd are absent and lastActive is 0', () => {
     const csv = sessionRowsCsv([{ id: 's2', calls: 1, cost: 0.1, lastActive: 0 }])
-    expect(csv.split('\n')[1]).toBe('s2,,,1,0.10,')
+    expect(csv.split('\n')[1]).toBe('s2,,,1,0.10,,,,')
+  })
+
+  it('carries subagent lineage columns (parent id, descendant calls/cost)', () => {
+    const csv = sessionRowsCsv([
+      { id: 'root', calls: 5, cost: 1.5, lastActive: 0, subCalls: 4, subCost: 0.88 },
+      { id: 'sub', calls: 4, cost: 0.88, lastActive: 0, parentId: 'root' },
+    ])
+    expect(csv.split('\n')[0]).toBe('session_id,title,project,calls,cost_cny,last_active,parent_id,sub_calls,sub_cost_cny')
+    // 父行：parent_id 空，后代调用/费用在末两列；子行：parent_id 指向父，无后代合计。
+    expect(csv.split('\n')[1].split(',')).toEqual(['root', '', '', '5', '1.50', '', '', '4', '0.88'])
+    expect(csv.split('\n')[2].split(',')).toEqual(['sub', '', '', '4', '0.88', '', 'root', '', ''])
   })
 })
 

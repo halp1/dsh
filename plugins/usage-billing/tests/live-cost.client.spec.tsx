@@ -13,7 +13,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { act, cleanup, render, screen } from '@testing-library/react'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
-import { LiveCostBar, LiveCostChip, lowQuotaChips, sessionCostOf, turnCostOf, type LiveStats, type QuotaSlice } from '../src/client/live-cost.tsx'
+import { LiveCostBar, LiveCostChip, lowQuotaChips, sessionCostOf, sessionSubCostOf, turnCostOf, type LiveStats, type QuotaSlice } from '../src/client/live-cost.tsx'
 import {
   LIVE_COST_BAR_PREF_EVENT,
   LIVE_COST_BAR_STORAGE_KEY,
@@ -45,10 +45,35 @@ describe('sessionCostOf', () => {
     expect(sessionCostOf(BASE, 'sess-1')).toBe(2.4)
   })
 
+  it('adds descendant subagent spend (subCost) into the session figure', () => {
+    // 子智能体是宿主的独立会话：其费用经服务端 subCost 并入本对话口径。
+    const withSubs: LiveStats = {
+      bySession: [
+        { id: 'sess-1', cost: 2.4, subCost: 3.26 },
+        { id: 'sess-2', cost: 0.5 },
+      ],
+    }
+    expect(sessionCostOf(withSubs, 'sess-1')).toBeCloseTo(5.66, 10)
+    // 无后代的行不受影响。
+    expect(sessionCostOf(withSubs, 'sess-2')).toBe(0.5)
+  })
+
   it('returns 0 for an absent session or when stats is null', () => {
     expect(sessionCostOf(BASE, 'sess-3')).toBe(0)
     expect(sessionCostOf(null, 'sess-1')).toBe(0)
     expect(sessionCostOf(BASE, undefined)).toBe(0)
+  })
+})
+
+describe('sessionSubCostOf', () => {
+  it('returns the descendant subagent spend for the session', () => {
+    const withSubs: LiveStats = {
+      bySession: [{ id: 'sess-1', cost: 2.4, subCost: 3.26 }],
+    }
+    expect(sessionSubCostOf(withSubs, 'sess-1')).toBeCloseTo(3.26, 10)
+    expect(sessionSubCostOf(BASE, 'sess-1')).toBe(0)
+    expect(sessionSubCostOf(null, 'sess-1')).toBe(0)
+    expect(sessionSubCostOf(BASE, undefined)).toBe(0)
   })
 })
 

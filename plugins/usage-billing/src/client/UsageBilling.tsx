@@ -736,6 +736,15 @@ interface SessionBillingRow {
   id: string
   title?: string
   cwd?: string
+  /**
+   * 直接父会话 id（仅子智能体会话携带）：宿主把子智能体落成独立会话，
+   * header 的 origin: subagent + parentSession 指向委派它的对话。
+   */
+  parentId?: string
+  /** 全部后代子会话费用合计（服务端递归算好）；无后代时缺失。 */
+  subCost?: number
+  /** 全部后代子会话调用数；无后代时缺失。 */
+  subCalls?: number
   /** 数据来自旧算法折叠的持久账本行（原始日志已删，无法重算）。 */
   stale?: boolean
   calls: number
@@ -745,14 +754,16 @@ interface SessionBillingRow {
   mergedCount?: number
   /** 合并组的段明细（展示层专用）：一级行默认收起，展开后逐段显示。合并函数需 push，故非 readonly。 */
   children?: SessionBillingRow[]
+  /** 挂到本组下的子智能体行（展示层专用）：与段明细并列展开，带子智能体徽标。 */
+  subs?: SessionBillingRow[]
 }
 
 /**
  * 同标题会话合并（issue #42）：fork/resume 派生的多段会话共用同一标题但各自
  * 成行，短 id 行形成大量不明信息——同标题归并为一行作为一级（calls/cost 求和、
  * lastActive 取 max、任一子行 stale 即组 stale），各段明细收进 children 默认
- * 收起、点击展开。无标题行保持独立：聚合层只有 fork 种子边界、没有 parent
- * 指针，无法归并。费用倒序保持紧凑。
+ * 收起、点击展开。无标题行保持独立。输入必须已排除子智能体行（它们按
+ * parentId 归位，不参与标题归并——子会话与顶层会话撞标题时会错并）。费用倒序保持紧凑。
  */
 function mergeSessionRows(rows: readonly SessionBillingRow[]): SessionBillingRow[] {
   const merged = new Map<string, SessionBillingRow>()
@@ -781,6 +792,60 @@ function mergeSessionRows(rows: readonly SessionBillingRow[]): SessionBillingRow
     hit.mergedCount = (hit.mergedCount ?? 1) + 1
   }
   return out.sort((a, b) => b.cost - a.cost || b.lastActive - a.lastActive)
+}
+
+/**
+ * 会话明细的展示归组：先同标题合并顶层行（issue #42），再把子智能体行
+ * （parentId 指向父会话）挂到最近存活的顶层组下（多级委派沿父链拍平到根
+ * 对话），挂靠目标命中合并组的任一段即可。父行以「含子智能体」徽标展示
+ * 后代合计（服务端递归算好的 subCost/subCalls）。父行不在切片内（服务端
+ * 封顶或日志已删）的子行回退为独立行，仍带子智能体徽标，不丢数据。
+ */
+function buildSessionDisplay(rows: readonly SessionBillingRow[]): SessionBillingRow[] {
+  // 父链解析索引：原始行 id → 行（含子行；挂靠只认顶层组，链上子会话不作为挂点）。
+  const byId = new Map(rows.map(row => [row.id, row]))
+  // 顶层同标题合并：子智能体行不参与（它们按父链归位）。
+  const tops = mergeSessionRows(rows.filter(row => row.parentId === undefined))
+  // 合并组成员 id → 组行：子行的父会话是组内任一段时都挂到组行上。
+  const groupOf = new Map<string, SessionBillingRow>()
+  for (const group of tops) {
+    groupOf.set(group.id, group)
+    for (const segment of group.children ?? []) groupOf.set(segment.id, group)
+  }
+  // 子行挂靠：沿 parentId 找最近存活顶层组；visited 防异常数据的环。
+  const attached = new Set<string>()
+  for (const row of rows) {
+    if (row.parentId === undefined) continue
+    const visited = new Set<string>()
+    let current: string | undefined = row.parentId
+    while (current !== undefined && !visited.has(current)) {
+      visited.add(current)
+      const anchor = groupOf.get(current)
+      if (anchor !== undefined) {
+        if (anchor.subs === undefined) anchor.subs = [row]
+        else anchor.subs.push(row)
+        attached.add(row.id)
+        break
+      }
+      current = byId.get(current)?.parentId
+    }
+  }
+  // 挂靠的子行按最后活跃倒序（组内时序直观）；未挂上的独立子行并回顶层，
+  // 与组行一起保持费用倒序。
+  for (const group of tops) group.subs?.sort((a, b) => b.lastActive - a.lastActive)
+  const orphans = rows.filter(row => row.parentId !== undefined && !attached.has(row.id))
+  return [...tops, ...orphans].sort((a, b) => b.cost - a.cost || b.lastActive - a.lastActive)
+}
+
+/** 组行（单行或同标题合并组）的后代子智能体合计：合并组对成员段的 subCost/subCalls 求和。 */
+function subFamilyOf(row: SessionBillingRow): { cost: number; calls: number } {
+  if (row.children !== undefined) {
+    return (row.children ?? []).reduce(
+      (acc, segment) => ({ cost: acc.cost + (segment.subCost ?? 0), calls: acc.calls + (segment.subCalls ?? 0) }),
+      { cost: 0, calls: 0 },
+    )
+  }
+  return { cost: row.subCost ?? 0, calls: row.subCalls ?? 0 }
 }
 
 /** 订阅额度查询状态的文案（ok 时无需额外标注，返回空串）。 */
@@ -2195,7 +2260,7 @@ function BillingDashboard({
     })
   }, [])
   // 同名会话合并行一次计算（此前渲染期调用两次：空态判断 + 行渲染各一遍全量排序）。
-  const mergedSessions = useMemo(() => mergeSessionRows(stats.bySession ?? []), [stats.bySession])
+  const mergedSessions = useMemo(() => buildSessionDisplay(stats.bySession ?? []), [stats.bySession])
 
   // 厂商（提供商）组展开状态（issue #77）：默认收起，点击组头展开模型明细与
   // 订阅额度。按稳定组 id 作 key（不随语言变），展开集合 localStorage 持久化。
@@ -4339,8 +4404,10 @@ function BillingDashboard({
                         )}
                         {mergedSessions.slice(0, SESSION_DISPLAY_LIMIT).map(row => {
                           // 折叠态与数值列提取为局部闭包：一/二级行多处共用，收敛渲染重复。
-                          const isGroup = row.children !== undefined
+                          const isGroup = row.children !== undefined || row.subs !== undefined
                           const open = isGroup && expandedSessions.has(row.id)
+                          // 后代子智能体合计（合并组对成员段求和）：徽标展示，费用列仍为本行口径。
+                          const family = subFamilyOf(row)
                           const numCells = (r: SessionBillingRow) => (
                             <>
                               <td className={css.numCol}>{r.calls.toLocaleString()}</td>
@@ -4378,6 +4445,14 @@ function BillingDashboard({
                                       {t('sessionStaleBadge')}
                                     </span>
                                   )}
+                                  {/* 子智能体归并徽标：本行费用不含后代，合计在此明示（对得上总额）。 */}
+                                  {(family.calls > 0 || family.cost > 0) && (
+                                    <span className={clsx(css.ubTag, css.ubTagNeutral)} data-testid="billing-session-sub">
+                                      {family.cost > 0
+                                        ? t('sessionSubCost').replace('{cost}', money(family.cost))
+                                        : t('sessionSubCalls').replace('{calls}', family.calls.toLocaleString())}
+                                    </span>
+                                  )}
                                 </td>
                                 {numCells(row)}
                               </tr>
@@ -4388,6 +4463,16 @@ function BillingDashboard({
                                     <span className={css.modelProvider}>{child.id.slice(0, 8)}</span>
                                   </td>
                                   {numCells(child)}
+                                </tr>
+                              ))}
+                              {/* 子智能体段（宿主独立会话，按父链挂到本对话下）：徽标 + 标题/短 id。 */}
+                              {open && row.subs?.map(sub => (
+                                <tr key={sub.id} className={css.sessionChildRow} data-testid="billing-session-sub-row">
+                                  <td>
+                                    <span className={clsx(css.ubTag, css.ubTagNeutral)}>{t('sessionSubRow')}</span>
+                                    <span className={css.modelProvider}>{sub.title ?? sub.id.slice(0, 8)}</span>
+                                  </td>
+                                  {numCells(sub)}
                                 </tr>
                               ))}
                             </Fragment>

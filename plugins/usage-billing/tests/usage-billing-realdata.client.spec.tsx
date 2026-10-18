@@ -214,6 +214,41 @@ describe('UsageBilling real-data surface', () => {
     expect(primary.getAttribute('aria-expanded')).toBe('false')
   })
 
+  it('groups subagent sessions under their parent conversation (子智能体归并)', async () => {
+    // 子智能体是宿主的独立会话（parentId 指向父对话）：账单里默认收进父行，
+    // 父行徽标显示后代合计（服务端 subCost），展开可见逐个子会话；
+    // 父行不在切片内的孤儿子行回退为独立行，不丢数据。
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      const body = url.includes('/api/billing/pricing')
+        ? { source: 'builtin' }
+        : {
+          ...REAL_STATS,
+          bySession: [
+            { id: 'sess-root', title: '构建射击游戏', calls: 98, cost: 1.86, lastActive: Date.UTC(2026, 9, 18, 0, 54, 0), subCalls: 2, subCost: 1.78 },
+            { id: 'sess-sub-a', title: '你是关卡美术', calls: 35, cost: 0.92, lastActive: Date.UTC(2026, 9, 18, 0, 55, 0), parentId: 'sess-root' },
+            { id: 'sess-sub-b', title: '你是武器美术', calls: 35, cost: 0.86, lastActive: Date.UTC(2026, 9, 18, 0, 56, 0), parentId: 'sess-root' },
+            { id: 'sess-orphan', title: '孤儿子会话', calls: 5, cost: 0.2, lastActive: Date.UTC(2026, 9, 18, 1, 0, 0), parentId: 'sess-gone' },
+          ],
+        }
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+    }))
+    const { container } = render(<UsageBilling {...makeProps()} />)
+    fireEvent.click(container.querySelector('button')!)
+    fireEvent.click(await screen.findByTestId('billing-tab-providers'))
+    const table = await screen.findByTestId('billing-sessions-table')
+    // 父行带「含子智能体」徽标；子行收进父行默认不出现。
+    expect(table.textContent).toContain('含子智能体 ¥1.78')
+    expect(table.textContent).not.toContain('你是关卡美术')
+    // 展开父行：子智能体行出现（徽标 + 标题）。
+    fireEvent.click(screen.getByText('构建射击游戏').closest('tr')!)
+    expect(table.textContent).toContain('子智能体')
+    expect(table.textContent).toContain('你是关卡美术')
+    expect(table.textContent).toContain('你是武器美术')
+    // 父行已删的孤儿子行保持独立可见。
+    expect(table.textContent).toContain('孤儿子会话')
+  })
+
   it('notifies once per tier per day as spend crosses budget tiers', async () => {
     const notify = vi.fn()
     vi.stubGlobal('Notification', Object.assign(notify, {

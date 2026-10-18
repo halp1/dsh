@@ -30,7 +30,7 @@ import css from './UsageBilling.module.css'
 
 /** The usage-stats shape the composer bar needs (a thin slice, not the whole doc). */
 export interface LiveStats {
-  bySession?: readonly { id: string; cost: number }[]
+  bySession?: readonly { id: string; cost: number; subCost?: number }[]
   byTurn?: readonly { sessionId: string; turn: number; model?: string; cost: number }[]
 }
 
@@ -42,16 +42,30 @@ export interface QuotaSlice {
 }
 
 /**
- * 当前会话累计费用：bySession 里会话 id 匹配的那行；缺省为 0。
- * 导出供测试：纯函数。
+ * 当前会话累计费用：bySession 里会话 id 匹配的那行（含后代子智能体费用
+ * subCost——子智能体是宿主的独立会话，其消耗按父链并入本对话的口径）；
+ * 缺省为 0。导出供测试：纯函数。
  * @param stats - 薄统计切片。
  * @param sessionId - 当前会话 id。
- * @returns 该会话累计费用（人民币元）。
+ * @returns 该会话累计费用（人民币元，含子智能体）。
  */
 export function sessionCostOf(stats: LiveStats | null, sessionId: string | undefined): number {
   if (sessionId === undefined || stats?.bySession === undefined) return 0
   const row = stats.bySession.find(item => item.id === sessionId)
-  return row?.cost ?? 0
+  return (row?.cost ?? 0) + (row?.subCost ?? 0)
+}
+
+/**
+ * 当前会话的后代子智能体费用（bySession 行的 subCost）：供「含子」拆分展示，
+ * 让胶囊上的总额与本体会话费用对得上账。导出供测试：纯函数。
+ * @param stats - 薄统计切片。
+ * @param sessionId - 当前会话 id。
+ * @returns 后代子会话费用合计（人民币元）；无则 0。
+ */
+export function sessionSubCostOf(stats: LiveStats | null, sessionId: string | undefined): number {
+  if (sessionId === undefined || stats?.bySession === undefined) return 0
+  const row = stats.bySession.find(item => item.id === sessionId)
+  return row?.subCost ?? 0
 }
 
 /**
@@ -253,6 +267,8 @@ function useLiveCostPrefs(): { visible: boolean; position: CapsulePosition } {
  *  不渲染的座位（渲染 null）不应各跑一条 30s 双端点轮询。 */
 function useLiveCostData(sessionId: SessionId, active: boolean): {
   sessionCost: number
+  /** 会话累计里的后代子智能体费用（sessionCost - 本体）；「含子」拆分展示用。 */
+  subCost: number
   turnCost: number
   tier: ReturnType<typeof tierCountdown> | null
   chips: ReturnType<typeof lowQuotaChips>
@@ -293,6 +309,7 @@ function useLiveCostData(sessionId: SessionId, active: boolean): {
   }, [sessionId, visible, active])
   // 当前会话累计费用与当前轮费用：由纯函数派生，便于测试。
   const sessionCost = useMemo(() => sessionCostOf(stats, sessionId), [stats, sessionId])
+  const subCost = useMemo(() => sessionSubCostOf(stats, sessionId), [stats, sessionId])
   const turnCost = useMemo(() => turnCostOf(stats, sessionId), [stats, sessionId])
   // 峰谷窗口跟随当前会话最近一轮的模型：DeepSeek 按量分时；智谱模型在持有
   // Z.ai Coding Plan（status ok）时走积分分时；其余模型 null——档位 UI 整段隐藏。
@@ -303,7 +320,7 @@ function useLiveCostData(sessionId: SessionId, active: boolean): {
   )
   const tier = useMemo(() => channelCountdown(nowMs, channel), [nowMs, channel])
   const hasBandPlan = quotas.some(q => q.displayName === 'Z.ai Coding Plan' && q.status === 'ok')
-  return { sessionCost, turnCost, tier, chips, hasBandPlan }
+  return { sessionCost, subCost, turnCost, tier, chips, hasBandPlan }
 }
 
 /**
@@ -312,7 +329,7 @@ function useLiveCostData(sessionId: SessionId, active: boolean): {
  */
 export function LiveCostBar({ sessionId, t }: LiveCostBarProps): React.ReactNode {
   const { visible, position } = useLiveCostPrefs()
-  const { sessionCost, turnCost, tier, chips, hasBandPlan } = useLiveCostData(sessionId, visible && position !== 'toolbar')
+  const { sessionCost, subCost, turnCost, tier, chips, hasBandPlan } = useLiveCostData(sessionId, visible && position !== 'toolbar')
 
   const currency = useCurrencyPref()
   const money = (cny: number): string => formatMoney(convertFromCny(cny, currency), currency)
@@ -350,6 +367,12 @@ export function LiveCostBar({ sessionId, t }: LiveCostBarProps): React.ReactNode
           <span className={css.feeSep} aria-hidden="true">·</span>
           <span className={css.feeItem} data-testid="billing-live-session">
             {t('liveSession')} <span className={css.feeNum} data-tick="session">{money(sessionCost)}</span>
+            {/* 子智能体消耗并入会话口径后的拆分标注：总额可对本到账单的本体+子会话。 */}
+            {subCost > 0 && (
+              <span className={css.feeSuffix} data-testid="billing-live-session-sub">
+                {t('liveSessionSub').replace('{cost}', money(subCost))}
+              </span>
+            )}
           </span>
         </>
       )}
@@ -379,7 +402,7 @@ export function LiveCostChip({ sessionId, t }: LiveCostBarProps): React.ReactNod
   const currency = useCurrencyPref()
   const money = (cny: number): string => formatMoney(convertFromCny(cny, currency), currency)
   const { visible, position } = useLiveCostPrefs()
-  const { sessionCost, turnCost, tier, chips, hasBandPlan } = useLiveCostData(sessionId, visible && position === 'toolbar')
+  const { sessionCost, subCost, turnCost, tier, chips, hasBandPlan } = useLiveCostData(sessionId, visible && position === 'toolbar')
   // 非工具行位置时 chip 让位给 bar（同 id 双槽互斥由位置偏好门控）。
   if (!visible || position !== 'toolbar') return null
   // 档位小徽章仅在当前会话模型涉及峰谷时渲染；额度预警压到 chip 上：
@@ -393,6 +416,7 @@ export function LiveCostChip({ sessionId, t }: LiveCostBarProps): React.ReactNod
       : []),
     `${t('liveTurn')} ${money(turnCost)}`,
     `${t('liveSession')} ${money(sessionCost)}`,
+    ...(subCost > 0 ? [t('liveSessionSub').replace('{cost}', money(subCost))] : []),
     ...chips.map(chip => `${chip.name} ${t(windowLabelKey(chip.kind))} ${chip.pct}%`),
   ].join(' · ')
   return (

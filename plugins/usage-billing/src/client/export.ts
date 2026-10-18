@@ -20,6 +20,12 @@ export interface SessionExportRow {
   id: string
   title?: string
   cwd?: string
+  /** 直接父会话 id（仅子智能体会话携带）；顶层会话缺失。 */
+  parentId?: string
+  /** 后代子会话费用合计（人民币元）；无后代时缺失。 */
+  subCost?: number
+  /** 后代子会话调用数；无后代时缺失。 */
+  subCalls?: number
   calls: number
   cost: number
   lastActive: number
@@ -69,9 +75,9 @@ function projectOf(cwd: string | undefined): string {
   return cwd.split(/[\\/]/).filter(Boolean).pop() ?? cwd
 }
 
-/** 按会话 CSV：会话 id,标题,项目,调用,费用(元),最后活跃(ISO)。 */
+/** 按会话 CSV：会话 id,标题,项目,调用,费用(元),最后活跃(ISO),父会话,子会话调用,子会话费用(元)。 */
 export function sessionRowsCsv(rows: readonly SessionExportRow[]): string {
-  const header = 'session_id,title,project,calls,cost_cny,last_active'
+  const header = 'session_id,title,project,calls,cost_cny,last_active,parent_id,sub_calls,sub_cost_cny'
   const lines = rows.map(row => [
     csvCell(csvSafe(row.id)),
     csvCell(csvSafe(row.title ?? '')),
@@ -79,6 +85,9 @@ export function sessionRowsCsv(rows: readonly SessionExportRow[]): string {
     row.calls,
     money(row.cost),
     row.lastActive > 0 ? new Date(row.lastActive).toISOString() : '',
+    row.parentId ?? '',
+    row.subCalls ?? '',
+    row.subCost !== undefined ? money(row.subCost) : '',
   ].join(','))
   return [header, ...lines].join('\n')
 }

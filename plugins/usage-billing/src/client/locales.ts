@@ -9,6 +9,7 @@ export type UsageBillingKey =
   | 'monthProjected'
   | 'liveTurn'
   | 'liveSession'
+  | 'liveSessionSub'
   | 'calls'
   | 'cacheHitRate'
   | 'tokens'
@@ -156,6 +157,9 @@ export type UsageBillingKey =
   | 'userPriceSelect'
   | 'sessionStaleBadge'
   | 'sessionUntitled'
+  | 'sessionSubCost'
+  | 'sessionSubCalls'
+  | 'sessionSubRow'
   | 'heatmapLess'
   | 'heatmapMore'
   | 'currency'
@@ -333,6 +337,7 @@ export const zh: Record<UsageBillingKey, string> = {
   'monthProjected': '本月预计',
   'liveTurn': '本轮',
   'liveSession': '会话',
+  'liveSessionSub': '含子 {cost}',
   'calls': '调用',
   'cacheHitRate': '缓存命中率',
   'tokens': 'Token',
@@ -478,6 +483,9 @@ export const zh: Record<UsageBillingKey, string> = {
   'userPriceSelect': '选择此行',
   'sessionStaleBadge': '旧版统计',
   'sessionUntitled': '未命名会话',
+  'sessionSubCost': '含子智能体 {cost}',
+  'sessionSubCalls': '含子智能体 {calls} 次调用',
+  'sessionSubRow': '子智能体',
   'heatmapLess': '少',
   'heatmapMore': '多',
   'currency': '币种',
@@ -657,6 +665,7 @@ export const en: Record<UsageBillingKey, string> = {
   'monthProjected': 'Projected',
   'liveTurn': 'Turn',
   'liveSession': 'Session',
+  'liveSessionSub': 'incl. sub {cost}',
   'calls': 'Calls',
   'cacheHitRate': 'Cache Hit',
   'tokens': 'Tokens',
@@ -802,6 +811,9 @@ export const en: Record<UsageBillingKey, string> = {
   'userPriceSelect': 'Select this row',
   'sessionStaleBadge': 'legacy',
   'sessionUntitled': 'Untitled session',
+  'sessionSubCost': 'incl. subagents {cost}',
+  'sessionSubCalls': 'incl. subagents, {calls} calls',
+  'sessionSubRow': 'Subagent',
   'heatmapLess': 'Less',
   'heatmapMore': 'More',
   'currency': 'Currency',

@@ -18,12 +18,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { SessionHeader, SessionId } from '@deepseek-ai/dsh-session/types'
 import type { TokenUsage } from '@deepseek-ai/dsh-llm'
 import {
   aggregateUsage, createUsageAggregator, configFingerprint, dayStamp, foldSession, foldUsage, emptyUsage, workspaceNameOf, hostTimeZone,
   siteBucketKey, siteOriginOf, siteRefOf, sumSiteBuckets, runLedgerMigrations, FOLD_VERSION, foldSearchCall, DEFAULT_SEARCH_CALL_ESTIMATE_CNY,
-  DEFAULT_SUBSCRIPTION_PROVIDERS,
+  DEFAULT_SUBSCRIPTION_PROVIDERS, subParentOf,
   type LedgerMigration, type UsageLedgerDocument, type UsageLedgerSession,
   AGGREGATE_TTL_MS, LEDGER_SAVE_INTERVAL_MS, SESSION_ROW_LIMIT, type UsagePersistence,
 } from '../src/aggregate.ts'
@@ -2378,5 +2378,120 @@ describe('byTier latency-tier exclusion (FOLD_VERSION 23)', () => {
     const fold = foldSession(events, new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {})
     expect(fold.byTier.get('peak')?.calls ?? 0).toBe(1)
     expect(fold.byTier.get('offPeak')?.calls ?? 0).toBe(1)
+  })
+})
+
+describe('subagent session rollup (子智能体归并)', () => {
+  /** 峰时时刻（费用>0 与时段无关，只为断言稳定）。 */
+  const T = Date.UTC(2026, 9, 15, 4, 0, 0)
+
+  /** persistence double：list 的 header 可携带宿主 v4 的子智能体归并字段。 */
+  function subPersistence(
+    logs: Record<string, SessionEvent[]>,
+    headers: Record<string, { origin?: 'subagent'; parentSession?: string; delegationDepth?: number }> = {},
+  ): UsagePersistence {
+    return {
+      list: async () => Object.keys(logs).map(id => ({ id, ...(headers[id] ?? {}) })),
+      readFrom: async (id: SessionId, fromSeq: number) => ({
+        meta: { id },
+        inheritedEventCount: 0,
+        events: (logs[id] ?? []).filter(event => event.seq >= fromSeq),
+      }),
+    } as unknown as UsagePersistence
+  }
+
+  it('subParentOf 只认 origin/delegationDepth 门，fork 种子血缘不归并', () => {
+    const meta = (fields: Record<string, unknown>): SessionHeader =>
+      ({ id: 's', createdAt: 0, isSeeded: false, ...fields }) as unknown as SessionHeader
+    expect(subParentOf(meta({ origin: 'subagent', parentSession: 'root', delegationDepth: 1 })))
+      .toBe('root')
+    // 无 origin 但深度 > 0（异常宿主只写深度）同样归并。
+    expect(subParentOf(meta({ delegationDepth: 2, parentSession: 'root' })))
+      .toBe('root')
+    // fork/resume：parentSession 是种子血缘，无子智能体标记 → 不归并。
+    expect(subParentOf(meta({ isSeeded: true, parentSession: 'origin' })))
+      .toBeUndefined()
+    // 深度 0 的顶层会话、老宿主无标记 header → 不归并。
+    expect(subParentOf(meta({ delegationDepth: 0 })))
+      .toBeUndefined()
+    expect(subParentOf(meta({})))
+      .toBeUndefined()
+  })
+
+  it('子会话行带 parentId，父行汇总后代费用与调用；总额口径不变', async () => {
+    const logs: Record<string, SessionEvent[]> = {
+      'session-root': [header(1, 'deepseek-v4-flash'), message(2, T, USAGE)],
+      'session-sub1': [header(1, 'deepseek-v4-flash'), message(2, T, USAGE)],
+      'session-sub2': [header(1, 'glm-5.2'), message(2, T, USAGE)],
+    }
+    const stats = await aggregateUsage(subPersistence(logs, {
+      'session-sub1': { origin: 'subagent', parentSession: 'session-root', delegationDepth: 1 },
+      // 只带深度的变体：同归并门。
+      'session-sub2': { delegationDepth: 1, parentSession: 'session-root' },
+    }))
+    const root = stats.bySession.find(row => row.id === 'session-root')
+    const sub1 = stats.bySession.find(row => row.id === 'session-sub1')
+    const sub2 = stats.bySession.find(row => row.id === 'session-sub2')
+    expect(sub1?.parentId).toBe('session-root')
+    expect(sub2?.parentId).toBe('session-root')
+    // 子行自己无后代：不写合计字段。
+    expect(sub1?.subCalls).toBeUndefined()
+    expect(sub1?.subCost).toBeUndefined()
+    expect(root?.parentId).toBeUndefined()
+    expect(root?.subCalls).toBe(2)
+    expect(root?.subCost).toBeCloseTo((sub1?.cost ?? 0) + (sub2?.cost ?? 0), 10)
+    // 纯展示层归并：总额仍按 3 次调用计（子会话费用本就在 total 里）。
+    expect(stats.total.calls).toBe(3)
+  })
+
+  it('多级委派整链递归到根对话', async () => {
+    const logs: Record<string, SessionEvent[]> = {
+      'session-root': [header(1, 'deepseek-v4-flash'), message(2, T, USAGE)],
+      'session-mid': [header(1, 'deepseek-v4-flash'), message(2, T, USAGE)],
+      'session-leaf': [header(1, 'deepseek-v4-flash'), message(2, T, USAGE)],
+    }
+    const stats = await aggregateUsage(subPersistence(logs, {
+      'session-mid': { origin: 'subagent', parentSession: 'session-root', delegationDepth: 1 },
+      'session-leaf': { origin: 'subagent', parentSession: 'session-mid', delegationDepth: 2 },
+    }))
+    const root = stats.bySession.find(row => row.id === 'session-root')
+    const mid = stats.bySession.find(row => row.id === 'session-mid')
+    // 中间节点只汇总自己的直接后代（叶子），根汇总整链。
+    expect(mid?.subCalls).toBe(1)
+    expect(root?.subCalls).toBe(2)
+  })
+
+  it('账本兜底行保留 subOf 归并标记（日志已删的子会话仍归位）', async () => {
+    const store = fakeLedgerStore([
+      {
+        id: 'session-sub-gone',
+        subOf: 'session-root',
+        foldVersion: FOLD_VERSION,
+        fold: legacyFold(),
+      },
+    ])
+    const stats = await aggregateUsage(subPersistence({
+      'session-root': [header(1, 'deepseek-v4-flash'), message(2, T, USAGE)],
+    }), { ledger: store.store })
+    const sub = stats.bySession.find(row => row.id === 'session-sub-gone')
+    const root = stats.bySession.find(row => row.id === 'session-root')
+    expect(sub?.parentId).toBe('session-root')
+    expect(sub?.stale).toBe(true)
+    // 父行把只剩账本行的子会话也汇总进去。
+    expect(root?.subCalls).toBe(2)
+  })
+
+  it('recordLedger 把 subOf 持久化进账本行', async () => {
+    const store = fakeLedgerStore([])
+    await aggregateUsage(subPersistence({
+      'session-root': [header(1, 'deepseek-v4-flash'), message(2, T, USAGE)],
+      'session-sub': [header(1, 'deepseek-v4-flash'), message(2, T, USAGE)],
+    }, {
+      'session-sub': { origin: 'subagent', parentSession: 'session-root', delegationDepth: 1 },
+    }), { ledger: store.store })
+    const sub = store.current().sessions.find(row => row.id === 'session-sub')
+    const root = store.current().sessions.find(row => row.id === 'session-root')
+    expect(sub?.subOf).toBe('session-root')
+    expect(root?.subOf).toBeUndefined()
   })
 })
