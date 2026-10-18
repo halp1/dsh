@@ -62,6 +62,7 @@
 - [x] v1.4.1（追加，watch-dsh-releases 报警后补）：`dshReleases` 补 0.1.6-alpha.2（2026-09-18 发布，五包 diff 仍为零代码变更）；宿主 `latest` 前移至 0.1.5-rc.2，文档同步
 - [x] v1.4.2（核查后撤销）：此前的「宿主已发 alpha.3/.4」为误报（npm 上宿主本体仅到 alpha.2，`alpha` 标签即 alpha.2；深仓内部 tag 未发 npm）——不需要声明，2026-09-20 已验证 check-compat 无漂移
 - [x] v1.4.8（2026-09-24）：适配宿主 0.1.7-rc.1 三处破坏——primitives 图标拆名（issue #72，双世代名字同引、按宿主世代取用）、dsh-settings 从运行时移除 register（typeof 探测降级，0.1.7 下设置开关只读，完整迁移留作后续 issue）、SessionSummary.completed 移除（兜底行为不变）；devDependencies 钉版整组 0.1.2-rc.1 → 0.1.7-rc.1，删 `*.tsbuildinfo` 后干净构建修掉 8 个类型错误，38 文件 495 项单测全绿。补装 26 个 devDeps：dsh-tools 0.1.7 新增 6 个 peers（agent/ptc-runtime/sandbox/sandbox-policy/system-prompt/user-approval，插件 .npmrc 关闭 auto-install-peers 须显式补装）；primitives 0.1.7 与 dsh-client-store 0.1.7 的 npm 包未声明运行时依赖（shiki/katex/micromark 全家桶/diff/simple-icons/@shikijs/langs/dsh-util-workspace-path/zustand/immer 等 20 包，版本照抄宿主仓库源码 devDeps），生产由宿主注入表满足、仅本地 vitest 需真实解析。两条教训：升级宿主依赖后必须先删 `*.tsbuildinfo` 再构建（tsc -b 增量缓存掩盖了首轮全部类型错误）；`pnpm install` 在 lockfile 不含新 devDeps 时会静默跳过，须带 `--no-frozen-lockfile` 并核对安装输出
+- [x] v1.6.1（2026-10-18）：`dshReleases` 补 0.2.1-alpha.4 / 0.2.1-alpha.5 / 0.2.1-rc.1——应用户要求全量声明（此前 #95 决策因未真机验证不声明；本次按用户指示改为全兼容声明，这三个版本未经真机验证，声明基于 0.2.1-alpha.3 与 rc.2 均兼容的区间连续性推断）
 - [ ] 宿主侧把 profile 逐版本 `minimumReleaseAgeExclude` 改为包级豁免（待与宿主作者沟通）
 
 ---
