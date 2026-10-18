@@ -7,6 +7,8 @@
   },
   "files": [
     "src/index.ts",
+    "src/config.ts",
+    "src/guard.ts",
     "src/builtin-catalog.ts",
     "src/declarative.ts",
     "src/reconcile.ts",
@@ -21,7 +23,14 @@
     "src/subscriptions.ts",
     "src/resilience.ts",
     "src/tc3.ts",
-    "src/relay.ts"
+    "src/relay.ts",
+    "src/routes/notify-claim.ts",
+    "src/routes/pricing.ts",
+    "src/routes/balance.ts",
+    "src/routes/usage-tool.ts",
+    "src/routes/subscriptions.ts",
+    "src/routes/relay-quotas.ts",
+    "src/routes/usage-stats.ts"
   ],
   "references": []
 }

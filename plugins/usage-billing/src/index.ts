@@ -17,7 +17,6 @@ import { lstat, mkdir, readFile, rm } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
-import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 // 引入 loader 的声明合并：loader/volatile-update 事件与 Fiber.entry 属性。
 import type {} from '@deepseek-ai/cordis-plugin-loader'
@@ -43,10 +42,24 @@ import { queryBalances, queryCustomBalances } from './balance.ts'
 import { queryDeclaredEndpoints } from './declarative.ts'
 import { reconcileBalanceDelta, type BalanceRef, type ReconcileEvent } from './reconcile.ts'
 import { fetchLivePricing } from './pricing-fetch.ts'
-import type { CustomBalanceConfig, DeclaredEndpointConfig, LivePricing, RelayQuota, SubscriptionPlanConfig, SubscriptionQuota } from './pricing-shared.ts'
+import type { LivePricing, RelayQuota, SubscriptionQuota } from './pricing-shared.ts'
+import type { UsageBillingConfig } from './config.ts'
 import { collectSubscriptions, EMPTY_SUBSCRIPTION_KEYS, identifySubscriptionPlans, parseOpenCodeAuthDocument, type IdentifiedSubscriptionPlan, type SubscriptionKeys } from './subscriptions.ts'
 import { isOfficialBaseUrl, queryRelayQuotas, type RelayRoute } from './relay.ts'
 import { planTypeOf, subscriptionFeeCnyOf } from './client/plan-knowledge.ts'
+// v1.5.2 抽出：共享 loopback 守卫 + 9 条 HTTP 路由的注册块各自独立成文件，apply() 收缩为装配器。
+import { guardLoopback, isLoopbackOrigin, normalizeTrustedHosts } from './guard.ts'
+import { registerNotifyClaimRoute } from './routes/notify-claim.ts'
+import { registerPricingRoutes } from './routes/pricing.ts'
+import { registerBalanceRoute } from './routes/balance.ts'
+import { registerUsageToolRoute } from './routes/usage-tool.ts'
+import { registerSubscriptionsRoute } from './routes/subscriptions.ts'
+import { registerRelayQuotasRoute } from './routes/relay-quotas.ts'
+import { registerUsageStatsRoute } from './routes/usage-stats.ts'
+
+// Re-export guard helpers for backward compat with tests/clients that import
+// from src/index.ts (e.g. tests/trusted-hosts.spec.ts).
+export { guardLoopback, isLoopbackOrigin, isLoopbackHost, isLoopbackPeer, hostNameOf, normalizeTrustedHosts } from './guard.ts'
 
 // 宿主 0.1.7 重构 dsh-settings：SettingsProvider/SettingsScope 类型不再导出（服务类
 // 更名 SettingsForms，describe 表单面保留；register 从运行时移除，命名空间持久化
@@ -69,109 +82,10 @@ import {
   type UsageBillingSettings,
 } from './client/usage-billing-settings.ts'
 
-/** Peer 地址是否为回环（本地）。回环防护：本插件的端点只供本机浏览器用，
- *  局域网/远端请求一律拒绝，避免面板数据（含中转站 origin 与余额）外泄。 */
-function isLoopbackPeer(req: IncomingMessage): boolean {
-  const address = req.socket.remoteAddress
-  if (address === undefined) return false
-  // IPv4 127.0.0.0/8、IPv6 ::1、以及 IPv4-mapped IPv6（::ffff:127.x.x.x）。
-  return address === '::1' || address.startsWith('127.') || address.startsWith('::ffff:127.')
-}
-
-/** 校验 Host 头是本机回环（精确 127.0.0.0/8 / ::1 / localhost 或空，供 curl 不带 Host 的极简请求）。
- *  拒绝 `127.0.0.1.attacker.com` 这类以 `127.` 开头但解析到外部的 DNS rebinding 域名：
- *  只用 `startsWith('127.')` 会被它穿透，必须精确匹配回环 IP 的字面量。 */
-/**
- * Host 头/名单条目的主机名部分：IPv6 字面量带方括号（`[::1]:3080`），整体去括号；
- * 裸 IPv6（多个冒号、无方括号）整体是字面量；其余按首个冒号去端口。统一小写。
- * （此前一律 `split(':')[0]`：`[::1]:3080` 截成 `[`，IPv6 回环请求被误拒，
- * trustedHosts 也配不进去——fail-closed 无安全暴露，但本机 IPv6 场景功能失效。）
- */
-function hostNameOf(host: string): string {
-  const trimmed = host.trim()
-  const bracket = /^\[([0-9a-fA-F:]+)\](?::\d+)?$/.exec(trimmed)
-  if (bracket !== null) return (bracket[1] ?? '').toLowerCase()
-  // 两个及以上冒号且无方括号 = 裸 IPv6 字面量（无端口语义），整体保留。
-  if ((trimmed.match(/:/g) ?? []).length > 1) return trimmed.toLowerCase()
-  return trimmed.split(':')[0]?.toLowerCase() ?? ''
-}
-
-/**
- * 信任主机名归一化：去空白、去端口、转小写，丢弃空项（IPv6 经 {@link hostNameOf}
- * 去方括号）。与请求侧 Host 头解析同口径，因此匹配忽略大小写与端口。
- * @param hosts - 配置里的原始名单。
- * @returns 归一化后的主机名集合（空集 = 与历史版本行为一致）。
- */
-export function normalizeTrustedHosts(hosts: readonly string[] | undefined): ReadonlySet<string> {
-  if (hosts === undefined) return new Set()
-  const names = hosts
-    .filter((host): host is string => typeof host === 'string')
-    .map(host => hostNameOf(host))
-    .filter(host => host !== '')
-  return new Set(names)
-}
-
-function isLoopbackHost(req: IncomingMessage, trustedHosts: ReadonlySet<string> = new Set()): boolean {
-  const host = req.headers.host
-  if (host === undefined || host === '') return true
-  const name = hostNameOf(host)
-  // 精确匹配：localhost、IPv6 回环、或字面量 IPv4 回环地址（127.0.0.0/8）。
-  if (name === 'localhost' || name === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(name)) return true
-  // 反向代理场景：仅当用户显式列入 trustedHosts 才放行，且已经过 peer socket 校验。
-  // 精确匹配（已去端口、转小写），无后缀 / 通配符语义。
-  return name !== '' && trustedHosts.has(name)
-}
-
-/** 校验 Origin 头是否回环（写操作用，防止跨站表单/fetch 改写设置）。Origin 缺失
- *  （curl 或同源 fetch 不带）视为放行，交给下方的 Content-Type 校验兜底；Origin 存在
- *  但主机非回环则拒绝——跨站脚本发起的写请求必带攻击者域名的 Origin。 */
-function isLoopbackOrigin(origin: string | undefined): boolean {
-  if (origin === undefined || origin === '') return true
-  try {
-    // WHATWG URL 的 hostname 对 IPv6 保留方括号（`[::1]`）：先去括号再比对。
-    const raw = new URL(origin).hostname
-    const host = raw.startsWith('[') && raw.endsWith(']') ? raw.slice(1, -1) : raw
-    return host === 'localhost' || host === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)
-  } catch {
-    return false
-  }
-}
-
-/**
- * 回环防护守卫：仅接受回环 GET 请求（peer socket 地址 + Host 头同时校验）。
- * 不满足时返回 403 并结束响应；调用方在 handler 顶部调用，返回 false 即已拒绝。
- * @param req - 当前请求。
- * @param res - 当前响应。
- * @returns 是否放行；false = 已拒绝并结束响应。
- */
-export function guardLoopback(req: IncomingMessage, res: ServerResponse, trustedHosts: ReadonlySet<string> = new Set()): boolean {
-  // GET 读取 + POST（usage-tool 的开关写入）都在回环内允许；其他方法一律拒绝。
-  const methodOk = req.method === 'GET' || req.method === 'POST'
-  const peerOk = isLoopbackPeer(req)
-  const hostOk = isLoopbackHost(req, trustedHosts)
-  if (!methodOk || !peerOk || !hostOk) {
-    res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' })
-    // peer 已是回环、仅 Host 被拒时给出可诊断提示：这是反向代理场景的典型失败
-    // 形态（界面能渲染但数字全是 0），不给提示只能靠猜。长度截断，避免回显超长头。
-    const host = req.headers.host
-    const hint = methodOk && peerOk && typeof host === 'string' && host !== ''
-      ? ` (host "${host.slice(0, 80)}" not in trustedHosts)`
-      : ''
-    res.end(JSON.stringify({ error: `forbidden: loopback only${hint}` }))
-    return false
-  }
-  return true
-}
-
-/**
- * 设置命名空间校验（上游 alpha.1 `settingsNamespace` 的本地化，issue #28）：
- * alpha.2 起该函数不再从 `@deepseek-ai/dsh-settings` 导出，但上游内部保留
- * 同一 pattern——本地按同一规则校验，预览宿主 API 漂移不再影响插件装载。
- */
-const SETTINGS_NAMESPACE_PATTERN = /^[a-z][a-z0-9-]*$/
-
 /** 设置命名空间 id：register 已从 0.1.7 运行时移除，按 string 探测调用，宿主 branded 名不再引用。 */
 type NamespaceArg = string
+
+const SETTINGS_NAMESPACE_PATTERN = /^[a-z][a-z0-9-]*$/
 
 /** 校验并透过合法命名空间 id；非法值 fail-loud（与上游原行为一致）。 */
 function validateSettingsNamespace(value: string): NamespaceArg {
@@ -189,88 +103,8 @@ const UsageBillingSettingsSchema: z<UsageBillingSettings> = z.object({
   [ENABLE_USAGE_STATS_TOOL_FIELD]: z.boolean().default(DEFAULT_ENABLE_USAGE_STATS_TOOL),
 })
 
-/** 宿主 0.1.7+ 经 Config schema 解析后，volatile 字段在 config 中的稳定引用形态
- *  （cosmokit `Volatile<T>` 的最小结构镜像，避免为类型引入直接依赖）。 */
-export interface VolatileToggle {
-  /** @returns 当前生效的布尔快照（设置写入后原位更新，无需重载插件）。 */
-  get(): boolean
-}
-
-/**
- * Loader 挂载时对条目 config 做校验的 Config 声明：`enableUsageStatsTool` 标记
- * volatile，宿主 0.1.7+ 设置系统据此把它投影为可实时编辑的开关（describe/update）。
- * schemastery 非严格 object 透传未声明键，其余 config 字段不受影响；未导出 Config
- * 的旧宿主直接把原始 config 交给 apply，普通布尔形态由读取端兼容。
- */
-export const Config = z.object({
-  [ENABLE_USAGE_STATS_TOOL_FIELD]: z.boolean().default(DEFAULT_ENABLE_USAGE_STATS_TOOL).volatile(),
-})
-
-/** Plugin configuration. */
-export interface UsageBillingConfig {
-  /** Absolute path to a `.dsh-usage-stats.json` fallback file. */
-  statsPath?: string
-  /** 统计快照的持久化路径；默认 `<harness home>/.dsh-usage-stats.json`
-   *  （harness home = `DSH_HOME` 环境变量或 `~/.dsh`，见 resolveDshHome）。
-   *  测试注入临时目录以隔离真实家目录（聚合失败回退与快照落盘都走此路径）。 */
-  snapshotPath?: string
-  /** 独立持久用量账本的绝对路径；默认 `<harness home>/.dsh-usage-ledger.json`。
-   *  账本与会话日志解耦，因此永久删除会话不会抹掉已经观测到的用量。 */
-  ledgerPath?: string
-  /** 余额差对账基准的持久化路径；默认 `<harness home>/.dsh-usage-reconcile.json`。 */
-  reconcilePath?: string
-  /** 订阅制（coding / token / agent plan）provider id 列表；默认 kimi-coding、xiaomi-token-plan-cn。 */
-  subscriptionProviders?: string[]
-  /** 订阅套餐额度适配器（kimi / zai / opencode-go）；默认全部内置。 */
-  subscriptionPlans?: readonly SubscriptionPlanConfig[]
-  /** 余额查询用的 DeepSeek 凭据引用（环境变量名）；默认 DEEPSEEK_API_KEY。 */
-  balanceApiKeyEnv?: string
-  /** 月度预算（人民币元）；设置后随 usage-stats 下发，仪表盘显示预算进度条。 */
-  monthlyBudget?: number
-  /** 余额不足告警阈值（人民币元）：余额低于此值时仪表盘每天提醒一次；
-      不设置则客户端按默认阈值（50 元）兜底。 */
-  lowBalanceThreshold?: number
-  /** 自定义 Provider 余额查询（任意 HTTP 端点 + extract 规则，适配 NewApi/LiteLLM 等）。 */
-  customBalances?: readonly CustomBalanceConfig[]
-  /**
-   * 声明端点（declarative endpoints）：为内置表没有的供应商自声明余额/额度接口。
-   * 绑定到某条已配置 provider 的同源地址，`fields` / `windows` 写响应里的取值路径；
-   * 安全边界（origin 绑定、单斜杠 path、只 GET、跨源重定向失败、凭据取自 apiKeyEnv）
-   * 写死在 declarative.ts。缺省空。
-   */
-  declaredEndpoints?: readonly DeclaredEndpointConfig[]
-  /**
-   * 允许通过 Host 头校验的额外主机名（反向代理场景）；缺省空，行为与历史版本完全一致。
-   * 仅在 peer socket 已通过回环校验后才参考：socket 校验仍为强制且不受本字段影响，
-   * 本名单只放宽「纵深防御」的第二层。匹配为**精确主机名**，忽略大小写与端口；
-   * 不支持后缀 / 通配符，因此 `evil.com` 永远无法满足 `trusted.com`。
-   * 例：`['llm.example.com']`。
-   */
-  trustedHosts?: string[]
-  /** `usage_stats` 工具注入开关（默认 false：不注入）。宿主 0.1.7+ 经 Config
-   *  解析后是 volatile 引用（设置写入即时反映），直连 apply（测试）是普通布尔；
-   *  读取统一走 readUsageStatsToggle。该工具占用每次请求的上下文，coding 场景多在仪表盘查看。 */
-  enableUsageStatsTool?: boolean | VolatileToggle
-  /**
-   * 联网搜索请求（`web/deepseek-search-llm-request`，日志只有请求、无用量事件）
-   * 的单次费用估算（人民币元）。这类调用直连官方 api.deepseek.com，开放平台照常
-   * 计费但本地日志无 usage，按次估值计入今日/本月费用；默认 0.02 元/次，设 0 关闭。
-   */
-  searchCallEstimateCny?: number
-  /**
-   * 历史路由别名（旧 provider 路由名 → 当前路由名）：改过名/删除过的路由，其
-   * 历史用量原会落「未知路由」桶且站点/订阅/官方判定全部失效；配置别名后按
-   * 目标路由归位。例：`{ "deepseek-official": "tencent", "tencent-cloud": "tencent" }`。
-   */
-  routeAliases?: Record<string, string>
-  /**
-   * 用户自定义模型别名（真实日志 model id → 计费目录键）：目录外的新模型无需
-   * 等发版，配置一条别名即完成识别与计价（值必须是 MODEL_CATALOG 的既有 key，
-   * 如 `{ "hy4-preview": "hunyuan" }`）。聚合折叠与客户端渲染共用同一映射。
-   */
-  modelKeyAliases?: Record<string, string>
-}
-
+export type { UsageBillingConfig } from './config.ts'
+/** 实时定价的后台刷新间隔（毫秒）：汇率/模型价低频变化，6 小时一次足够。 */
 /** 实时定价的后台刷新间隔（毫秒）：汇率/模型价低频变化，6 小时一次足够。 */
 const PRICING_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000
 
@@ -915,70 +749,9 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
   // 键自带日期戳/切换点粒度，无需过期，超上限裁掉最旧的键。两实例同毫秒认领同一
   // 键的窗口极窄，最坏退化为一重复弹，与文件锁的残留误判相比是更好的取舍。
   const notifyClaimsPath = `${snapshotPath}.notify-claims.json`
-  const notifyClaims: { loaded: boolean; keys: string[] } = { loaded: false, keys: [] }
-  ctx.effect(
-    () => ctx.webServer.register({
-      kind: 'exact',
-      path: '/api/billing/notify-claim',
-      handler: async (req, res) => {
-        if (!guardLoopback(req, res, trustedHosts)) return
-        if (req.method !== 'POST') {
-          res.writeHead(405, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify({ error: 'method not allowed' }))
-          return
-        }
-        // 跨站写保护与 usage-tool 同口径：Origin 必须回环 + Content-Type 必须 JSON。
-        if (!isLoopbackOrigin(req.headers.origin)
-          || !(req.headers['content-type'] ?? '').toLowerCase().includes('application/json')) {
-          res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify({ error: 'forbidden: loopback only' }))
-          return
-        }
-        try {
-          // body 只承载一个认领键，2 KiB 上限已足够，防坏/恶意 body 拖住 handler。
-          let body = ''
-          for await (const chunk of req) {
-            body += String(chunk)
-            if (body.length > 2048) {
-              res.end(JSON.stringify({ error: 'body too large' }))
-              return
-            }
-          }
-          const parsed = JSON.parse(body === '' ? '{}' : body) as { key?: unknown }
-          if (typeof parsed.key !== 'string' || parsed.key === '' || parsed.key.length > 200) {
-            res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
-            res.end(JSON.stringify({ error: 'invalid key' }))
-            return
-          }
-          if (!notifyClaims.loaded) {
-            notifyClaims.loaded = true
-            try {
-              const stored = JSON.parse(await readFile(notifyClaimsPath, 'utf8')) as { keys?: unknown }
-              if (Array.isArray(stored.keys)) notifyClaims.keys = stored.keys.filter((k): k is string => typeof k === 'string')
-            } catch {
-              // 首次运行或文件损坏：从空表开始（去重退化为进程内，下次认领重建文件）。
-            }
-          }
-          if (notifyClaims.keys.includes(parsed.key)) {
-            res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-            res.end(JSON.stringify({ claimed: false }))
-            return
-          }
-          notifyClaims.keys.push(parsed.key)
-          if (notifyClaims.keys.length > 400) notifyClaims.keys = notifyClaims.keys.slice(-200)
-          // 认领表写失败不阻塞通知：去重退化为进程内，多实例下该键可能重复一次。
-          void writeFileAtomic(notifyClaimsPath, JSON.stringify({ keys: notifyClaims.keys }), { mode: 0o600, dirMode: 0o700 })
-            .catch(() => {})
-          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify({ claimed: true }))
-        } catch {
-          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify({ error: 'invalid' }))
-        }
-      },
-    }),
-    'usage-billing: notify-claim route',
-  )
+  // 进程内认领表（`notifyClaims`）由 src/routes/notify-claim.ts 内的模块级单例持有。
+  registerNotifyClaimRoute(ctx, { trustedHosts, claimsPath: notifyClaimsPath })
+
 
   // usage_stats 动态工具（默认关闭）：模型可主动查询用量费用（今天 / 本月 / 当前会话 / 累计）。
   // 该工具占用每次请求的上下文，而 coding 场景多在仪表盘看用量，属可关的打扰项。
@@ -1178,51 +951,12 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
     'usage-billing: pricing refresh timer',
   )
 
-  ctx.effect(
-    () => ctx.webServer.register({
-      kind: 'exact',
-      path: '/api/billing/pricing',
-      handler: async (req, res) => {
-        if (!guardLoopback(req, res, trustedHosts)) return
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-        res.end(pricingBody())
-      },
-    }),
-    'usage-billing: pricing route',
-  )
+  registerPricingRoutes(ctx, { trustedHosts, body: pricingBody, refresh: refreshPricing })
 
-  // 手动同步价格目录：费率条「立即同步」按钮调用。写操作按回环写防护模板
-  // 校验 Origin 与 Content-Type；无 body，刷新完成后返回新目录与同步时间。
-  ctx.effect(
-    () => ctx.webServer.register({
-      kind: 'exact',
-      path: '/api/billing/pricing/refresh',
-      handler: async (req, res) => {
-        if (!guardLoopback(req, res, trustedHosts)) return
-        if (req.method !== 'POST') {
-          res.writeHead(405, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify({ error: 'method not allowed' }))
-          return
-        }
-        if (!isLoopbackOrigin(req.headers.origin)) {
-          res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify({ error: 'forbidden: loopback only' }))
-          return
-        }
-        if (!(req.headers['content-type'] ?? '').toLowerCase().includes('application/json')) {
-          res.writeHead(415, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify({ error: 'unsupported content-type' }))
-          return
-        }
-        await refreshPricing()
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-        res.end(pricingBody())
-      },
-    }),
-    'usage-billing: pricing refresh route',
-  )
+  // 手动同步价格目录与 GET 价目表同 concern，由 src/routes/pricing.ts 内的
+  // registerPricingRoutes 统一注册两条路由（GET /pricing + POST /pricing/refresh）。
 
-  let balanceCache: { at: number; doc: { balances: Awaited<ReturnType<typeof queryBalances>>; reconcile?: ReconcileEvent } } = { at: 0, doc: { balances: [] } }
+ let balanceCache: { at: number; doc: { balances: Awaited<ReturnType<typeof queryBalances>>; reconcile?: ReconcileEvent } } = { at: 0, doc: { balances: [] } }
   // in-flight 去重（自审计延期项）：仪表盘、悬浮费用条、usage-stats 工具会并发
   // 打本路由；缓存过期的瞬间多个请求各自全套上游查询（余额 + 自定义 + 声明端点
   // + 对账），共享同一次进行中的刷新，上游只被打一遍。
@@ -1282,106 +1016,22 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
     balanceInflight ??= refreshBalance().finally(() => { balanceInflight = undefined })
     return balanceInflight
   }
-  ctx.effect(
-    () => ctx.webServer.register({
-      kind: 'exact',
-      path: '/api/billing/balance',
-      handler: async (req, res) => {
-        if (!guardLoopback(req, res, trustedHosts)) return
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-        // 外部余额 API 低频变化：缓存 5 分钟，命中直接返回，避免每 30 秒后台轮询都打上游。
-        if (Date.now() - balanceCache.at < BALANCE_CACHE_MS) {
-          res.end(JSON.stringify(balanceCache.doc))
-          return
-        }
-        try {
-          await refreshBalanceOnce()
-        } catch (error) {
-          // 查询失败：保留上次成功快照（从未成功则为空余额），避免每 30 秒把偶发故障刷成「未配置」。
-          console.warn('[usage-billing] refreshBalances failed; serving cached balances:', error)
-        }
-        res.end(JSON.stringify(balanceCache.doc))
-      },
-    }),
-    'usage-billing: balance route',
-  )
+  registerBalanceRoute(ctx, { trustedHosts, cached: () => balanceCache, refreshOnce: refreshBalanceOnce, cacheMs: BALANCE_CACHE_MS })
+
 
   // usage_stats 工具开关：插件自带的读/写接口（不依赖宿主浏览器设置白名单）。
   // GET 返回当前是否注入；POST 写设置命名空间（重启应用后工具注入随新值生效）。
-  ctx.effect(
-    () => ctx.webServer.register({
-      kind: 'exact',
-      path: '/api/billing/usage-tool',
-      handler: async (req, res) => {
-        if (!guardLoopback(req, res, trustedHosts)) return
-        // 方法分派必须先于状态行：此前 200 无条件先写，405 分支成为死代码
-        // （guardLoopback 已拦截非 GET/POST），且到达时会二次 writeHead 抛错。
-        if (req.method !== 'GET' && req.method !== 'POST') {
-          res.writeHead(405, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify({ error: 'method not allowed' }))
-          return
-        }
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-        // GET：旧宿主读命名空间 scope（POST 写入立即反映）；新宿主读 volatile
-        // 引用（settings.update 提交后原位更新）。
-        const enabled = usageSettingsScope !== undefined
-          ? usageSettingsScope.get().enableUsageStatsTool
-          : readUsageStatsToggle(config)
-        if (req.method === 'GET') {
-          res.end(JSON.stringify({ enabled }))
-          return
-        }
-        // 跨站写保护：POST 是写操作（改写设置命名空间/条目 config），必须校验 Origin
-        // 头是回环，且 Content-Type 为 application/json。跨站表单/fetch 的简单请求只
-        // 能带 text/plain 等，带不了 application/json（会触发 CORS preflight 而被上方
-        // guardLoopback 的 methodOk 拒绝），从两个维度堵住 CSRF。
-        if (!isLoopbackOrigin(req.headers.origin)) {
-          res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify({ error: 'forbidden: loopback only' }))
-          return
-        }
-        if (!(req.headers['content-type'] ?? '').toLowerCase().includes('application/json')) {
-          res.writeHead(415, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify({ error: 'unsupported content-type' }))
-          return
-        }
-        // 读取并解析 JSON body 后按世代写回；两个通道都缺席时拒绝写。
-        // body 只承载一个布尔开关，512 字节上限已足够，防坏/恶意 body 拖住 handler。
-        try {
-          let body = ''
-          for await (const chunk of req) {
-            body += String(chunk)
-            if (body.length > 512) {
-              res.end(JSON.stringify({ error: 'body too large' }))
-              return
-            }
-          }
-          const parsed = JSON.parse(body === '' ? '{}' : body) as { enabled?: unknown }
-          const next = parsed.enabled === true
-          if (usageSettingsScope !== undefined) {
-            await usageSettingsScope.update({ enableUsageStatsTool: next })
-            // 旧宿主没有 volatile 提交事件，写回后显式同步工具注册（幂等）。
-            syncUsageTool()
-          } else if (liveSettings !== undefined) {
-            await liveSettings.update(liveSettings.ns, { [ENABLE_USAGE_STATS_TOOL_FIELD]: next })
-            // 新宿主：真实提交会触发 loader/volatile-update 再同步一次；此处先同步
-            // 覆盖「写回成功但引用未即时可见」的组合（如测试替身不提交），幂等。
-            syncUsageTool()
-          } else {
-            res.end(JSON.stringify({ error: 'settings unavailable' }))
-            return
-          }
-          res.end(JSON.stringify({ ok: true, enabled: next }))
-        } catch (error) {
-          // 写回链路异常必须可见：settings.update 抛错（ns 不匹配/volatile 校验拒绝）
-          // 需要真机诊断线索，吞掉后只剩笼统的 invalid。
-          console.warn('[usage-billing] usage-tool toggle write-back failed:', error)
-          res.end(JSON.stringify({ error: 'invalid' }))
-        }
-      },
-    }),
-    'usage-billing: usage-tool route',
-  )
+  registerUsageToolRoute(ctx, {
+    trustedHosts,
+    read: () => usageSettingsScope !== undefined ? usageSettingsScope.get().enableUsageStatsTool : readUsageStatsToggle(config),
+    write: async (next) => {
+      if (usageSettingsScope !== undefined) await usageSettingsScope.update({ enableUsageStatsTool: next })
+      else if (liveSettings !== undefined) await liveSettings.update(liveSettings.ns, { [ENABLE_USAGE_STATS_TOOL_FIELD]: next })
+      else throw new Error('settings unavailable')
+    },
+    syncTool: syncUsageTool,
+  })
+
 
   // 订阅套餐额度：外部 API 低频变化，缓存 5 分钟避免每次轮询都打上游。
   // 只返回"识别到"的套餐：有额度适配器的查剩余量，无适配器的保留识别行
@@ -1430,26 +1080,8 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
     quotasInflight ??= refreshQuotas().finally(() => { quotasInflight = undefined })
     return quotasInflight
   }
-  ctx.effect(
-    () => ctx.webServer.register({
-      kind: 'exact',
-      path: '/api/billing/subscriptions',
-      handler: async (req, res) => {
-        if (!guardLoopback(req, res, trustedHosts)) return
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-        if (Date.now() - quotaCache.at >= SUBSCRIPTION_CACHE_MS) {
-          try {
-            await refreshQuotasOnce()
-          } catch (error) {
-            // 刷新意外抛错时仍用旧缓存响应，绝不让已 writeHead 的响应挂起。
-            console.warn('[usage-billing] refreshQuotas failed; serving cached quotas:', error)
-          }
-        }
-        res.end(JSON.stringify({ quotas: quotaCache.quotas }))
-      },
-    }),
-    'usage-billing: subscriptions route',
-  )
+  registerSubscriptionsRoute(ctx, { trustedHosts, cached: () => quotaCache, refreshOnce: refreshQuotasOnce, cacheMs: SUBSCRIPTION_CACHE_MS })
+
 
   // 中转站额度：识别配了 baseURL + apiKeyEnv 的路由所指向的中转站程序（New API /
   // Sub2API），读出「余额 / 额度窗口」。外部 API 低频变化，缓存 5 分钟避免每次
@@ -1479,102 +1111,20 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
     relayInflight ??= refreshRelay().finally(() => { relayInflight = undefined })
     return relayInflight
   }
-  ctx.effect(
-    () => ctx.webServer.register({
-      kind: 'exact',
-      path: '/api/billing/relay-quotas',
-      handler: async (req, res) => {
-        if (!guardLoopback(req, res, trustedHosts)) return
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-        if (Date.now() - relayCache.at >= SUBSCRIPTION_CACHE_MS) {
-          try {
-            await refreshRelayOnce()
-          } catch (error) {
-            // 刷新意外抛错时仍用旧缓存响应，绝不让已 writeHead 的响应挂起。
-            console.warn('[usage-billing] refreshRelay failed; serving cached relay quotas:', error)
-          }
-        }
-        // 诊断：每条路由的归类（origin / kind），供「我的中转站为什么不显示」自查。
-        const diagnostics = relayCache.quotas.map(row => ({ route: row.route, origin: row.origin, kind: row.kind }))
-        res.end(JSON.stringify({ quotas: relayCache.quotas, diagnostics }))
-      },
-    }),
-    'usage-billing: relay-quotas route',
-  )
+  registerRelayQuotasRoute(ctx, { trustedHosts, cached: () => relayCache, refreshOnce: refreshRelayOnce, cacheMs: SUBSCRIPTION_CACHE_MS })
 
-  // usage-stats 响应体缓存（对齐 pricing 路由的 pricingBodyCache）：聚合器在
-  // 5s 文档 TTL 内返回同一对象引用，而客户端 30s 轮询每次都到这——按文档对象
-  // 身份 + 注入配置（预算/阈值，随宿主 Config 实时变）缓存 decorate+序列化
-  // 结果，大账本（数百 KiB）不再每请求重复序列化。
-  let statsBodyCache: {
-    doc: Record<string, unknown>
-    budget: number | undefined
-    threshold: number | undefined
-    body: string
-  } | undefined
-  ctx.effect(
-    () => ctx.webServer.register({
-      kind: 'exact',
-      path: '/api/billing/usage-stats',
-      handler: async (req, res) => {
-        if (!guardLoopback(req, res, trustedHosts)) return
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-        // 宿主配置（月度预算 / 余额告警阈值）与插件版本不是聚合产物：在响应边界
-        // 注入，实时与快照两条路径一致。
-        const decorate = (doc: Record<string, unknown>): Record<string, unknown> => ({
-          ...doc,
-          pluginVersion: PACKAGE_VERSION,
-          ...(config.monthlyBudget === undefined ? {} : { budget: config.monthlyBudget }),
-          ...(config.lowBalanceThreshold === undefined ? {} : { lowBalanceThreshold: config.lowBalanceThreshold }),
-        })
-        const statsBodyOf = (doc: Record<string, unknown>): string => {
-          const budget = config.monthlyBudget
-          const threshold = config.lowBalanceThreshold
-          if (statsBodyCache !== undefined && statsBodyCache.doc === doc
-            && statsBodyCache.budget === budget && statsBodyCache.threshold === threshold) {
-            return statsBodyCache.body
-          }
-          const body = JSON.stringify(decorate(doc))
-          statsBodyCache = { doc, budget, threshold, body }
-          return body
-        }
-        // stale-while-revalidate：聚合是全量扫描（重度用户上万条会话的冷启动折叠
-        // 以分钟计），HTTP 请求绝不全程等它——只给 RESPONSE_BUDGET_MS 的等待预算，
-        // 超预算立即回最近一次快照；后台折叠完成后快照随之刷新（挂在聚合 promise
-        // 上，与响应路径解耦）。宿主是单进程，慢响应期间事件循环被折叠占住，
-        // 会话/模型列表 RPC 会一起饿死（用户反馈的启动卡顿）。
-        const aggregating = aggregator.aggregate()
-        void aggregating.then(
-          stats => { persistSnapshot(decorate(stats as unknown as Record<string, unknown>)) },
-          () => { /* 失败路径由下方快照兜底，此处只抑制未处理拒绝 */ },
-        )
-        let fresh: Record<string, unknown> | undefined
-        try {
-          fresh = await Promise.race([
-            aggregating.then(stats => stats as unknown as Record<string, unknown>),
-            new Promise<undefined>(resolve => { setTimeout(() => { resolve(undefined) }, RESPONSE_BUDGET_MS).unref() }),
-          ])
-        } catch (error) {
-          // Persistence read failed; fall through to the JSON-file candidates.
-          // 记录异常尾部（含已折叠会话数），避免「只能靠猜」——聚合失败时用户
-          // 至少能从日志看到原因（单会话损坏已在 aggregate 内跳过并告警）。
-          console.error('[usage-billing] usage-stats aggregate failed, falling back to snapshot:', error)
-        }
-        if (fresh !== undefined) {
-          res.end(statsBodyOf(fresh))
-          return
-        }
-        for (const candidate of candidates) {
-          const doc = await readSnapshot(candidate)
-          // Accept only parseable JSON so a stale or partial file never
-          // reaches the dashboard as if it were real.
-          if (doc === null) continue
-          res.end(JSON.stringify(decorate(doc)))
-          return
-        }
-        res.end(JSON.stringify({ error: 'usage stats unavailable' }))
-      },
-    }),
-    'usage-billing: usage-stats route',
-  )
+
+  // usage-stats 响应体缓存由 src/routes/usage-stats.ts 内的模块级单例持有
+  // （按 doc 引用 + config 字段缓存，30s 轮询期间复用）。
+  registerUsageStatsRoute(ctx, {
+    trustedHosts,
+    aggregator,
+    config,
+    candidates,
+    persistSnapshot,
+    readSnapshot,
+    packageVersion: PACKAGE_VERSION,
+    responseBudgetMs: RESPONSE_BUDGET_MS,
+  })
+
 }

@@ -6835,36 +6835,17 @@ async function queryRelayQuotas(ctx, routes) {
 	return await Promise.all(routes.map(async (route) => queryRelayQuota(ctx, route)));
 }
 //#endregion
-//#region lib/types/client/usage-billing-settings.js
+//#region lib/types/guard.js
 /**
-* usage-stats 工具开关的共享设置契约（node 与 client 两端共用）。
+* 共享 loopback 守卫（v1.5.2 抽自 src/index.ts）。
 *
-* 旧宿主（≤0.1.6）把该开关存设置命名空间；宿主 0.1.7+ 起注册面移除，改存插件
-* 条目 config 的 volatile 字段（Config schema 投影），写回经 settings.update，
-* 提交后引用原位更新、`usage_stats` 工具即时注册/注销（无需重载应用）。
-* client 半区在「设置」Tab 渲染开关并经 /api/billing/usage-tool 写入，node 半区
-* 按宿主世代选择通道。缺省的默认行为是关闭——避免该工具默认占用模型每次请求
-* 的上下文（coding 场景通常在仪表盘看用量）。
-*/
-/** 设置命名空间 id（小写 kebab-case）。 */
-const BILLING_SETTINGS_NAMESPACE = "ui-usage-billing";
-/** 该命名空间下用户可编辑的字段名。 */
-const ENABLE_USAGE_STATS_TOOL_FIELD = "enableUsageStatsTool";
-//#endregion
-//#region lib/types/index.js
-/**
-* Usage billing surface plugin, node half.
+* 端点只供本机浏览器用，局域网/远端请求一律拒绝，避免面板数据（含中转站
+* origin 与余额）外泄。三层防御：peer socket（最可信）+ Host 头精确字面量
+* （防 `127.0.0.1.evil.com` 这类 DNS rebinding 域名）+ trustedHosts 白名单
+* （反向代理场景的精确主机名放行）。Origin 头独立校验（写操作用）。
 *
-* Serves `/api/billing/usage-stats`: real usage aggregated from every
-* persisted session log (see `aggregate.ts`) — the browser dashboard reads it
-* instead of showing an empty snapshot. Aggregation is stale-while-revalidate:
-* requests get a short wait budget and fall back to the freshest persisted
-* snapshot while a slow full fold keeps running in the background (a heavy
-* user's first fold takes minutes and must not starve the single-process
-* host's RPC). When `sessionPersistence` is unavailable (or aggregation
-* fails), the configured `statsPath` / `DSH_USAGE_STATS` / conventional JSON
-* file is served as a fallback, and a missing file answers `{ error }` so the
-* dashboard shows zeros, never fabricated samples.
+* 设计要点：精确字面量匹配（`startsWith('127.')` 会被 `127.0.0.1.evil.com`
+* 穿透，必须正则）。IPv6 字面量带方括号（`[::1]:3080`）单独剥离。
 */
 /** Peer 地址是否为回环（本地）。回环防护：本插件的端点只供本机浏览器用，
 *  局域网/远端请求一律拒绝，避免面板数据（含中转站 origin 与余额）外泄。 */
@@ -6900,6 +6881,9 @@ function normalizeTrustedHosts(hosts) {
 	const names = hosts.filter((host) => typeof host === "string").map((host) => hostNameOf(host)).filter((host) => host !== "");
 	return new Set(names);
 }
+/** 校验 Host 头是本机回环（精确 127.0.0.0/8 / ::1 / localhost 或空，供 curl 不带 Host 的极简请求）。
+*  拒绝 `127.0.0.1.attacker.com` 这类以 `127.` 开头但解析到外部的 DNS rebinding 域名：
+*  只用 `startsWith('127.')` 会被它穿透，必须精确匹配回环 IP 的字面量。 */
 function isLoopbackHost(req, trustedHosts = /* @__PURE__ */ new Set()) {
 	const host = req.headers.host;
 	if (host === void 0 || host === "") return true;
@@ -6940,10 +6924,418 @@ function guardLoopback(req, res, trustedHosts = /* @__PURE__ */ new Set()) {
 	}
 	return true;
 }
+//#endregion
+//#region lib/types/routes/notify-claim.js
 /**
-* 设置命名空间校验（上游 alpha.1 `settingsNamespace` 的本地化，issue #28）：
-* alpha.2 起该函数不再从 `@deepseek-ai/dsh-settings` 导出，但上游内部保留
-* 同一 pattern——本地按同一规则校验，预览宿主 API 漂移不再影响插件装载。
+* 路由：POST /api/billing/notify-claim
+*
+* 跨实例提醒认领（issue #44）：多实例（CLI + 桌面等）合法共存，各自轮询
+* 会重复弹通知。两级去重——进程内 Set 挡同进程的并发/重渲染（trigger 与仪表盘
+* 是两个组件实例，effect 同周期并发时本地 store 标记读到的还是旧值）；跨进程走
+* 认领端点（先到先得），另一实例刚发过则跳过。端点不可达（旧版本/网络故障）
+* 时放行，退化为原有 per-客户端去重。通知构造失败（平台限制）静默。
+*
+* 路由文件职责：handler + 模块级 `notifyClaims` 单例（与 `loadNotifications`
+* 共享内存状态——先到先得认领）。文件持久化（`writeFileAtomic`）由 index.ts 装配
+* 器通过 `claimsPath` 注入；handler 拿到路径后自行管理读写。
+*/
+/** 模块级认领表：loaded 表示是否已从磁盘反序列化；keys 是先到先得序。 */
+const notifyClaims = {
+	loaded: false,
+	keys: []
+};
+/** 注册路由到 cordis webServer effect；handler 闭包外只读 deps。 */
+function registerNotifyClaimRoute(ctx, deps) {
+	ctx.effect(() => ctx.webServer.register({
+		kind: "exact",
+		path: "/api/billing/notify-claim",
+		handler: async (req, res) => {
+			if (!guardLoopback(req, res, deps.trustedHosts)) return;
+			if (req.method !== "POST") {
+				res.writeHead(405, { "content-type": "application/json; charset=utf-8" });
+				res.end(JSON.stringify({ error: "method not allowed" }));
+				return;
+			}
+			if (!isLoopbackOrigin(req.headers.origin) || !(req.headers["content-type"] ?? "").toLowerCase().includes("application/json")) {
+				res.writeHead(403, { "content-type": "application/json; charset=utf-8" });
+				res.end(JSON.stringify({ error: "forbidden: loopback only" }));
+				return;
+			}
+			try {
+				let body = "";
+				for await (const chunk of req) {
+					body += String(chunk);
+					if (body.length > 2048) {
+						res.end(JSON.stringify({ error: "body too large" }));
+						return;
+					}
+				}
+				const parsed = JSON.parse(body === "" ? "{}" : body);
+				if (typeof parsed.key !== "string" || parsed.key === "" || parsed.key.length > 200) {
+					res.writeHead(400, { "content-type": "application/json; charset=utf-8" });
+					res.end(JSON.stringify({ error: "invalid key" }));
+					return;
+				}
+				if (!notifyClaims.loaded) {
+					notifyClaims.loaded = true;
+					try {
+						const stored = JSON.parse(await readFile(deps.claimsPath, "utf8"));
+						if (Array.isArray(stored.keys)) notifyClaims.keys = stored.keys.filter((k) => typeof k === "string");
+					} catch {}
+				}
+				if (notifyClaims.keys.includes(parsed.key)) {
+					res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+					res.end(JSON.stringify({ claimed: false }));
+					return;
+				}
+				notifyClaims.keys.push(parsed.key);
+				if (notifyClaims.keys.length > 400) notifyClaims.keys = notifyClaims.keys.slice(-200);
+				writeFileAtomic(deps.claimsPath, JSON.stringify({ keys: notifyClaims.keys }), {
+					mode: 384,
+					dirMode: 448
+				}).catch(() => {});
+				res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+				res.end(JSON.stringify({ claimed: true }));
+			} catch {
+				res.writeHead(400, { "content-type": "application/json; charset=utf-8" });
+				res.end(JSON.stringify({ error: "invalid" }));
+			}
+		}
+	}), "usage-billing: notify-claim route");
+}
+//#endregion
+//#region lib/types/routes/pricing.js
+/**
+* 路由：GET /api/billing/pricing + POST /api/billing/pricing/refresh
+*
+* 实时定价（汇率 + OpenRouter 模型价 + models.dev 目录外补充）的 GET/POST 同
+* concern，合一个文件：
+* - GET 由前端 30s 轮询 + 弹窗初始拉取触发，返回完整价目表文档（live + 内置
+*   目录 + 别名表 + syncedAt）。
+* - POST 是费率条「立即同步」按钮触发，强制服务端重新拉取一次；写操作额外
+*   校验 Origin 与 Content-Type。
+*
+* 路由文件只关心 HTTP 层：响应体序列化与缓存（pricingBodyCache）由 index.ts
+* 装配器通过 `body()` 闭包注入；服务端重拉逻辑（refreshPricing + 价格目录代际
+* 变化触发 reprice）也在装配器里，路由只通过 `refresh()` 触发。
+*/
+/** GET /api/billing/pricing。 */
+function registerGetRoute(ctx, deps) {
+	ctx.effect(() => ctx.webServer.register({
+		kind: "exact",
+		path: "/api/billing/pricing",
+		handler: async (req, res) => {
+			if (!guardLoopback(req, res, deps.trustedHosts)) return;
+			res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+			res.end(deps.body());
+		}
+	}), "usage-billing: pricing route");
+}
+/** POST /api/billing/pricing/refresh。 */
+function registerRefreshRoute(ctx, deps) {
+	ctx.effect(() => ctx.webServer.register({
+		kind: "exact",
+		path: "/api/billing/pricing/refresh",
+		handler: async (req, res) => {
+			if (!guardLoopback(req, res, deps.trustedHosts)) return;
+			if (req.method !== "POST") {
+				res.writeHead(405, { "content-type": "application/json; charset=utf-8" });
+				res.end(JSON.stringify({ error: "method not allowed" }));
+				return;
+			}
+			if (!isLoopbackOrigin(req.headers.origin)) {
+				res.writeHead(403, { "content-type": "application/json; charset=utf-8" });
+				res.end(JSON.stringify({ error: "forbidden: loopback only" }));
+				return;
+			}
+			if (!(req.headers["content-type"] ?? "").toLowerCase().includes("application/json")) {
+				res.writeHead(415, { "content-type": "application/json; charset=utf-8" });
+				res.end(JSON.stringify({ error: "unsupported content-type" }));
+				return;
+			}
+			await deps.refresh();
+			res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+			res.end(deps.body());
+		}
+	}), "usage-billing: pricing refresh route");
+}
+/** 一次性注册两条同 concern 路由。 */
+function registerPricingRoutes(ctx, deps) {
+	registerGetRoute(ctx, deps);
+	registerRefreshRoute(ctx, deps);
+}
+//#endregion
+//#region lib/types/routes/balance.js
+/**
+* 路由：GET /api/billing/balance
+*
+* 多平台余额（DeepSeek / Kimi / StepFun / SiliconFlow / xAI / 智谱 / 腾讯云
+* TokenHub 等）+ 用户自定义余额 + 声明端点 + 余额差对账。5 分钟缓存（避免
+* 每 30s 后台轮询打上游），in-flight 去重（并发请求共享同一次进行中的刷新）。
+*
+* 路由文件只关心 HTTP 缓存逻辑：5 分钟过期判定 + 失败时仍发旧缓存（不挂起
+* 已 writeHead 的响应）。上游查询（queryBalances / queryCustomBalances /
+* queryDeclaredEndpoints / reconcileBalanceDelta）在装配器里跑，路由只通过
+* `cached()` 与 `refreshOnce()` 拿到结果。
+*/
+function registerBalanceRoute(ctx, deps) {
+	ctx.effect(() => ctx.webServer.register({
+		kind: "exact",
+		path: "/api/billing/balance",
+		handler: async (req, res) => {
+			if (!guardLoopback(req, res, deps.trustedHosts)) return;
+			res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+			if (Date.now() - deps.cached().at < deps.cacheMs) {
+				res.end(JSON.stringify(deps.cached().doc));
+				return;
+			}
+			try {
+				await deps.refreshOnce();
+			} catch (error) {
+				console.warn("[usage-billing] refreshBalances failed; serving cached balances:", error);
+			}
+			res.end(JSON.stringify(deps.cached().doc));
+		}
+	}), "usage-billing: balance route");
+}
+//#endregion
+//#region lib/types/routes/usage-tool.js
+/**
+* 路由：GET/POST /api/billing/usage-tool
+*
+* usage_stats 工具开关：插件自带的读/写接口（不依赖宿主浏览器设置白名单）。
+* GET 返回当前是否注入；POST 写设置命名空间（重启应用后工具注入随新值生效）。
+*
+* 双世代宿主（issue #19 + #28 + v1.4.19）的接线在装配器里完成：
+* - 旧宿主 ≤0.1.6 走 `settings.register` 命名空间 scope。
+* - 宿主 0.1.7+ 注册面已移除，走 volatile config 投影。
+* 装配器提供 `read` / `write` 闭包，路由文件不感知双世代——`read()` 已内部分支
+* （scope 存在时读 scope，否则读 volatile + config base），`write(next)` 同理。
+* 工具注入由装配器的 `syncUsageTool` 驱动：写回后路由通过 `syncTool()` 显式调用一次
+* （幂等），覆盖「写回成功但引用未即时可见」的组合（测试替身不提交）。
+*/
+function registerUsageToolRoute(ctx, deps) {
+	ctx.effect(() => ctx.webServer.register({
+		kind: "exact",
+		path: "/api/billing/usage-tool",
+		handler: async (req, res) => {
+			if (!guardLoopback(req, res, deps.trustedHosts)) return;
+			if (req.method !== "GET" && req.method !== "POST") {
+				res.writeHead(405, { "content-type": "application/json; charset=utf-8" });
+				res.end(JSON.stringify({ error: "method not allowed" }));
+				return;
+			}
+			res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+			if (req.method === "GET") {
+				res.end(JSON.stringify({ enabled: deps.read() }));
+				return;
+			}
+			if (!isLoopbackOrigin(req.headers.origin)) {
+				res.writeHead(403, { "content-type": "application/json; charset=utf-8" });
+				res.end(JSON.stringify({ error: "forbidden: loopback only" }));
+				return;
+			}
+			if (!(req.headers["content-type"] ?? "").toLowerCase().includes("application/json")) {
+				res.writeHead(415, { "content-type": "application/json; charset=utf-8" });
+				res.end(JSON.stringify({ error: "unsupported content-type" }));
+				return;
+			}
+			try {
+				let body = "";
+				for await (const chunk of req) {
+					body += String(chunk);
+					if (body.length > 512) {
+						res.end(JSON.stringify({ error: "body too large" }));
+						return;
+					}
+				}
+				const next = JSON.parse(body === "" ? "{}" : body).enabled === true;
+				await deps.write(next);
+				deps.syncTool();
+				res.end(JSON.stringify({
+					ok: true,
+					enabled: next
+				}));
+			} catch (error) {
+				console.warn("[usage-billing] usage-tool toggle write-back failed:", error);
+				res.end(JSON.stringify({ error: "invalid" }));
+			}
+		}
+	}), "usage-billing: usage-tool route");
+}
+//#endregion
+//#region lib/types/routes/subscriptions.js
+/**
+* 路由：GET /api/billing/subscriptions
+*
+* 订阅套餐额度（Kimi / Z.ai Coding / OpenCode / MiniMax / OpenRouter / Claude /
+* CommandCode / 腾讯云 TokenHub 等）。5 分钟缓存 + in-flight 去重（与 balance
+* 同模式——并发请求共享同一次进行中的刷新）。
+*
+* 路由文件只关心 HTTP 缓存逻辑：超时或未命中时触发 refreshOnce，失败时仍用
+* 旧缓存（不挂起已 writeHead 的响应）。上游查询（collectSubscriptions +
+* resolveSubscriptionKeys + 适配器 + 套餐知识库）在装配器里跑。
+*/
+function registerSubscriptionsRoute(ctx, deps) {
+	ctx.effect(() => ctx.webServer.register({
+		kind: "exact",
+		path: "/api/billing/subscriptions",
+		handler: async (req, res) => {
+			if (!guardLoopback(req, res, deps.trustedHosts)) return;
+			res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+			if (Date.now() - deps.cached().at >= deps.cacheMs) try {
+				await deps.refreshOnce();
+			} catch (error) {
+				console.warn("[usage-billing] refreshQuotas failed; serving cached quotas:", error);
+			}
+			res.end(JSON.stringify({ quotas: deps.cached().quotas }));
+		}
+	}), "usage-billing: subscriptions route");
+}
+//#endregion
+//#region lib/types/routes/relay-quotas.js
+/**
+* 路由：GET /api/billing/relay-quotas
+*
+* 中转站额度（New API / Sub2API 余额 + 滚动窗口）。5 分钟缓存 + in-flight
+* 去重。诊断（每条路由的 origin / kind）随响应下发，供「我的中转站为什么不显
+* 示」自查。
+*
+* 路由文件只关心 HTTP 缓存 + 诊断序列化。上游查询（queryRelayQuotas +
+* 路由筛选 + isOfficialBaseUrl 排除）在装配器里跑。
+*/
+function registerRelayQuotasRoute(ctx, deps) {
+	ctx.effect(() => ctx.webServer.register({
+		kind: "exact",
+		path: "/api/billing/relay-quotas",
+		handler: async (req, res) => {
+			if (!guardLoopback(req, res, deps.trustedHosts)) return;
+			res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+			if (Date.now() - deps.cached().at >= deps.cacheMs) try {
+				await deps.refreshOnce();
+			} catch (error) {
+				console.warn("[usage-billing] refreshRelay failed; serving cached relay quotas:", error);
+			}
+			const diagnostics = deps.cached().quotas.map((row) => ({
+				route: row.route,
+				origin: row.origin,
+				kind: row.kind
+			}));
+			res.end(JSON.stringify({
+				quotas: deps.cached().quotas,
+				diagnostics
+			}));
+		}
+	}), "usage-billing: relay-quotas route");
+}
+//#endregion
+//#region lib/types/routes/usage-stats.js
+/**
+* 路由：GET /api/billing/usage-stats
+*
+* 实时用量聚合文档（byDay / byModel / bySession / bySite / byTurn / perf 等）。
+* stale-while-revalidate：聚合是全量扫描（重度用户上万条会话的冷启动折叠以
+* 分钟计），HTTP 请求绝不全程等它——只给 RESPONSE_BUDGET_MS 的等待预算，超
+* 预算立即回最近一次快照；后台折叠完成后快照随之刷新（挂在聚合 promise 上，
+* 与响应路径解耦）。宿主是单进程，慢响应期间事件循环被折叠占住，会话/模型
+* 列表 RPC 会一起饿死（用户反馈的启动卡顿）。
+*
+* 路由文件只关心 HTTP 拼装：
+* - decorate（注入 PACKAGE_VERSION / 预算 / 阈值）
+* - 聚合预算（Promise.race + setTimeout.unref）
+* - 响应体缓存（`statsBodyCache`：装饰 + 序列化结果按 doc 引用 + config 字段
+*   缓存，30s 轮询期间复用）
+* - 失败路径（聚合失败 → 读快照候选 → 仍无则 `{ error }`）
+*
+* 聚合器（`aggregator.aggregate()` / `sessionUsageOf()`）+ 快照读写 + 配置在
+* 装配器里跑，路由只通过 Deps 拿到回调。
+*/
+function registerUsageStatsRoute(ctx, deps) {
+	let statsBodyCache;
+	ctx.effect(() => ctx.webServer.register({
+		kind: "exact",
+		path: "/api/billing/usage-stats",
+		handler: async (req, res) => {
+			if (!guardLoopback(req, res, deps.trustedHosts)) return;
+			res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+			const decorate = (doc) => ({
+				...doc,
+				pluginVersion: deps.packageVersion,
+				...deps.config.monthlyBudget === void 0 ? {} : { budget: deps.config.monthlyBudget },
+				...deps.config.lowBalanceThreshold === void 0 ? {} : { lowBalanceThreshold: deps.config.lowBalanceThreshold }
+			});
+			const statsBodyOf = (doc) => {
+				const budget = deps.config.monthlyBudget;
+				const threshold = deps.config.lowBalanceThreshold;
+				if (statsBodyCache !== void 0 && statsBodyCache.doc === doc && statsBodyCache.budget === budget && statsBodyCache.threshold === threshold) return statsBodyCache.body;
+				const body = JSON.stringify(decorate(doc));
+				statsBodyCache = {
+					doc,
+					budget,
+					threshold,
+					body
+				};
+				return body;
+			};
+			const aggregating = deps.aggregator.aggregate();
+			aggregating.then((stats) => {
+				deps.persistSnapshot(decorate(stats));
+			}, () => {});
+			let fresh;
+			try {
+				fresh = await Promise.race([aggregating.then((stats) => stats), new Promise((resolve) => {
+					setTimeout(() => {
+						resolve(void 0);
+					}, deps.responseBudgetMs).unref();
+				})]);
+			} catch (error) {
+				console.error("[usage-billing] usage-stats aggregate failed, falling back to snapshot:", error);
+			}
+			if (fresh !== void 0) {
+				res.end(statsBodyOf(fresh));
+				return;
+			}
+			for (const candidate of deps.candidates) {
+				const doc = await deps.readSnapshot(candidate);
+				if (doc === null) continue;
+				res.end(JSON.stringify(decorate(doc)));
+				return;
+			}
+			res.end(JSON.stringify({ error: "usage stats unavailable" }));
+		}
+	}), "usage-billing: usage-stats route");
+}
+//#endregion
+//#region lib/types/client/usage-billing-settings.js
+/**
+* usage-stats 工具开关的共享设置契约（node 与 client 两端共用）。
+*
+* 旧宿主（≤0.1.6）把该开关存设置命名空间；宿主 0.1.7+ 起注册面移除，改存插件
+* 条目 config 的 volatile 字段（Config schema 投影），写回经 settings.update，
+* 提交后引用原位更新、`usage_stats` 工具即时注册/注销（无需重载应用）。
+* client 半区在「设置」Tab 渲染开关并经 /api/billing/usage-tool 写入，node 半区
+* 按宿主世代选择通道。缺省的默认行为是关闭——避免该工具默认占用模型每次请求
+* 的上下文（coding 场景通常在仪表盘看用量）。
+*/
+/** 设置命名空间 id（小写 kebab-case）。 */
+const BILLING_SETTINGS_NAMESPACE = "ui-usage-billing";
+/** 该命名空间下用户可编辑的字段名。 */
+const ENABLE_USAGE_STATS_TOOL_FIELD = "enableUsageStatsTool";
+//#endregion
+//#region lib/types/index.js
+/**
+* Usage billing surface plugin, node half.
+*
+* Serves `/api/billing/usage-stats`: real usage aggregated from every
+* persisted session log (see `aggregate.ts`) — the browser dashboard reads it
+* instead of showing an empty snapshot. Aggregation is stale-while-revalidate:
+* requests get a short wait budget and fall back to the freshest persisted
+* snapshot while a slow full fold keeps running in the background (a heavy
+* user's first fold takes minutes and must not starve the single-process
+* host's RPC). When `sessionPersistence` is unavailable (or aggregation
+* fails), the configured `statsPath` / `DSH_USAGE_STATS` / conventional JSON
+* file is served as a fallback, and a missing file answers `{ error }` so the
+* dashboard shows zeros, never fabricated samples.
 */
 const SETTINGS_NAMESPACE_PATTERN = /^[a-z][a-z0-9-]*$/;
 /** 校验并透过合法命名空间 id；非法值 fail-loud（与上游原行为一致）。 */
@@ -6955,13 +7347,7 @@ function validateSettingsNamespace(value) {
 const usageBillingSettingsNs = validateSettingsNamespace(BILLING_SETTINGS_NAMESPACE);
 /** 该命名空间的 wire schema：`enableUsageStatsTool` 布尔，默认关闭（issue 诉求）。 */
 const UsageBillingSettingsSchema = z.object({ [ENABLE_USAGE_STATS_TOOL_FIELD]: z.boolean().default(false) });
-/**
-* Loader 挂载时对条目 config 做校验的 Config 声明：`enableUsageStatsTool` 标记
-* volatile，宿主 0.1.7+ 设置系统据此把它投影为可实时编辑的开关（describe/update）。
-* schemastery 非严格 object 透传未声明键，其余 config 字段不受影响；未导出 Config
-* 的旧宿主直接把原始 config 交给 apply，普通布尔形态由读取端兼容。
-*/
-const Config = z.object({ [ENABLE_USAGE_STATS_TOOL_FIELD]: z.boolean().default(false).volatile() });
+/** 实时定价的后台刷新间隔（毫秒）：汇率/模型价低频变化，6 小时一次足够。 */
 /** 实时定价的后台刷新间隔（毫秒）：汇率/模型价低频变化，6 小时一次足够。 */
 const PRICING_REFRESH_INTERVAL_MS = 216e5;
 /** 历史回放预热的延迟：等宿主启动高峰（插件加载 / 路由挂载）过去再全量折叠，
@@ -7486,67 +7872,10 @@ function apply(ctx, config = {}) {
 		} catch {}
 		return null;
 	};
-	const notifyClaimsPath = `${snapshotPath}.notify-claims.json`;
-	const notifyClaims = {
-		loaded: false,
-		keys: []
-	};
-	ctx.effect(() => ctx.webServer.register({
-		kind: "exact",
-		path: "/api/billing/notify-claim",
-		handler: async (req, res) => {
-			if (!guardLoopback(req, res, trustedHosts)) return;
-			if (req.method !== "POST") {
-				res.writeHead(405, { "content-type": "application/json; charset=utf-8" });
-				res.end(JSON.stringify({ error: "method not allowed" }));
-				return;
-			}
-			if (!isLoopbackOrigin(req.headers.origin) || !(req.headers["content-type"] ?? "").toLowerCase().includes("application/json")) {
-				res.writeHead(403, { "content-type": "application/json; charset=utf-8" });
-				res.end(JSON.stringify({ error: "forbidden: loopback only" }));
-				return;
-			}
-			try {
-				let body = "";
-				for await (const chunk of req) {
-					body += String(chunk);
-					if (body.length > 2048) {
-						res.end(JSON.stringify({ error: "body too large" }));
-						return;
-					}
-				}
-				const parsed = JSON.parse(body === "" ? "{}" : body);
-				if (typeof parsed.key !== "string" || parsed.key === "" || parsed.key.length > 200) {
-					res.writeHead(400, { "content-type": "application/json; charset=utf-8" });
-					res.end(JSON.stringify({ error: "invalid key" }));
-					return;
-				}
-				if (!notifyClaims.loaded) {
-					notifyClaims.loaded = true;
-					try {
-						const stored = JSON.parse(await readFile(notifyClaimsPath, "utf8"));
-						if (Array.isArray(stored.keys)) notifyClaims.keys = stored.keys.filter((k) => typeof k === "string");
-					} catch {}
-				}
-				if (notifyClaims.keys.includes(parsed.key)) {
-					res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-					res.end(JSON.stringify({ claimed: false }));
-					return;
-				}
-				notifyClaims.keys.push(parsed.key);
-				if (notifyClaims.keys.length > 400) notifyClaims.keys = notifyClaims.keys.slice(-200);
-				writeFileAtomic(notifyClaimsPath, JSON.stringify({ keys: notifyClaims.keys }), {
-					mode: 384,
-					dirMode: 448
-				}).catch(() => {});
-				res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-				res.end(JSON.stringify({ claimed: true }));
-			} catch {
-				res.writeHead(400, { "content-type": "application/json; charset=utf-8" });
-				res.end(JSON.stringify({ error: "invalid" }));
-			}
-		}
-	}), "usage-billing: notify-claim route");
+	registerNotifyClaimRoute(ctx, {
+		trustedHosts,
+		claimsPath: `${snapshotPath}.notify-claims.json`
+	});
 	let usageToolDisposer;
 	let usageToolRegister;
 	const syncUsageTool = () => {
@@ -7747,15 +8076,11 @@ function apply(ctx, config = {}) {
 			clearInterval(timer);
 		};
 	}, "usage-billing: pricing refresh timer");
-	ctx.effect(() => ctx.webServer.register({
-		kind: "exact",
-		path: "/api/billing/pricing",
-		handler: async (req, res) => {
-			if (!guardLoopback(req, res, trustedHosts)) return;
-			res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-			res.end(pricingBody());
-		}
-	}), "usage-billing: pricing route");
+	registerPricingRoutes(ctx, {
+		trustedHosts,
+		body: pricingBody,
+		refresh: refreshPricing
+	});
 	ctx.effect(() => ctx.webServer.register({
 		kind: "exact",
 		path: "/api/billing/pricing/refresh",
@@ -7841,80 +8166,22 @@ function apply(ctx, config = {}) {
 		});
 		return balanceInflight;
 	};
-	ctx.effect(() => ctx.webServer.register({
-		kind: "exact",
-		path: "/api/billing/balance",
-		handler: async (req, res) => {
-			if (!guardLoopback(req, res, trustedHosts)) return;
-			res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-			if (Date.now() - balanceCache.at < BALANCE_CACHE_MS) {
-				res.end(JSON.stringify(balanceCache.doc));
-				return;
-			}
-			try {
-				await refreshBalanceOnce();
-			} catch (error) {
-				console.warn("[usage-billing] refreshBalances failed; serving cached balances:", error);
-			}
-			res.end(JSON.stringify(balanceCache.doc));
-		}
-	}), "usage-billing: balance route");
-	ctx.effect(() => ctx.webServer.register({
-		kind: "exact",
-		path: "/api/billing/usage-tool",
-		handler: async (req, res) => {
-			if (!guardLoopback(req, res, trustedHosts)) return;
-			if (req.method !== "GET" && req.method !== "POST") {
-				res.writeHead(405, { "content-type": "application/json; charset=utf-8" });
-				res.end(JSON.stringify({ error: "method not allowed" }));
-				return;
-			}
-			res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-			const enabled = usageSettingsScope !== void 0 ? usageSettingsScope.get().enableUsageStatsTool : readUsageStatsToggle(config);
-			if (req.method === "GET") {
-				res.end(JSON.stringify({ enabled }));
-				return;
-			}
-			if (!isLoopbackOrigin(req.headers.origin)) {
-				res.writeHead(403, { "content-type": "application/json; charset=utf-8" });
-				res.end(JSON.stringify({ error: "forbidden: loopback only" }));
-				return;
-			}
-			if (!(req.headers["content-type"] ?? "").toLowerCase().includes("application/json")) {
-				res.writeHead(415, { "content-type": "application/json; charset=utf-8" });
-				res.end(JSON.stringify({ error: "unsupported content-type" }));
-				return;
-			}
-			try {
-				let body = "";
-				for await (const chunk of req) {
-					body += String(chunk);
-					if (body.length > 512) {
-						res.end(JSON.stringify({ error: "body too large" }));
-						return;
-					}
-				}
-				const next = JSON.parse(body === "" ? "{}" : body).enabled === true;
-				if (usageSettingsScope !== void 0) {
-					await usageSettingsScope.update({ enableUsageStatsTool: next });
-					syncUsageTool();
-				} else if (liveSettings !== void 0) {
-					await liveSettings.update(liveSettings.ns, { [ENABLE_USAGE_STATS_TOOL_FIELD]: next });
-					syncUsageTool();
-				} else {
-					res.end(JSON.stringify({ error: "settings unavailable" }));
-					return;
-				}
-				res.end(JSON.stringify({
-					ok: true,
-					enabled: next
-				}));
-			} catch (error) {
-				console.warn("[usage-billing] usage-tool toggle write-back failed:", error);
-				res.end(JSON.stringify({ error: "invalid" }));
-			}
-		}
-	}), "usage-billing: usage-tool route");
+	registerBalanceRoute(ctx, {
+		trustedHosts,
+		cached: () => balanceCache,
+		refreshOnce: refreshBalanceOnce,
+		cacheMs: BALANCE_CACHE_MS
+	});
+	registerUsageToolRoute(ctx, {
+		trustedHosts,
+		read: () => usageSettingsScope !== void 0 ? usageSettingsScope.get().enableUsageStatsTool : readUsageStatsToggle(config),
+		write: async (next) => {
+			if (usageSettingsScope !== void 0) await usageSettingsScope.update({ enableUsageStatsTool: next });
+			else if (liveSettings !== void 0) await liveSettings.update(liveSettings.ns, { [ENABLE_USAGE_STATS_TOOL_FIELD]: next });
+			else throw new Error("settings unavailable");
+		},
+		syncTool: syncUsageTool
+	});
 	let quotaCache = {
 		at: 0,
 		quotas: []
@@ -7958,20 +8225,12 @@ function apply(ctx, config = {}) {
 		});
 		return quotasInflight;
 	};
-	ctx.effect(() => ctx.webServer.register({
-		kind: "exact",
-		path: "/api/billing/subscriptions",
-		handler: async (req, res) => {
-			if (!guardLoopback(req, res, trustedHosts)) return;
-			res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-			if (Date.now() - quotaCache.at >= SUBSCRIPTION_CACHE_MS) try {
-				await refreshQuotasOnce();
-			} catch (error) {
-				console.warn("[usage-billing] refreshQuotas failed; serving cached quotas:", error);
-			}
-			res.end(JSON.stringify({ quotas: quotaCache.quotas }));
-		}
-	}), "usage-billing: subscriptions route");
+	registerSubscriptionsRoute(ctx, {
+		trustedHosts,
+		cached: () => quotaCache,
+		refreshOnce: refreshQuotasOnce,
+		cacheMs: SUBSCRIPTION_CACHE_MS
+	});
 	let relayCache = {
 		at: 0,
 		quotas: []
@@ -8001,81 +8260,22 @@ function apply(ctx, config = {}) {
 		});
 		return relayInflight;
 	};
-	ctx.effect(() => ctx.webServer.register({
-		kind: "exact",
-		path: "/api/billing/relay-quotas",
-		handler: async (req, res) => {
-			if (!guardLoopback(req, res, trustedHosts)) return;
-			res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-			if (Date.now() - relayCache.at >= SUBSCRIPTION_CACHE_MS) try {
-				await refreshRelayOnce();
-			} catch (error) {
-				console.warn("[usage-billing] refreshRelay failed; serving cached relay quotas:", error);
-			}
-			const diagnostics = relayCache.quotas.map((row) => ({
-				route: row.route,
-				origin: row.origin,
-				kind: row.kind
-			}));
-			res.end(JSON.stringify({
-				quotas: relayCache.quotas,
-				diagnostics
-			}));
-		}
-	}), "usage-billing: relay-quotas route");
-	let statsBodyCache;
-	ctx.effect(() => ctx.webServer.register({
-		kind: "exact",
-		path: "/api/billing/usage-stats",
-		handler: async (req, res) => {
-			if (!guardLoopback(req, res, trustedHosts)) return;
-			res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-			const decorate = (doc) => ({
-				...doc,
-				pluginVersion: PACKAGE_VERSION,
-				...config.monthlyBudget === void 0 ? {} : { budget: config.monthlyBudget },
-				...config.lowBalanceThreshold === void 0 ? {} : { lowBalanceThreshold: config.lowBalanceThreshold }
-			});
-			const statsBodyOf = (doc) => {
-				const budget = config.monthlyBudget;
-				const threshold = config.lowBalanceThreshold;
-				if (statsBodyCache !== void 0 && statsBodyCache.doc === doc && statsBodyCache.budget === budget && statsBodyCache.threshold === threshold) return statsBodyCache.body;
-				const body = JSON.stringify(decorate(doc));
-				statsBodyCache = {
-					doc,
-					budget,
-					threshold,
-					body
-				};
-				return body;
-			};
-			const aggregating = aggregator.aggregate();
-			aggregating.then((stats) => {
-				persistSnapshot(decorate(stats));
-			}, () => {});
-			let fresh;
-			try {
-				fresh = await Promise.race([aggregating.then((stats) => stats), new Promise((resolve) => {
-					setTimeout(() => {
-						resolve(void 0);
-					}, RESPONSE_BUDGET_MS).unref();
-				})]);
-			} catch (error) {
-				console.error("[usage-billing] usage-stats aggregate failed, falling back to snapshot:", error);
-			}
-			if (fresh !== void 0) {
-				res.end(statsBodyOf(fresh));
-				return;
-			}
-			for (const candidate of candidates) {
-				const doc = await readSnapshot(candidate);
-				if (doc === null) continue;
-				res.end(JSON.stringify(decorate(doc)));
-				return;
-			}
-			res.end(JSON.stringify({ error: "usage stats unavailable" }));
-		}
-	}), "usage-billing: usage-stats route");
+	registerRelayQuotasRoute(ctx, {
+		trustedHosts,
+		cached: () => relayCache,
+		refreshOnce: refreshRelayOnce,
+		cacheMs: SUBSCRIPTION_CACHE_MS
+	});
+	registerUsageStatsRoute(ctx, {
+		trustedHosts,
+		aggregator,
+		config,
+		candidates,
+		persistSnapshot,
+		readSnapshot,
+		packageVersion: PACKAGE_VERSION,
+		responseBudgetMs: RESPONSE_BUDGET_MS
+	});
 }
 //#endregion
-export { Config, adaptSessionPersistence, apply, createFileUsageLedgerStore, guardLoopback, inject, normalizeTrustedHosts, readPiAiProviderRoutes, readRegisteredProviderIds, resolveSubscriptionKeys };
+export { adaptSessionPersistence, apply, createFileUsageLedgerStore, guardLoopback, hostNameOf, inject, isLoopbackHost, isLoopbackOrigin, isLoopbackPeer, normalizeTrustedHosts, readPiAiProviderRoutes, readRegisteredProviderIds, resolveSubscriptionKeys };
