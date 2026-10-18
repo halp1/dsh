@@ -8,6 +8,7 @@
 
 import type { SessionListState, SessionSummary } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
+import { swallowed } from '../silent.ts'
 
 /** 配置持久化 key：开启/关闭 + 提醒持续模式（0=常驻，其余=秒后自动关）。 */
 export const COMPLETION_NOTIFY_KEY = 'dsh-billing-completion-notify-v1'
@@ -94,6 +95,7 @@ export function installCompletionNotifier(list: ObservableSnapshot<SessionListSt
       }
     } catch {
       // 某些浏览器 Notification 构造失败：静默，不影响其它能力。
+      swallowed('notification-constructor-failed')
     }
   }
 

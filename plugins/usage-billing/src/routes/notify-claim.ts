@@ -17,6 +17,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { guardLoopback, isLoopbackOrigin } from '../guard.ts'
+import { swallowed } from '../silent.ts'
 
 /** 路由依赖：装配器注入，无需直接读 ctx。 */
 export interface NotifyClaimDeps {
@@ -75,6 +76,7 @@ export function registerNotifyClaimRoute(ctx: Context, deps: NotifyClaimDeps): v
               if (Array.isArray(stored.keys)) notifyClaims.keys = stored.keys.filter((k): k is string => typeof k === 'string')
             } catch {
               // 首次运行或文件损坏：从空表开始（去重退化为进程内，下次认领重建文件）。
+              swallowed('notify-claims-file-unreadable')
             }
           }
           if (notifyClaims.keys.includes(parsed.key)) {

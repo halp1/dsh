@@ -1,5 +1,36 @@
-/* Usage billing dashboard: sidebar trigger + centered modal dashboard.
-   Refined-tech palette: token-driven surfaces, 1px borders, no gradients. */
+/*
+ * UsageBilling.module.css —— 仪表盘全表面样式（S-5 重组：单文件保留 + TOC）
+ *
+ * 为何不按 surface 拆成多个 .module.css（2026-10-18 实测）：本文件有 41 个
+ * 跨引用多类选择器（如 `.sessionGroupRow .modelName::before`、`.switchOn
+ * .switchKnob`、`.ubTable thead th.numCol`）——CSS Modules 的类名按文件哈希，
+ * 任何 surface 切分都会把两侧类名哈希到不同模块、41 处后代选择器**静默失效**
+ * （构建期不报错，运行期才可见）。E-3 拆 aggregate.ts 的教训同源：机械拆分
+ * 交错内容的风险大于收益。
+ *
+ * 因此 S-5 交付的是：①本 TOC；②lint.mjs 的 CSS↔TSX parity 守卫（css.X
+ * 引用必须有 .X 定义，已清出 8 个历史死引用）；③:root 设计令牌集中于顶部。
+ * 拆分的前置条件：先把 41 处跨引用改为主类挂新类（每处确认视觉等价），
+ * 工作量到时再评估。
+ *
+ * 目录（按区块出现顺序；类名与 TSX 的 css.X 一一对应，parity 由 lint 守卫）：
+ *   1.  设计令牌（:root --ds-*）
+ *   2.  侧栏触发卡（trigger / railButton / triggerPop / metric* / float*）
+ *   3.  仪表盘框架（dashboard / dashboardHead / tabNav / tabButton / modalFooter）
+ *   4.  概览 Tab（hero / kpi* / delta / reconcile* / unpriced* / stale* / notice*）
+ *   5.  热力图（heatmap* / chart*）
+ *   6.  设置 Tab（settings* / set* / density* / switch / ctl* / prog / budget* /
+ *       rdo* / floatMode* / userPrice*）
+ *   7.  趋势 Tab（trend / range* / share*）
+ *   8.  厂商 Tab（panel* / provider* / health* / kind* / site* / balance* /
+ *       subscription* / model* / table* / ub* / session* / export* / empty* /
+ *       unknown* / na / numCol）
+ *   9.  费率 Tab（ubAlert / ubRate / ubModel / ubChip* / ubExtra* / ubNotes /
+ *       band* / flat*）
+ *  10.  即时代费条（fee*）
+ *  11.  峰谷提醒浮层（peakAlert*）
+ *  12.  杂项（na / close* / currency*）
+ */
 
 /* 设计令牌（精致科技风）。暗亮机制：本文件无 [data-theme] 或媒体查询机制，取色全部经宿主 --dsw-* 别名（亮=body、暗=body[data-ds-dark-theme]），故表面/文字/描边令牌从宿主别名派生以自动跟随暗亮；因 var() 在声明元素上求值而宿主别名定义于 body，派生块挂 body 而非 :root。语义色/图表色/圆角/动效两主题同值，冻结硬编码。 */
 /* 语义六色挂 :root：硬编码两主题同值，且 pricing.ts 的 resolveToken 从 documentElement 读取，body 声明不向上继承、html 读不到。 */

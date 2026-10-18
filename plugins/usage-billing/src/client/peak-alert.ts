@@ -8,6 +8,7 @@
  */
 
 import { channelUpcomingSwitch, type PriceTierId, type RateChannel } from './pricing.ts'
+import { swallowed } from '../silent.ts'
 
 /** 提醒模式：只提醒进入峰时 / 只提醒进入平价 / 峰与谷都提醒。 */
 export type PeakAlertMode = 'peak' | 'offPeak' | 'both'
@@ -76,6 +77,7 @@ export function savePeakAlertConfig(config: PeakAlertConfig): void {
     localStorage.setItem(PEAK_ALERT_KEY, JSON.stringify(config))
   } catch {
     // localStorage 不可用（隐私模式/沙箱）时忽略。
+    swallowed('peak-config-storage-unavailable')
   }
 }
 

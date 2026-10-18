@@ -235,11 +235,11 @@ export function UsageHeatmap({ days, currency, now, t, range = 'month', unit = '
           </div>
         </div>
         <div className={css.heatmapFooter}>
-          <span className={css.heatmapLegendText}>{t('heatmapLess')}</span>
+          <span>{t('heatmapLess')}</span>
           <span className={css.heatmapLegend}>
             {LEVEL_COLORS.map((color, level) => <i key={level} style={{ background: color }} />)}
           </span>
-          <span className={css.heatmapLegendText}>{t('heatmapMore')}</span>
+          <span>{t('heatmapMore')}</span>
         </div>
       </div>
     )
@@ -274,11 +274,11 @@ export function UsageHeatmap({ days, currency, now, t, range = 'month', unit = '
         )}
       </div>
       <div className={css.heatmapFooter}>
-        <span className={css.heatmapLegendText}>{t('heatmapLess')}</span>
+        <span>{t('heatmapLess')}</span>
         <span className={css.heatmapLegend}>
           {LEVEL_COLORS.map((color, level) => <i key={level} style={{ background: color }} />)}
         </span>
-        <span className={css.heatmapLegendText}>{t('heatmapMore')}</span>
+        <span>{t('heatmapMore')}</span>
         {hover !== null && (
           <span className={css.heatmapHover} data-testid="heatmap-hover">
             {hover.date} · {fmt(hover.value)}

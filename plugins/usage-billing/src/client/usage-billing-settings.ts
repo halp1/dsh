@@ -11,6 +11,7 @@
 
 // type-only import：`UserPriceEntry` 是结构契约，运行时无依赖、不引入 node 侧耦合。
 import type { CostCurrency, UserPriceEntry } from './pricing.ts'
+import { swallowed } from '../silent.ts'
 
 /** 设置命名空间 id（小写 kebab-case）。 */
 export const BILLING_SETTINGS_NAMESPACE = 'ui-usage-billing'
@@ -38,6 +39,7 @@ function writeStored(key: string, value: string): void {
     localStorage.setItem(key, value)
   } catch {
     // ignore: storage full / unavailable — display preference is non-critical.
+    swallowed('display-pref-write-failed')
   }
 }
 

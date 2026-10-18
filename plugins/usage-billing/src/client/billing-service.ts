@@ -7,6 +7,8 @@
  * 只读费用快照并触发弹窗打开——billing 不反向依赖任何主题包。
  */
 
+import { swallowed } from '../silent.ts'
+
 /** 计费摘要（精简版，仅供外部展示；金额为人民币元）。 */
 export interface BillingCosts {
   todayCost: number
@@ -61,6 +63,7 @@ export function createBillingMetrics(): BillingMetricsRuntime {
           listener(next)
         } catch {
           // 消费方回调异常：静默，不阻断发布链。
+          swallowed('billing-costs-listener-threw')
         }
       }
     },

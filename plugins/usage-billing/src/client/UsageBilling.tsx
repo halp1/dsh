@@ -1729,7 +1729,7 @@ function BillingDashboard({
           <div>
             {/* ZINE: 装饰孔位（head 锚点：窗口 chrome），由主题插件注入；未注入时为空 */}
             {renderSlot('billing.dashboard.decor', { position: 'head' })}
-            <div className={css.headTitleRow}>
+            <div>
               <h2 className={css.dashboardTitle}>
                 {t('title')}
               </h2>
@@ -2325,7 +2325,7 @@ function BillingDashboard({
                     </p>
                   )}
                   {/* v1.5 新增：密度模式与动效强度开关（设置 - 显示分组最前） */}
-                  <div hidden={settingsSectionHiddenBy(SETTINGS_KEYWORDS.display)} className={clsx(css.setCard, css.densityCard)} data-testid="billing-density-motion-card">
+                  <div hidden={settingsSectionHiddenBy(SETTINGS_KEYWORDS.display)} className={css.setCard} data-testid="billing-density-motion-card">
                     <div className={css.setCardHead}>
                       <div className={css.setCardMeta}>
                         <h3 className={css.setCardTitle}>{t('settingsSectionDisplay')}</h3>
@@ -2797,7 +2797,7 @@ function BillingDashboard({
             <div className={css.tabPanel} data-testid="billing-tab-panel-trends">
               {/* 1. 费用趋势：ub-card —— 头部(标题 + 7天/30天 与 费用/Token 分段) + 堆叠面积图。 */}
               <section
-                className={clsx(css.ubCard, css.trendPanel)}
+                className={css.ubCard}
                 data-testid="billing-panel-trend"
               >
                 <div className={css.ubCardHead}>
@@ -3057,7 +3057,6 @@ function BillingDashboard({
                                     <span
                                       className={clsx(
                                         css.kindBadge,
-                                        group.channelKind === 'direct' && css.kindBadgeDirect,
                                         group.channelKind === 'site' && css.kindBadgeRelay,
                                         group.channelKind === 'unknown' && css.kindBadgeUnknown,
                                       )}
@@ -3157,7 +3156,7 @@ function BillingDashboard({
                         )}
                         {/* 模型用量子表：无余额列（余额已在厂商头部显示一次）。 */}
                         {group.models.length > 0 && (
-                          <div className={clsx(css.tableScroll, css.modelTableScroll)} data-testid="billing-table-scroll">
+                          <div className={css.tableScroll} data-testid="billing-table-scroll">
                             <table className={css.modelTable}>
                               {modelTableHead}
                               <tbody>
@@ -3659,7 +3658,7 @@ function BillingDashboard({
                                     <span className={css.ubChipPeak}>
                                       {/* 延迟档语义（Gemini Standard/Flex）与时段语义（峰谷）标签不同。 */}
                                       <span className={css.ubChipLabel}>{entry.tierSemantics === 'latency' ? t('ubStd') : t('ubPeak')}</span>
-                                      <span className={css.num}>
+                                      <span>
                                         {unitMoney(entry.price.input, entry.price.currency)}/{unitMoney(entry.price.output, entry.price.currency)}
                                       </span>
                                     </span>
@@ -3667,7 +3666,7 @@ function BillingDashboard({
                                   <td className={css.numCol}>
                                     <span className={css.ubChipOff}>
                                       <span className={css.ubChipLabel}>{entry.tierSemantics === 'latency' ? 'Flex' : t('ubOff')}</span>
-                                      <span className={css.num}>
+                                      <span>
                                         {unitMoney(entry.price.offPeak.input, entry.price.currency)} / {unitMoney(entry.price.offPeak.output, entry.price.currency)}
                                       </span>
                                     </span>

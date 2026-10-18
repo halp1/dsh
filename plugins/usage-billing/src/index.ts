@@ -47,6 +47,7 @@ import type { UsageBillingConfig } from './config.ts'
 import { collectSubscriptions, EMPTY_SUBSCRIPTION_KEYS, identifySubscriptionPlans, parseOpenCodeAuthDocument, type IdentifiedSubscriptionPlan, type SubscriptionKeys } from './subscriptions.ts'
 import { isOfficialBaseUrl, queryRelayQuotas, type RelayRoute } from './relay.ts'
 import { planTypeOf, subscriptionFeeCnyOf } from './client/plan-knowledge.ts'
+import { swallowed } from './silent.ts'
 // v1.5.2 抽出：共享 loopback 守卫 + 9 条 HTTP 路由的注册块各自独立成文件，apply() 收缩为装配器。
 import { normalizeTrustedHosts } from './guard.ts'
 import { registerNotifyClaimRoute } from './routes/notify-claim.ts'
@@ -199,6 +200,7 @@ export function createFileUsageLedgerStore(ledgerPath: string): UsageLedgerStore
           }
         } catch {
           // Main file missing/corrupt: try the backup; both absent means a new ledger.
+          swallowed('ledger-main-unreadable')
         }
       }
       return undefined
@@ -435,8 +437,9 @@ export async function resolveSubscriptionKeys(
     try {
       const resolved = await credentials.resolve(credentialRef(env))
       if (resolved?.value !== undefined && resolved.value !== '') keys[key] = resolved.value
-    } catch {
+    } catch (error) {
       // 凭据解析失败跳过该 provider（保持未配置）。
+      swallowed('credential-resolve-failed', error)
     }
   }
   // zai-coding-cn 是智谱国内域：跟随它时区域固定为 bigmodel-cn。只影响未显式
@@ -471,6 +474,7 @@ async function readOpenCodeToken(): Promise<string> {
     return parseOpenCodeAuthDocument(auth)
   } catch {
     // 文件不存在 / 读不动 / JSON 解析失败 → 视为没有凭据，不报错。
+    swallowed('opencode-auth-missing')
   }
   return ''
 }
@@ -619,6 +623,7 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
       }
     } catch {
       // 基准文件缺失/损坏：视为首次，重新打基准。
+      swallowed('reconcile-ref-missing')
     }
   })()
   const persistReconcileRef = (): void => {
@@ -721,11 +726,13 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
         await writeFileAtomic(`${snapshotPath}.bak`, existing, { mode: 0o600, dirMode: 0o700 })
       } catch {
         // 旧快照不存在（首次运行）或不可读：无需备份，直接写新快照。
+        swallowed('snapshot-bak-missing')
       }
       try {
         await writeFileAtomic(snapshotPath, payload, { mode: 0o600, dirMode: 0o700 })
       } catch {
         // 快照写失败不影响服务：内存聚合值已下发。
+        swallowed('snapshot-write-failed')
       }
     })()
   }
@@ -737,6 +744,7 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
         return JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>
       } catch {
         // 文件不存在或 JSON 损坏：尝试下一个（主文件失败 → `.bak`；都失败返回 null）。
+        swallowed('snapshot-candidate-unreadable')
       }
     }
     return null
@@ -999,6 +1007,7 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
         todayOfficialCost = stats.byDay[today]?.officialCost ?? 0
       } catch {
         // 聚合失败时不阻塞余额查询；对账基准确认可用后仍返回（消费计 0 下次再核）。
+        swallowed('reconcile-aggregate-skipped')
       }
       const result = reconcileBalanceDelta(reconcileRef, official, todayOfficialCost, today, now)
       const refChanged = result.ref !== null && result.ref !== reconcileRef

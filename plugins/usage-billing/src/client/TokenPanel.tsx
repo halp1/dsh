@@ -484,7 +484,7 @@ export function TokenPanel(props: {
                   const cell = activeModelDay.models[m.key]
                   if (cell === undefined) return null
                   return (
-                    <div key={m.key} className={css.chartTooltipModel}>
+                    <div key={m.key}>
                       <div className={clsx(css.chartTooltipRow, css.chartTooltipSplit)}>
                         <span className={css.chartTooltipLabel}>
                           <span className={css.chartTooltipSwatch} style={{ background: m.color }} />

@@ -15,6 +15,7 @@
 import type { SubscriptionPlanConfig, SubscriptionQuota, SubscriptionStatus, SubscriptionWindow } from './pricing-shared.ts'
 import { createCooldownGate, withRetry } from './resilience.ts'
 import { callTokenHub, firstEnabledTeamId, parseTencentCredential, pickRemainingQuota, pickTotalQuota } from './tc3.ts'
+import { swallowed } from './silent.ts'
 
 /** 每平台熔断门：某个订阅适配器连续可重试失败（网络 / 5xx / 429）达阈值后
  *  短路由不可用，避免 30 秒轮询对已故障的上游反复打满超时。鉴权失败（unauthorized）
@@ -472,6 +473,7 @@ async function collectZai(keys: SubscriptionKeys, config: SubscriptionPlanConfig
       if (zaiEnvelopeStatus(subscription) !== undefined) subscription = null
     } catch {
       // Plan label/reset metadata is optional when quota succeeded.
+      swallowed('zai-plan-metadata-missing')
     }
     const parsed = parseZai(quota, subscription)
     return {

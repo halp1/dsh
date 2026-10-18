@@ -5668,6 +5668,38 @@ async function fetchLivePricing() {
 	};
 }
 //#endregion
+//#region lib/types/silent.js
+/**
+* 静默吞错的结构化记录（S-6）：「缺失=未配置」类 catch 的统一出口。
+*
+* 本仓 78 处 server 端 catch 多数是有意的静默（文件缺失=首次运行、凭据未
+* 配置=跳过该 provider），此前唯一载体是注释——用户报「X 不工作」时只能靠
+* 猜。本工具把这些静默升级为**节流的结构化日志**：同 reason 5 分钟最多一条
+* info，宿主日志可 grep `swallowed:`，诊断时看得到「哪个环节吞了什么」，
+* 而又不把已知常态刷成告警噪音。
+*
+* 不取代 console.warn——已知异常需要用户行动的（账本损坏、刷新失败）继续
+* warn；这里只收「确认无害的静默」。节流状态导出重置仅供测试。
+*/
+const THROTTLE_MS = 3e5;
+const lastLoggedAt = /* @__PURE__ */ new Map();
+/**
+* 记录一次有意的静默吞错。
+* @param reason - 稳定的短横线 reason 键（如 `reconcile-ref-missing`），节流以此为粒度。
+* @param error - 可选的原始异常（Error 打 message，其他值原样）。
+*/
+function swallowed(reason, error) {
+	const now = Date.now();
+	const last = lastLoggedAt.get(reason);
+	if (last !== void 0 && now - last < THROTTLE_MS) return;
+	lastLoggedAt.set(reason, now);
+	if (error === void 0) {
+		console.info(`[usage-billing] swallowed: ${reason}`);
+		return;
+	}
+	console.info(`[usage-billing] swallowed: ${reason}`, error instanceof Error ? error.message : error);
+}
+//#endregion
 //#region lib/types/subscriptions.js
 /**
 * Subscription-plan quota polling (node half): how much of each coding/token
@@ -6067,7 +6099,9 @@ async function collectZai(keys, config, timeoutMs) {
 		try {
 			subscription = await requestJson(`${host}/api/biz/subscription/list`, init, timeoutMs);
 			if (zaiEnvelopeStatus(subscription) !== void 0) subscription = null;
-		} catch {}
+		} catch {
+			swallowed("zai-plan-metadata-missing");
+		}
 		const parsed = parseZai(quota, subscription);
 		return {
 			provider: config.provider,
@@ -6982,7 +7016,9 @@ function registerNotifyClaimRoute(ctx, deps) {
 					try {
 						const stored = JSON.parse(await readFile(deps.claimsPath, "utf8"));
 						if (Array.isArray(stored.keys)) notifyClaims.keys = stored.keys.filter((k) => typeof k === "string");
-					} catch {}
+					} catch {
+						swallowed("notify-claims-file-unreadable");
+					}
 				}
 				if (notifyClaims.keys.includes(parsed.key)) {
 					res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
@@ -7394,16 +7430,6 @@ function registerUsageStatsRoute(ctx, deps) {
 }
 //#endregion
 //#region lib/types/client/usage-billing-settings.js
-/**
-* usage-stats 工具开关的共享设置契约（node 与 client 两端共用）。
-*
-* 旧宿主（≤0.1.6）把该开关存设置命名空间；宿主 0.1.7+ 起注册面移除，改存插件
-* 条目 config 的 volatile 字段（Config schema 投影），写回经 settings.update，
-* 提交后引用原位更新、`usage_stats` 工具即时注册/注销（无需重载应用）。
-* client 半区在「设置」Tab 渲染开关并经 /api/billing/usage-tool 写入，node 半区
-* 按宿主世代选择通道。缺省的默认行为是关闭——避免该工具默认占用模型每次请求
-* 的上下文（coding 场景通常在仪表盘看用量）。
-*/
 /** 设置命名空间 id（小写 kebab-case）。 */
 const BILLING_SETTINGS_NAMESPACE = "ui-usage-billing";
 /** 该命名空间下用户可编辑的字段名。 */
@@ -7512,7 +7538,9 @@ function createFileUsageLedgerStore(ledgerPath) {
 					const candidate = parsed;
 					if (candidate.version === 1 && Array.isArray(candidate.sessions)) return parsed;
 				}
-			} catch {}
+			} catch {
+				swallowed("ledger-main-unreadable");
+			}
 		},
 		async save(document) {
 			await mkdir(dirname(ledgerPath), {
@@ -7756,7 +7784,9 @@ async function resolveSubscriptionKeys(settings, credentials) {
 		try {
 			const resolved = await credentials.resolve(credentialRef(env));
 			if (resolved?.value !== void 0 && resolved.value !== "") keys[key] = resolved.value;
-		} catch {}
+		} catch (error) {
+			swallowed("credential-resolve-failed", error);
+		}
 	}
 	if (providers?.["zai-coding-cn"]?.apiKeyEnv !== void 0 && keys.zaiCnApiKey !== "") keys.zaiRegion = "bigmodel-cn";
 	if (keys.opencodeApiKey === "") keys.opencodeApiKey = await readOpenCodeToken();
@@ -7782,7 +7812,9 @@ async function resolveSubscriptionKeys(settings, credentials) {
 async function readOpenCodeToken() {
 	try {
 		return parseOpenCodeAuthDocument(JSON.parse(await readFile(join(homedir(), ".local", "share", "opencode", "auth.json"), "utf8")));
-	} catch {}
+	} catch {
+		swallowed("opencode-auth-missing");
+	}
 	return "";
 }
 /**
@@ -7874,7 +7906,9 @@ function apply(ctx, config = {}) {
 				const candidate = ref;
 				if (typeof candidate.date === "string" && typeof candidate.total === "number" && typeof candidate.granted === "number" && typeof candidate.topped === "number" && typeof candidate.currency === "string") reconcileRef = candidate;
 			}
-		} catch {}
+		} catch {
+			swallowed("reconcile-ref-missing");
+		}
 	})();
 	const persistReconcileRef = () => {
 		if (reconcileRef === null) return;
@@ -7943,20 +7977,26 @@ function apply(ctx, config = {}) {
 					mode: 384,
 					dirMode: 448
 				});
-			} catch {}
+			} catch {
+				swallowed("snapshot-bak-missing");
+			}
 			try {
 				await writeFileAtomic(snapshotPath, payload, {
 					mode: 384,
 					dirMode: 448
 				});
-			} catch {}
+			} catch {
+				swallowed("snapshot-write-failed");
+			}
 		})();
 	};
 	/** 读一个快照候选并解析成对象：主文件优先；主文件损坏时回退上一版 `.bak`（P0-3 崩溃恢复）。 */
 	const readSnapshot = async (candidate) => {
 		for (const path of [candidate, `${candidate}.bak`]) try {
 			return JSON.parse(await readFile(path, "utf8"));
-		} catch {}
+		} catch {
+			swallowed("snapshot-candidate-unreadable");
+		}
 		return null;
 	};
 	registerNotifyClaimRoute(ctx, {
@@ -8198,7 +8238,9 @@ function apply(ctx, config = {}) {
 			let todayOfficialCost = 0;
 			try {
 				todayOfficialCost = (await aggregator.aggregate()).byDay[today]?.officialCost ?? 0;
-			} catch {}
+			} catch {
+				swallowed("reconcile-aggregate-skipped");
+			}
 			const result = reconcileBalanceDelta(reconcileRef, official, todayOfficialCost, today, now);
 			const refChanged = result.ref !== null && result.ref !== reconcileRef;
 			reconcileRef = result.ref;

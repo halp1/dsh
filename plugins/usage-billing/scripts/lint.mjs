@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * lint.mjs —— 本仓纪律守卫（E-5）。
+ * lint.mjs —— 本仓纪律守卫（E-5 + S-5）。
  *
- * 本仓没引 ESLint/Prettier：612+ 用例与 0 错 tsc 已是主防线，此刻引入全量
+ * 本仓没引 ESLint/Prettier：650+ 用例与 0 错 tsc 已是主防线，此刻引入全量
  * linter 会带来整仓 reformat 噪音，收益不配代价。这里只守**已确立的纪律**，
  * 防回归而非挑新刺：
  *
@@ -13,6 +13,9 @@
  * 3. 可观察性纪律：空 catch 必须带注释——83 处 `catch {}` 多数是有意的
  *    「缺失=未配置」语义，但每一处都得说清为什么静默；真空 catch（连注释
  *    都没有）一律打回。
+ * 4. CSS↔TSX 类名 parity（S-5）：import UsageBilling.module.css 的文件里
+ *    `css.X` 引用必须在 .module.css 有 `.X` 定义——类名哈希在模块内解析，
+ *    缺定义不报错只静默无效（v1.5.2 清出 8 个历史死引用）。
  *
  * 全绿退出 0；违规打印 文件:行 退出 1。CI 与 `pnpm lint` 共用本脚本。
  */
@@ -87,9 +90,32 @@ for (const dir of SCAN_DIRS) {
   }
 }
 
+// 守卫 4（S-5）：CSS↔TSX 类名 parity——UsageBilling.module.css 的消费方里
+// `css.X` 引用必须在模块里有 `.X` 定义（缺失 = 静默无效样式，历史上积累过
+// 8 个死引用）。CSS 独有类（供内部后代选择器用）不在此列，仅提示计数。
+{
+  const cssText = readFileSync(join('src', 'client', 'UsageBilling.module.css'), 'utf8')
+  const defined = new Set([...cssText.matchAll(/\.([A-Za-z][A-Za-z0-9]*)/g)].map(m => m[1]))
+  const used = new Map()
+  for (const path of walk('src/client')) {
+    const text = readFileSync(path, 'utf8')
+    if (!text.includes('UsageBilling.module.css')) continue
+    const rel = relative('.', path)
+    for (const [index, line] of text.split('\n').entries()) {
+      for (const m of line.matchAll(/css\.([A-Za-z][A-Za-z0-9]*)/g)) {
+        if (!used.has(m[1])) used.set(m[1], `${rel}:${index + 1}`)
+      }
+    }
+  }
+  for (const [name, firstUse] of used) {
+    if (!defined.has(name)) VIOLATIONS.push(`${firstUse}  CSS parity：css.${name} 在 UsageBilling.module.css 无定义（删引用或补样式）`)
+  }
+  console.log(`[lint] CSS parity：${String(used.size)} 个 TSX 引用类全部有定义（CSS 独有 ${String(defined.size - used.size)} 个供内部选择器）`)
+}
+
 if (VIOLATIONS.length > 0) {
   console.error(`[lint] ${VIOLATIONS.length} 项纪律违规：`)
   for (const v of VIOLATIONS) console.error(`  ${v}`)
   process.exit(1)
 }
-console.log('[lint] 纪律守卫全绿（类型 / 日志 / 空 catch 注释）')
+console.log('[lint] 纪律守卫全绿（类型 / 日志 / 空 catch 注释 / CSS parity）')
