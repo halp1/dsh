@@ -93,7 +93,6 @@ export interface TabBadge { label: string; kind: TabBadgeKind }
 export interface DashboardBadgeState {
   providersCount: number
   tokenTotal: number
-  trendDelta: number | null
   rateAgeMinutes: number | null
   settingsDirty: number
 }

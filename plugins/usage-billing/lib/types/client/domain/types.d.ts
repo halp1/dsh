@@ -75,7 +75,6 @@ export interface TabBadge {
 export interface DashboardBadgeState {
     providersCount: number;
     tokenTotal: number;
-    trendDelta: number | null;
     rateAgeMinutes: number | null;
     settingsDirty: number;
 }

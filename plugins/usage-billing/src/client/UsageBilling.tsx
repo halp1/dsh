@@ -148,13 +148,10 @@ function tabBadgeFor(id: DashboardTab, state: DashboardBadgeState): TabBadge | n
       return { label: `${state.providersCount} 厂商`, kind: 'neutral' }
     case 'token':
       return { label: formatTokenBadge(state.tokenTotal), kind: 'neutral' }
-    case 'trends': {
-      if (state.trendDelta === null) return null
-      const pct = Math.abs(state.trendDelta)
-      if (pct < 5) return null
-      const sign = state.trendDelta > 0 ? '↑' : '↓'
-      return { label: `${sign} ${pct.toFixed(0)}%`, kind: pct >= 25 ? 'warn' : 'neutral' }
-    }
+    case 'trends':
+      // 用户反馈：涨跌百分比在 Tab 上是噪音（缓存日会爆出天文数字），
+      // 数值去趋势图与 KPI 卡看——Tab 徽章不再显示。
+      return null
     case 'pricing':
       if (state.rateAgeMinutes === null || state.rateAgeMinutes < 360) return { label: '已同步', kind: 'neutral' }
       return { label: '需同步', kind: 'violet' }
@@ -1029,6 +1026,30 @@ function BillingDashboard({
   // 保留 DOM 与锚点 id——清空搜索即恢复，锚点导航不受影响）。
   const [settingsQuery, setSettingsQuery] = useState('')
   const settingsSectionHiddenBy = (keywords: readonly string[]): boolean => settingsSectionHidden(settingsQuery, keywords)
+  // v1.5.1 变更日志声称的 IntersectionObserver 此前并未落地（导航仅点击置
+  // 高亮，滚动不跟随——用户感知为「没有导航」）。这里真正接上：观察全部
+  // settings-* 分区，滚动到哪个分区高亮哪个锚点（取视口内最靠上的可见分区）。
+  useEffect(() => {
+    if (tab !== 'settings' || typeof IntersectionObserver === 'undefined') return
+    const sections = Array.from(document.querySelectorAll<HTMLElement>('[id^="settings-"]'))
+      .filter(el => !el.closest('[hidden]'))
+    if (sections.length === 0) return
+    const observer = new IntersectionObserver((entries) => {
+      let best: string | undefined
+      let bestTop = Number.POSITIVE_INFINITY
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue
+        const top = entry.boundingClientRect.top
+        if (top < bestTop) {
+          bestTop = top
+          best = entry.target.id
+        }
+      }
+      if (best !== undefined) setActiveSettingsGroup(best.slice('settings-'.length))
+    }, { rootMargin: '-80px 0px -55% 0px' })
+    for (const section of sections) observer.observe(section)
+    return () => { observer.disconnect() }
+  }, [tab])
   const scrollToSettingsGroup = useCallback((id: string) => {
     setActiveSettingsGroup(id)
     if (typeof document === 'undefined') return
@@ -1617,22 +1638,13 @@ function BillingDashboard({
       ? todayUsage.input + todayUsage.output + todayUsage.cacheHit + todayUsage.cacheMiss
       : 0
     const days = Object.keys(byDayMap).sort()
-    const trendDelta = days.length >= 2
-      ? (() => {
-          const last = byDayMap[days[days.length - 1]!]!
-          const prev = byDayMap[days[days.length - 2]!]!
-          const lastTotal = last.input + last.output + last.cacheHit + last.cacheMiss
-          const prevTotal = prev.input + prev.output + prev.cacheHit + prev.cacheMiss
-          return prevTotal > 0 ? ((lastTotal - prevTotal) / prevTotal) * 100 : null
-        })()
-      : null
+    void days
     const rateAgeMinutes = pricingSyncedAt > 0
       ? Math.floor((Date.now() - pricingSyncedAt) / 60000)
       : null
     return {
       providersCount: groupsCount,
       tokenTotal: todayTokens,
-      trendDelta,
       rateAgeMinutes,
       settingsDirty: 0,
     }
@@ -2283,6 +2295,11 @@ function BillingDashboard({
                       与 TAB_ICONS 同风格的内联 stroke SVG。 */}
                   {[
                     {
+                      id: 'display-pref',
+                      icon: <svg viewBox="0 0 16 16" fill="none" aria-hidden="true" stroke="currentColor" strokeWidth="1.5"><circle cx="8" cy="8" r="6" /><path d="M8 2a6 6 0 0 1 0 12z" fill="currentColor" stroke="none" /></svg>,
+                      label: t('settingsNavDisplayPref'),
+                    },
+                    {
                       id: 'budget',
                       icon: <svg viewBox="0 0 16 16" fill="none" aria-hidden="true" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M5 3l3 4 3-4M8 7v6M5.5 9.5h5M5.5 12h5" /></svg>,
                       label: t('settingsNavBudget'),
@@ -2342,7 +2359,7 @@ function BillingDashboard({
                     </p>
                   )}
                   {/* v1.5 新增：密度模式与动效强度开关（设置 - 显示分组最前） */}
-                  <div hidden={settingsSectionHiddenBy(SETTINGS_KEYWORDS.display)} className={css.setCard} data-testid="billing-density-motion-card">
+                  <div hidden={settingsSectionHiddenBy(SETTINGS_KEYWORDS.display)} className={css.setCard} id="settings-display-pref" data-testid="billing-density-motion-card">
                     <div className={css.setCardHead}>
                       <div className={css.setCardMeta}>
                         <h3 className={css.setCardTitle}>{t('settingsSectionDisplay')}</h3>

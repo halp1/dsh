@@ -276,6 +276,7 @@ export type UsageBillingKey =
   | 'motionOff'
   | 'motionSubtle'
   | 'motionRich'
+  | 'settingsNavDisplayPref'
   | 'settingsNavBudget'
   | 'settingsNavAlert'
   | 'settingsNavDisplay'
@@ -636,6 +637,7 @@ export const zh: Record<UsageBillingKey, string> = {
   'motionOff': '关闭',
   'motionSubtle': '克制',
   'motionRich': '丰富',
+  'settingsNavDisplayPref': '显示偏好',
   'settingsNavBudget': '预算',
   'settingsNavAlert': '提醒',
   'settingsNavDisplay': '显示',
@@ -988,6 +990,7 @@ export const en: Record<UsageBillingKey, string> = {
   'motionOff': 'Off',
   'motionSubtle': 'Subtle',
   'motionRich': 'Rich',
+  'settingsNavDisplayPref': 'Display',
   'settingsNavBudget': 'Budget',
   'settingsNavAlert': 'Alerts',
   'settingsNavDisplay': 'Display',
