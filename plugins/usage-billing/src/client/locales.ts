@@ -289,6 +289,16 @@ export type UsageBillingKey =
   | 'modelBudgetHint'
   | 'modelBudgetBody'
   | 'modelBudgetPlaceholder'
+  | 'kpiDescCacheHit'
+  | 'kpiDescTokens'
+  | 'kpiDescAvgCost'
+  | 'kpiDescCalls'
+  | 'kpiDescReasoning'
+  | 'kpiDescIo'
+  | 'kpiDescPeak'
+  | 'healthDotLive'
+  | 'healthDotFailed'
+  | 'healthDotUnknown'
   | 'settingsSectionDisplay'
   | 'emptyHint'
   | 'tokenDaily'
@@ -634,6 +644,16 @@ export const zh: Record<UsageBillingKey, string> = {
   'modelBudgetHint': '为单个模型设本月上限（人民币元）；跨 80% / 100% 各提醒一次，留空 = 不限。',
   'modelBudgetBody': '「{model}」本月已 {cost}（预算 {budget} 的 {pct}%）',
   'modelBudgetPlaceholder': '上限',
+  'kpiDescCacheHit': '缓存命中 token ÷ 总输入 token。命中率越高，输入费用越低（缓存读单价约为未命中的 1/10）。',
+  'kpiDescTokens': '总处理 token = 输入 + 输出。缓存读/写已含在输入内，不重复计数（issue #85 口径）。',
+  'kpiDescAvgCost': '统计范围内总费用 ÷ 总调用次数，单次调用的平均开销。',
+  'kpiDescCalls': '统计范围内的 LLM 调用次数（联网搜索估算不含在内）。',
+  'kpiDescReasoning': '思考（reasoning）token ÷ 输出 token。推理模型的思考部分已计费、含在输出内。',
+  'kpiDescIo': '输入 token ÷ 输出 token。比值高通常意味着长上下文 / 多轮复用。',
+  'kpiDescPeak': '统计范围内单日处理 token（输入+输出）最多的一天。',
+  'healthDotLive': '厂商在线',
+  'healthDotFailed': '厂商探活失败',
+  'healthDotUnknown': '厂商状态未知',
   'settingsSectionDisplay': '显示偏好',
   'emptyHint': '运行第一次对话后，这里会自动出现按厂商的用量与费用明细',
   'tokenViewStructure': '按结构',
@@ -971,6 +991,16 @@ export const en: Record<UsageBillingKey, string> = {
   'modelBudgetHint': 'Set a monthly cap per model (CNY); alerts fire once each at 80% / 100%. Empty = unlimited.',
   'modelBudgetBody': '"{model}" has spent {cost} this month ({pct}% of {budget})',
   'modelBudgetPlaceholder': 'Cap',
+  'kpiDescCacheHit': 'Cache-hit tokens ÷ total input tokens. Higher hit rate means lower input cost (cache reads are ~1/10 the miss price).',
+  'kpiDescTokens': 'Total tokens = input + output. Cache reads/writes are already part of input and are not double-counted (issue #85).',
+  'kpiDescAvgCost': 'Total cost ÷ total calls within the selected range — the average cost per call.',
+  'kpiDescCalls': 'LLM calls within the selected range (web-search estimates excluded).',
+  'kpiDescReasoning': 'Reasoning tokens ÷ output tokens. A reasoning model\'s thinking is billed and included in output.',
+  'kpiDescIo': 'Input tokens ÷ output tokens. A high ratio usually means long context / multi-turn reuse.',
+  'kpiDescPeak': 'The day with the most processed tokens (input + output) in the range.',
+  'healthDotLive': 'Vendor online',
+  'healthDotFailed': 'Vendor probe failed',
+  'healthDotUnknown': 'Vendor status unknown',
   'settingsSectionDisplay': 'Display preferences',
   'emptyHint': 'Run your first conversation and per-provider usage and cost breakdown will appear here automatically',
   'tokenHit': 'Input (cache hit)',

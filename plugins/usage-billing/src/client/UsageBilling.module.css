@@ -2715,11 +2715,15 @@ span.bandDot { cursor: default; }
 
 .healthBad {
   background: var(--ds-red);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ds-red) 18%, transparent);
+  /* V-3 色弱友好：失效态在红点外加一圈实心描边（双环形状），与在线单环区分 */
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ds-red) 18%, transparent),
+    0 0 0 1px var(--ds-red) inset;
 }
 
 .healthIdle {
-  background: var(--ds-t-4);
+  /* V-3 色弱友好：未知态空心（透明底 + 灰描边），与在线/失效的实心态形状区分 */
+  background: transparent;
+  border: 1.5px solid var(--ds-t-4);
 }
 
 .dashboardRight {
@@ -4772,4 +4776,18 @@ span.bandDot { cursor: default; }
   overflow: auto;
   border: 1px solid var(--ds-border);
   border-radius: var(--ds-r-2, 8px);
+}
+
+/* V-4 聚焦强化（WCAG 2.4.7）：键盘 Tab 进入时所有可交互元素统一 2px 描边。
+   用 :focus-visible 只对键盘聚焦生效，鼠标点击不出现。触发卡在 sidebar 容器
+   内、其余在 .dashboard 内，两处各自覆盖。 */
+.dashboard button:focus-visible,
+.dashboard input:focus-visible,
+.dashboard select:focus-visible,
+.dashboard [role='button']:focus-visible,
+.dashboard tr[tabindex]:focus-visible,
+.trigger:focus-visible,
+.railButton:focus-visible {
+  outline: 2px solid var(--ds-blue);
+  outline-offset: 1px;
 }

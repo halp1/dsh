@@ -219,6 +219,14 @@ type UsageBillingProps =
   & BillingBudgetStoreProps
   & PropsLocale<typeof NS>
 
+/** V-3 色弱友好：健康点的状态文本（绿=在线 / 红=失效 / 灰=未知）——三态不再
+ *  仅靠颜色，读屏与悬停均可得（点本身保留形状，配 CSS ::after 差异化见模块）。 */
+function healthDotLabel(dot: string | undefined, t: (key: UsageBillingKey) => string): string {
+  if (dot === css.healthOk) return t('healthDotLive')
+  if (dot === css.healthBad) return t('healthDotFailed')
+  return t('healthDotUnknown')
+}
+
 /**
  * Sidebar footer trigger: compact pill in wide mode, icon in rail mode.
  * @param props - framework props plus `wide` column state.
@@ -1765,7 +1773,12 @@ function BillingDashboard({
             </span>
             {health.checked && (
               <span className={clsx(css.healthBadge, health.available ? css.healthBadgeOk : css.healthBadgeBad)}>
-                <span className={clsx(css.healthDot, health.available ? css.healthOk : css.healthBad)} aria-hidden="true" />
+                <span
+                  className={clsx(css.healthDot, health.available ? css.healthOk : css.healthBad)}
+                  role="img"
+                  aria-label={health.available ? t('healthDotLive') : t('healthDotFailed')}
+                  title={health.available ? t('healthDotLive') : t('healthDotFailed')}
+                />
                 {health.available
                   ? `${t('healthModelsLive').replace('{n}', String(health.models))}${health.failures > 0 ? ` · ${t('healthVendorsDown').replace('{n}', String(health.failures))}` : ''}`
                   : t('healthVendorsUnavailable').replace('{n}', String(health.failures))}
@@ -2109,7 +2122,10 @@ function BillingDashboard({
                       <>
                         <div className={css.kpiTile} data-testid="billing-kpi-tile">
                           <div className={css.kpiLabelRow}>
-                            <span className={css.kpiLabel}>{t('cacheHitRate')}</span>
+                            {/* V-2 KPI 定义 tooltip：悬停一句话口径说明，不再靠猜。 */}
+                            <Tooltip label={t('kpiDescCacheHit')} side="top" maxWidth={280}>
+                              <span className={css.kpiLabel}>{t('cacheHitRate')}</span>
+                            </Tooltip>
                             {renderDelta(deltaCacheHit)}
                           </div>
                           <span className={clsx(css.kpiValue, css.kpiGreen)}>
@@ -2123,7 +2139,9 @@ function BillingDashboard({
                         </div>
                         <div className={css.kpiTile}>
                           <div className={css.kpiLabelRow}>
-                            <span className={css.kpiLabel}>{t('tokens')}</span>
+                            <Tooltip label={t('kpiDescTokens')} side="top" maxWidth={280}>
+                              <span className={css.kpiLabel}>{t('tokens')}</span>
+                            </Tooltip>
                             {renderDelta(deltaTokens)}
                           </div>
                           <span className={css.kpiValue}>{formatTokens(kpiAgg.input + kpiAgg.output)}</span>
@@ -2134,7 +2152,9 @@ function BillingDashboard({
                         </div>
                         <div className={css.kpiTile} data-testid="billing-kpi-avg">
                           <div className={css.kpiLabelRow}>
-                            <span className={css.kpiLabel}>{t('avgCost')}</span>
+                            <Tooltip label={t('kpiDescAvgCost')} side="top" maxWidth={280}>
+                              <span className={css.kpiLabel}>{t('avgCost')}</span>
+                            </Tooltip>
                             {renderDelta(deltaCost)}
                           </div>
                           <span className={css.kpiValue}>{money(kpiAgg.calls > 0 ? kpiAgg.cost / kpiAgg.calls : 0)}</span>
@@ -2143,7 +2163,9 @@ function BillingDashboard({
                         </div>
                         <div className={css.kpiTile}>
                           <div className={css.kpiLabelRow}>
-                            <span className={css.kpiLabel}>{t('calls')}</span>
+                            <Tooltip label={t('kpiDescCalls')} side="top" maxWidth={280}>
+                              <span className={css.kpiLabel}>{t('calls')}</span>
+                            </Tooltip>
                             {renderDelta(deltaCalls)}
                           </div>
                           <span className={css.kpiValue}>{kpiAgg.calls.toLocaleString()}</span>
@@ -2152,7 +2174,9 @@ function BillingDashboard({
                         </div>
                         <div className={css.kpiTile} data-testid="billing-kpi-think">
                           <div className={css.kpiLabelRow}>
-                            <span className={css.kpiLabel}>{t('tokenReasoningShare')}</span>
+                            <Tooltip label={t('kpiDescReasoning')} side="top" maxWidth={280}>
+                              <span className={css.kpiLabel}>{t('tokenReasoningShare')}</span>
+                            </Tooltip>
                           </div>
                           <span className={clsx(css.kpiValue, css.kpiGreen)}>
                             {formatPercent(kpiAgg.output > 0 ? (kpiAgg.reasoning / kpiAgg.output) * 100 : 0)}
@@ -2161,7 +2185,9 @@ function BillingDashboard({
                         </div>
                         <div className={css.kpiTile} data-testid="billing-kpi-io">
                           <div className={css.kpiLabelRow}>
-                            <span className={css.kpiLabel}>{t('tokenIo')}</span>
+                            <Tooltip label={t('kpiDescIo')} side="top" maxWidth={280}>
+                              <span className={css.kpiLabel}>{t('tokenIo')}</span>
+                            </Tooltip>
                           </div>
                           <span className={css.kpiValue}>{(kpiAgg.output > 0 ? kpiAgg.input / kpiAgg.output : 0).toFixed(2)}</span>
                           <span className={css.kpiDetail}>
@@ -2170,7 +2196,9 @@ function BillingDashboard({
                         </div>
                         <div className={css.kpiTile} data-testid="billing-kpi-peak">
                           <div className={css.kpiLabelRow}>
-                            <span className={css.kpiLabel}>{t('tokenPeak')}</span>
+                            <Tooltip label={t('kpiDescPeak')} side="top" maxWidth={280}>
+                              <span className={css.kpiLabel}>{t('tokenPeak')}</span>
+                            </Tooltip>
                           </div>
                           <span className={css.kpiValue}>{kpiAgg.peakTokens > 0 ? shortNumber(kpiAgg.peakTokens) : '—'}</span>
                           <span className={css.kpiDetail}>{kpiAgg.peakDay ?? '—'}</span>
@@ -3007,7 +3035,12 @@ function BillingDashboard({
                           } : undefined}
                         >
                           <span className={css.providerGroupTitle}>
-                            <span className={clsx(css.healthDot, group.dot)} aria-hidden="true" />
+                            <span
+                              className={clsx(css.healthDot, group.dot)}
+                              role="img"
+                              aria-label={healthDotLabel(group.dot, t)}
+                              title={healthDotLabel(group.dot, t)}
+                            />
                             {(() => {
                               // 入口徽章：直连/中转/未知一眼可辨；vendor（纯订阅/余额组）无徽章。
                               // 直连组拆「直连 · X」为徽章 + 路由名；官方直连等无前缀名整名显示。
