@@ -12,7 +12,7 @@ import {
   getRateInfo, isPeakHour, isPromoActive, modelOf, resolveCatalogKey, tierAt, tierCountdown,
 } from '../src/client/pricing.ts'
 import { BUILTIN_MODEL_CATALOG, BUILTIN_MODEL_KEY_ALIASES } from '../src/builtin-catalog.ts'
-import { PROVIDER_ALIASES } from '../src/client/UsageBilling.tsx'
+import { PROVIDER_ALIASES } from '../src/client/domain/provider-aliases.ts'
 
 // 目录与别名表改为宿主注入后，测试套件自身承担宿主角色：全量注入一次，
 // 与宿主 activate 的注入点同一入口（applyBuiltinCatalog）。

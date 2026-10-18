@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { DASHBOARD_TABS } from '../src/client/UsageBilling.tsx'
+import { DASHBOARD_TABS } from '../src/client/domain/types.ts'
 import { en, zh } from '../src/client/locales.ts'
 
 describe('DASHBOARD_TABS', () => {

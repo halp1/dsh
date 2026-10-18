@@ -118,4 +118,25 @@ describe('queryDeclaredEndpoints', () => {
     expect(rows[0]).toMatchObject({ error: 'invalid', reason: '声明路径未命中任何字段' })
     expect(rows[0]?.totalBalance).toBeUndefined()
   })
+
+  it('reports unreachable (no crash) when the upstream body is not parseable JSON', async () => {
+    // 上游改 Content-Type 抛 HTML 错误页 / 反代注入 BOM / 空 body 时，原生
+    // SyntaxError 不带诊断信息；显式 try/catch 后统一降级为 unreachable，路由
+    // 不会 500，面板显示声明端点不可读（与鉴权错 / 跨源错同等姿态）。
+    const ctx = fakeContext('k')
+    for (const body of [
+      '<html>502 Bad Gateway</html>',
+      '',
+      'not-json-at-all',
+      '\uFEFF{"data":{', // BOM + 截断
+    ]) {
+      vi.stubGlobal('fetch', bodyFetch(body))
+      const rows = await queryDeclaredEndpoints(ctx, providers, [{
+        origin: 'https://relay.example.com',
+        path: '/api/quota',
+        fields: { total: 'data.balance' },
+      }])
+      expect(rows[0]).toMatchObject({ error: 'unreachable', declared: true })
+    }
+  })
 })

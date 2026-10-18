@@ -262,7 +262,15 @@ async function fetchDeclaredBody(url: URL, raw: boolean, apiKey: string): Promis
       const text = await response.text()
       // 规则 6：响应体上限。
       if (text.length > MAX_BODY_BYTES) throw new HttpStatusError('body-too-large', 413)
-      return JSON.parse(text) as unknown
+      // 规则 7：响应体必须可被 JSON 解析。上游改 Content-Type（HTML 错误页、空 body、
+      // 编码错位）时，原生 SyntaxError 不带任何诊断信息；显式分类为 parse-error 后，
+      // 调用方仍按 unreachable 处理（保持外层 try/catch 的统一降级），但保留 future
+      // 区分点（鉴权错 / 内容错）的可观察性入口。
+      try {
+        return JSON.parse(text) as unknown
+      } catch (cause) {
+        throw new HttpStatusError('parse-error', 0)
+      }
     } finally {
       clearTimeout(timer)
     }
@@ -273,7 +281,7 @@ async function fetchDeclaredBody(url: URL, raw: boolean, apiKey: string): Promis
 /** HTTP 状态错误：携带 statusCode，供调用方区分 unauthorized / 其它。 */
 class HttpStatusError extends Error {
   readonly statusCode: number
-  readonly kind: 'unauthorized' | 'redirect' | 'http-error' | 'body-too-large'
+  readonly kind: 'unauthorized' | 'redirect' | 'http-error' | 'body-too-large' | 'parse-error'
   constructor(kind: HttpStatusError['kind'], statusCode: number) {
     super(`${kind}:${String(statusCode)}`)
     this.kind = kind

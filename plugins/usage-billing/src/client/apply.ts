@@ -24,7 +24,8 @@ import type {} from '@deepseek-ai/dsh-api-remotes/client'
 // Type-only: pulls the ui-conversation SlotMap merge (the composer.dock entry the live cost bar rides,
 // and the tool-row 'conversation.input.right' seat the chip injects into).
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
-import { UsageBilling, type ModelHealth, type UsageBillingInjected } from './UsageBilling.tsx'
+import { UsageBilling } from './UsageBilling.tsx'
+import type { ModelHealth, UsageBillingInjected } from './domain/types.ts'
 import type { CatalogModel } from './pricing.ts'
 import { LiveCostBar, LiveCostChip } from './live-cost.tsx'
 import { en, NS, zh, type UsageBillingKey } from './locales.ts'

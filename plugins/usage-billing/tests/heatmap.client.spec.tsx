@@ -8,7 +8,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { cleanup, fireEvent, render } from '@testing-library/react'
 import { UsageHeatmap, type HeatmapDay } from '../src/client/heatmap.tsx'
-import { activeDaysOf, streakDaysOf } from '../src/client/UsageBilling.tsx'
+import { activeDaysOf, streakDaysOf } from '../src/client/domain/streak.ts'
 
 afterEach(() => { cleanup() })
 

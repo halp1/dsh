@@ -5157,7 +5157,11 @@ async function fetchDeclaredBody(url, raw, apiKey) {
 			if (!response.ok) throw new HttpStatusError("http-error", response.status);
 			const text = await response.text();
 			if (text.length > MAX_BODY_BYTES) throw new HttpStatusError("body-too-large", 413);
-			return JSON.parse(text);
+			try {
+				return JSON.parse(text);
+			} catch (cause) {
+				throw new HttpStatusError("parse-error", 0);
+			}
 		} finally {
 			clearTimeout(timer);
 		}

@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { projectMonthCost } from '../src/client/UsageBilling.tsx'
+import { projectMonthCost } from '../src/client/domain/forecast.ts'
 
 /** Mutable-by-design fixture: byDay maps date → { cost } (calls/tokens suffice with cost). */
 function day(cost: number) {

@@ -21,7 +21,7 @@ import type { UsageBillingKey } from './locales.ts'
 import { formatTokens, localDayStamp, modelOf } from './pricing.ts'
 import { downloadText } from './export.ts'
 import type { TrendSeriesModel } from './TrendChart.tsx'
-import type { UsageStats } from './UsageBilling.tsx'
+import type { UsageStats } from './domain/types.ts'
 
 
 
