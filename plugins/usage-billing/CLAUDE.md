@@ -73,6 +73,24 @@
 - **同一时间只允许一个 AI 会话操作本仓工作区**。谁在做，其他会话等。
 - 接手别人的工作区时**先盘点再动手**：`git log`（对方提交了什么）、`git status`/`git diff`（未提交改动——可能是进行中的有效工作，如 issue 修复半成品，保留并完成，不要丢弃）。已提交的工作做交叉核对（对方可能不知道双线策略，把改动落错了分支）。
 
+## e2e（双层）
+
+3080 dev host UI 路径走 token auth（token 每次启动轮换，Playwright 无法获取），
+in-process DSH host 又不带桌面运行时（UI 组件加载不全）。双层覆盖：
+
+**API contract**（`pnpm test:e2e`，@playwright/test 的 `request` fixture，无 browser）：
+3 剧本 → 3080 9 条 HTTP 端点合同。`tests/api-contract/*.spec.ts`。
+
+**UI 组件**（`pnpm test`，vitest + @testing-library/react + jsdom）：
+3 剧本 → sidebar trigger / 6 Tab panel 切换 / 不可读会话提示。`tests/*.component.spec.tsx`。
+
+- **跑 API e2e**：`pnpm test:e2e`（无需装浏览器——只用 request fixture；30 秒内）
+- **前置**：3080 dev host 在跑（`./sync.sh` + `pnpm dsh --profile web --port 3080 --no-open`）
+- **换端口**：`PLAYWRIGHT_BASE_URL=http://127.0.0.1:3090 pnpm test:e2e`
+- **跑 UI 组件**：`pnpm test`（含 jsdom + @testing-library 渲染）
+- **不接 CI**——本地手跑验收/准发布前跑；改 portal / Modal / Tab 切换时必跑 UI 组件
+- **改 HTTP 端点路径 / 字段** 时必跑 API e2e
+
 ## 其他约定
 
 - `CLAUDE.md` 是 `AGENTS.md` 的**普通文件拷贝**（DSH Store 契约禁止仓库内符号链接，symlink 会导致收录暂缓）；改 `AGENTS.md` 后必须同步 `cp AGENTS.md CLAUDE.md` 再提交。

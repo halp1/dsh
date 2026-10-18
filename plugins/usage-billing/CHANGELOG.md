@@ -2,11 +2,41 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。条目按版本倒序，只记录用户可感知的变更；完整提交历史见 [GitHub commits](https://github.com/kenz1117/dsh-ui-usage-billing/commits/main)。
 
-当前为双线发布：**预览线 1.5.x**（npm `latest` + `alpha`，适配 DSH 0.1.2-alpha.1 ~ 0.2.1-rc.2；插件 `latest` 自 v1.0.26 起跟随宿主 latest 代际，自 v1.2.0 起序列恒高于稳定线以消除版本号倒挂）与**稳定线 1.1.x**（npm `stable`，适配 DSH 0.1.0-rc.8 ~ 0.1.1-rc.2，维护于 `compat/stable-dsh` 分支；**自 2026-09-11 起冻结**，终版 v1.1.17，不再接收变更）。标签策略与监控机制见 [COMPATIBILITY.md](COMPATIBILITY.md)。
+当前为双线发布：**预览线 1.6.x**（npm `latest` + `alpha`，适配 DSH 0.1.2-alpha.1 ~ 0.2.1-rc.2；插件 `latest` 自 v1.0.26 起跟随宿主 latest 代际，自 v1.2.0 起序列恒高于稳定线以消除版本号倒挂）与**稳定线 1.1.x**（npm `stable`，适配 DSH 0.1.0-rc.8 ~ 0.1.1-rc.2，维护于 `compat/stable-dsh` 分支；**自 2026-09-11 起冻结**，终版 v1.1.17，不再接收变更）。标签策略与监控机制见 [COMPATIBILITY.md](COMPATIBILITY.md)。
 
 ## 预览线（1.5.x，适配 DSH 0.1.2-alpha.1 ~ 0.2.1-rc.2）
 
 > **版本序列说明**：自 v1.2.0 起预览线序列恒高于稳定线 1.1.x——消除此前 1.0.x < 1.1.x 的版本号倒挂（pnpm `minimumReleaseAge` 冷静期会把刚发布的 latest 跳过、回退到旧稳定线，issue #40 有实测案例）。安装建议钉具体版本号。
+
+### v1.6.0（2026-10-18）
+
+**新功能**：
+
+- 按模型预算：设置 → 预算 → 按模型预算，为本月消耗 Top 模型逐个设人民币上限；跨 80% / 100% 各发一次桌面通知（每模型每档每天最多一次，多实例认领去重与全局预算同款）；与全局预算开关相互独立
+- 设置页全文搜索：设置 Tab 顶部搜索框，按中英关键词过滤分区（如搜 "budget" 也能命中中文界面下的预算卡）；锚点 id 保留，清空即恢复；全不命中显示空态提示
+- 会话全屏查看器：厂商 Tab 会话面板新增「查看全部 N 个会话」——浮层展示服务端全量（封顶 100 行）平铺列表，按标题 / 项目 / id 子串搜索；面板 20 行视图不变
+- KPI 卡定义 tooltip：概览七卡（缓存命中率 / Token / 平均成本 / 调用 / 思考占比 / 输入输出比 / 峰值日）悬停显示一句话口径说明，新用户不再靠猜
+- 色弱友好（WCAG 1.4.1）：厂商健康点三态不再仅靠颜色——在线实心 / 失效双环 / 未知空心 + `role="img"` 状态文本（aria-label + title）
+- 键盘聚焦强化（WCAG 2.4.7）：仪表盘全部交互元素与侧栏触发卡统一 focus-visible 描边，仅键盘 Tab 出现
+
+**修复**（S-8 测试空缺补齐时真机级测试抓出）：
+
+- **usage-tool 写开关的跨站拒绝形态**（v1.0 起）：POST 的 Origin / Content-Type 校验原先排在 `writeHead(200)` 之后，校验失败时二次 writeHead 抛 `ERR_HTTP_HEADERS_SENT`、宿主直接断连——跨站攻击请求得到 connection reset 而非可诊断的 403。校验前移至状态行之前；body 过大同步补 `writeHead(413)`（notify-claim 同款缺状态行一并修）
+- declarative 声明端点上游返回非 JSON（HTML 错误页等）：补 `parse-error` 分类，不再无声落入笼统 unreachable（诊断信息保留）
+
+**内部质量**（零用户行为变化）：
+
+- 巨石拆包：`UsageBilling.tsx` 5320 → 4117 行（纯函数 / 类型 / fetch 抽到 `client/domain/` + `client/api/` 20 个文件）；`src/index.ts` 1580 → 1159 行（9 条 HTTP 路由抽到 `src/routes/`，依赖面以 `Deps` 接口类型化；回环守卫抽 `src/guard.ts`、配置类型抽 `src/config.ts`）
+- 测试双层补强：API contract（@playwright/test request fixture 打真实 HTTP，3 剧本）+ UI 组件（jsdom，3 剧本）+ 路由边界防护（in-process host 打 405/CSRF/body 过大）——jsdom 测不到的 HTTP 状态机层首次有覆盖
+- wire 形状金丝雀：usage-stats 响应边界校验聚合文档核心结构，漂移打 warn 不拦截（客户端 typeof 兜底不变）
+- 结构化静默日志：`src/silent.ts` `swallowed(reason)` 接入 16 处「纯注释零日志」catch（同 reason 5 分钟节流），「余额不显示」类问题可直接 grep 宿主日志
+- 纪律守卫（`pnpm lint` 入 CI）：类型纪律（any / ts-ignore 零容忍）+ 日志纪律 + 空 catch 注释 + CSS↔TSX 类名 parity（清出 8 个历史死引用）+ clientBundle 平台种子漂移检测（watch 每日任务对宿主 monorepo 真校验，漂移自动开 issue）
+- issue 模板：bug / feature / compat 三模板 + 空白 issue 关闭
+
+**跳过**（有据）：S-5 全量拆 CSS Module（41 个跨引用选择器会被哈希静默打断，改为 parity 守卫 + TOC）；U-1 会话行跳转（宿主无 API）；U-2 小时粒度 / U-5 周报（留后续功能批）
+
+- 测试：655 全绿（较 v1.5.1 +43：API contract 3 / UI 组件 6 / 路由防护 5 / 形状金丝雀 6 / 静默日志 4 / a11y 3 / 设置搜索 6 / 会话查看器 5 / 按模型预算 5 / lowQuota 3 / heatmap 三档 2 等）
+- 构建：lib/client.js 301,940 字节、lib/index.js 301,700 字节（320 KiB 强警告线内；本仓自设防线，DSH Store 仅对图标限 256 KiB）
 
 ### v1.5.1（2026-10-18）
 
