@@ -67,4 +67,41 @@ describe('侧栏触发卡', () => {
       expect(getByTestId('billing-dashboard')).toBeTruthy()
     })
   })
+
+  it('v1.5.x 老持久化状态（缺 modelBudgets 键）下触发卡仍渲染（v1.6.2 回归）', async () => {
+    // 事故现场：宿主 store 引擎 rehydrate 按整体替换恢复（不与 init() 合并），
+    // v1.5.x 写入的持久化状态没有 v1.6.0 新增的 modelBudgets / modelTierAlertDays
+    // 两键，读取点拿到 undefined 即崩，被槽位错误边界弹出——左下角胶囊消失。
+    localStorage.setItem('dsh.ui-usage-billing.budget', JSON.stringify({
+      enabled: false,
+      amount: 0,
+      tierAlertDays: {},
+      lastBalanceAlertDay: '',
+      lastTierSwitchAt: 0,
+    }))
+
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      total: { calls: 0, input: 0, output: 0, cacheHit: 0, cacheMiss: 0, cost: 0, reasoning: 0 },
+      byModel: {}, byDay: {}, byDayModels: {}, byDayModelsSite: {},
+    }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch)
+
+    // create() 同步 rehydrate localStorage（整体替换 + 深冻结），复刻宿主装载路径
+    const budgetStore = createBillingBudgetStore().create()
+    const props = {
+      wide: true,
+      t,
+      checkModels: async () => ({
+        checked: true, available: true, models: 0, failures: 0, okProviders: [], badProviders: [],
+      }),
+      publishCosts: () => {},
+      registerOpen: () => () => {},
+      renderSlot: () => null,
+      useStore: bindSnapshotSelector(budgetStore),
+      actions: budgetStore.actions,
+    } as unknown as Parameters<typeof UsageBilling>[0]
+
+    // 修复前：Object.entries(undefined) 在 effect 抛 TypeError，render() 直接失败
+    const { getByTestId } = render(<UsageBilling {...props} />)
+    expect(getByTestId('billing-trigger')).toBeTruthy()
+  })
 })

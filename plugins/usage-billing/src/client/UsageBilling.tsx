@@ -73,6 +73,7 @@ import { UsageHeatmap, type HeatmapDay } from './heatmap.tsx'
 import { flagAnomalies, type AnomalyFlag } from './anomaly.ts'
 import { dayRowsCsv, downloadText, exportFileName, sessionRowsCsv, siteRowsCsv } from './export.ts'
 import type { createBillingBudgetStore } from './budget-store.ts'
+import { EMPTY_MODEL_BUDGETS, EMPTY_MODEL_TIER_ALERT_DAYS } from './budget-store.ts'
 import { convertFromCny,
   applyLiveCatalogModels, applyUserPrices, catalogEntries, computeCost, convertUnitPrice,
   formatMoney, formatPercent, formatTokens, formatUnitPrice, getRateInfo, isPromoActive,
@@ -4189,8 +4190,11 @@ export function UsageBilling(props: UsageBillingProps): React.ReactNode {
   // 与预算开关无关——余额是硬性约束，无论是否开启预算都要提醒。
   const lastBalanceAlertDay = useStore(s => s.lastBalanceAlertDay)
   // U-3 按模型预算：预算表 + 提醒标记；本月每模型消耗（用户价重估口径）。
-  const modelBudgets = useStore(s => s.modelBudgets)
-  const modelTierAlertDays = useStore(s => s.modelTierAlertDays)
+  // 两个字段是 v1.6.0 新增：宿主 store 引擎 rehydrate 按整体替换恢复持久化状态
+  // （不与 init() 合并），v1.5.x 老状态缺这两键时读到 undefined，渲染/effect
+  // 即崩并被槽位错误边界弹出（左下角胶囊消失）——读取点必须就地补空表兜底。
+  const modelBudgets = useStore(s => s.modelBudgets ?? EMPTY_MODEL_BUDGETS)
+  const modelTierAlertDays = useStore(s => s.modelTierAlertDays ?? EMPTY_MODEL_TIER_ALERT_DAYS)
   const monthModelCost = useMemo(
     () => monthCostByModel(displayStats.byDayModels, today.slice(0, 7)),
     [displayStats.byDayModels, today],
