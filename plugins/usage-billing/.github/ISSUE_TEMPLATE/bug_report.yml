@@ -1,0 +1,93 @@
+name: Bug report
+description: 报告一个具体的错误（数字算错、UI 渲染崩、按钮无反应、HTTP 端点 500 等）。问题诊断 / 行为偏差请选 Bug；想要新功能请选 Feature request。
+title: '[bug] '
+labels: ['bug']
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 提交前
+
+        - [ ] 已查 README（功能/快捷键/币种）
+        - [ ] 已查 COMPATIBILITY.md（是否在双线声明的宿主版本里）
+        - [ ] 已查 CHANGELOG（最近版本是否已修）
+        - [ ] 在 Issue 列表里没找到同类问题
+
+  - type: input
+    id: repro
+    attributes:
+      label: 复现步骤
+      description: 一句话：怎么操作看到了这个 bug
+      placeholder: '例：打开 3080 仪表盘 → 切到厂商 Tab → 看到余额行不显示'
+    validations:
+      required: true
+
+  - type: input
+    id: expected
+    attributes:
+      label: 预期行为
+      description: 应该看到什么
+      placeholder: '例：余额行应显示余额与「约可撑 N 天」徽标'
+    validations:
+      required: true
+
+  - type: input
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 实际看到什么（截图 / 录屏 / 文字描述皆可）
+      placeholder: '例：余额行显示 — 占位，无徽标'
+    validations:
+      required: true
+
+  - type: dropdown
+    id: line
+    id: line
+    attributes:
+      label: 影响的发布线
+      description: 你的环境跑的是哪条线？双线策略详见 COMPATIBILITY.md
+      options:
+        - 预览线（1.5.x 适配 DSH 0.1.2+）
+        - 稳定线（1.1.x 适配 DSH 0.1.0-0.1.1，已冻结）
+        - 都不确定
+    validations:
+      required: true
+
+  - type: input
+    id: dsh_version
+    attributes:
+      label: DSH 宿主版本
+      description: '`pnpm ls -g @deepseek-ai/dsh` 或 `dsh --version` 的输出'
+      placeholder: '例：0.2.1-rc.2'
+    validations:
+      required: true
+
+  - type: input
+    id: plugin_version
+    attributes:
+      label: 本插件版本
+      description: '仪表盘设置 → 关于 / 插件信息卡，或 `pnpm ls -g @kenz1117/dsh-ui-usage-billing`'
+      placeholder: '例：1.5.1'
+    validations:
+      required: true
+
+  - type: textarea
+    id: env
+    attributes:
+      label: 环境
+      description: 操作系统 / DSH 启动方式（桌面 App / `pnpm dsh --profile web` / harness-a1 副本）
+      placeholder: 'macOS 15.4 + DSH 桌面 App + 本仓 ./sync.sh 后 3080'
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 关键日志（可选）
+      description: 控制台 `console.error` / 宿主 `~/.dsh/logs/dsh-service.log` 里 `[usage-billing] ...` 行
+      placeholder: |
+        [usage-billing] refreshBalances failed; serving cached balances: ...
+    validations:
+      required: false

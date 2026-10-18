@@ -55,6 +55,9 @@ export function registerNotifyClaimRoute(ctx: Context, deps: NotifyClaimDeps): v
           for await (const chunk of req) {
             body += String(chunk)
             if (body.length > 2048) {
+              // 状态行必须显式：res.end 前无 writeHead 时 HTTP 默认 200，
+              // 客户端无法按状态码区分「认领成功」与「body 被拒」。
+              res.writeHead(413, { 'content-type': 'application/json; charset=utf-8' })
               res.end(JSON.stringify({ error: 'body too large' }))
               return
             }

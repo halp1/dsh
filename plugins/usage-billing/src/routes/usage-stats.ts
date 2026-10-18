@@ -43,6 +43,82 @@ export interface UsageStatsDeps {
   responseBudgetMs: number
 }
 
+/** 聚合文档核心结构的 wire 校验（S-7 可观察性金丝雀）。
+ *
+ *  客户端 loadUsageStats 已有逐字段 typeof 守卫（渲染层兜底），本校验是
+ *  服务端边界的漂移告警：聚合器字段改名/类型漂移时，30s 轮询的第一轮就在
+ *  宿主日志留下 `[usage-billing]` 告警，而不是等用户面板渲染崩了报 issue。
+ *
+ *  语义是「告警不拦截」：校验失败仍照常下发（客户端自行兜底），绝不因
+ *  schema 漂移把仪表盘整个 500——与「degrade, never fabricate」同一姿态。
+ *
+ *  只校验 fresh 聚合路径（快照兜底路径不校验：旧快照本就可能缺新字段，
+ *  校验它们只会产生永久的假阳性告警）。
+ *
+ *  实现说明：刻意手写 typeof 检查而不用 schemastery——schemastery 是 config
+ *  库，object schema 对 null / 数组 / 标量输入走宽容强转（补默认值）而非抛错，
+ *  无法表达「形状必须精确」的校验语义。手写检查只认精确类型，缺字段即漂移。
+ *  导出供测试。 */
+
+const NUM = (v: unknown): boolean => typeof v === 'number' && Number.isFinite(v)
+
+/** 一个 ModelUsage 桶的核心数字字段（客户端渲染硬依赖）。
+ *  `withReasoning`：byModel / byDay / total 的桶含 reasoning；byDayModels 的
+ *  三维格接口只有 6 个数字字段（无 reasoning），复用同一检查会产生假阳性。 */
+function modelUsageError(value: unknown, path: string, withReasoning = true): string | null {
+  if (value === null || typeof value !== 'object') return `${path} 不是对象`
+  const keys = withReasoning
+    ? ['calls', 'input', 'output', 'cacheHit', 'cacheMiss', 'cost', 'reasoning']
+    : ['calls', 'input', 'output', 'cacheHit', 'cacheMiss', 'cost']
+  for (const key of keys) {
+    if (!NUM((value as Record<string, unknown>)[key])) return `${path}.${key} 不是有限数字`
+  }
+  return null
+}
+
+/** 校验一份聚合文档；返回漂移原因（null = 形状正常）。纯只读，不改 doc。 */
+export function usageStatsShapeError(doc: unknown): string | null {
+  if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) return '文档不是对象'
+  const d = doc as Record<string, unknown>
+  if (!NUM(d.version)) return 'version 不是有限数字'
+  if (!NUM(d.updatedAt)) return 'updatedAt 不是有限数字'
+  const total = modelUsageError(d.total, 'total')
+  if (total !== null) return total
+  // byModel / byDay / byDayModels：逐桶抽检（全部遍历是 O(桶数)，聚合文档换代
+  // 每轮一次，桶数 = 模型数 × 天数，可接受）。
+  for (const [field, cellCheck] of [
+    ['byModel', (cell: unknown, p: string): string | null => modelUsageError(cell, p)],
+    ['byDay', (cell: unknown, p: string): string | null => modelUsageError(cell, p)],
+    ['byDayModels', (cell: unknown, p: string): string | null => {
+      if (cell === null || typeof cell !== 'object') return `${p} 不是对象`
+      for (const [modelKey, usage] of Object.entries(cell as Record<string, unknown>)) {
+        const err = modelUsageError(usage, `${p}.${modelKey}`, false)
+        if (err !== null) return err
+      }
+      return null
+    }],
+  ] as const) {
+    const bucket = d[field]
+    if (bucket === undefined) return `${field} 缺失（聚合路径恒带；快照兜底才允许缺）`
+    if (bucket === null || typeof bucket !== 'object') return `${field} 不是对象`
+    for (const [key, cell] of Object.entries(bucket as Record<string, unknown>)) {
+      const err = cellCheck(cell, `${field}.${key}`)
+      if (err !== null) return err
+    }
+  }
+  const bySession = d.bySession
+  if (!Array.isArray(bySession)) return 'bySession 不是数组'
+  for (const [index, row] of bySession.entries()) {
+    if (row === null || typeof row !== 'object') return `bySession[${index}] 不是对象`
+    const r = row as Record<string, unknown>
+    if (typeof r.id !== 'string' || r.id === '') return `bySession[${index}].id 不是非空字符串`
+    if (!NUM(r.calls)) return `bySession[${index}].calls 不是有限数字`
+    if (!NUM(r.cost)) return `bySession[${index}].cost 不是有限数字`
+    if (!NUM(r.lastActive)) return `bySession[${index}].lastActive 不是有限数字`
+  }
+  return null
+}
+
 export function registerUsageStatsRoute(ctx: Context, deps: UsageStatsDeps): void {
   // 响应体缓存：30s 轮询期间复用同一聚合文档的装饰 + 序列化结果（数百 KiB）。
   let statsBodyCache:
@@ -69,6 +145,12 @@ export function registerUsageStatsRoute(ctx: Context, deps: UsageStatsDeps): voi
           if (statsBodyCache !== undefined && statsBodyCache.doc === doc
             && statsBodyCache.budget === budget && statsBodyCache.threshold === threshold) {
             return statsBodyCache.body
+          }
+          // 形状金丝雀：每次文档换代（缓存未命中 = 新聚合轮）校验一次，漂移告警
+          // 留在宿主日志；不拦截下发——客户端 typeof 守卫兜底，绝不因 schema 把面板 500。
+          const shapeError = usageStatsShapeError(doc)
+          if (shapeError !== null) {
+            console.warn('[usage-billing] usage-stats document shape drift (serving anyway):', shapeError)
           }
           const body = JSON.stringify(decorate(doc))
           statsBodyCache = { doc, budget, threshold, body }

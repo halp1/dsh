@@ -38,5 +38,7 @@ export interface UsageStatsDeps {
     /** 等待预算（毫秒）：聚合在此预算内完成就回实时数据，超预算立即回最近快照。 */
     responseBudgetMs: number;
 }
+/** 校验一份聚合文档；返回漂移原因（null = 形状正常）。纯只读，不改 doc。 */
+export declare function usageStatsShapeError(doc: unknown): string | null;
 export declare function registerUsageStatsRoute(ctx: Context, deps: UsageStatsDeps): void;
 //# sourceMappingURL=usage-stats.d.ts.map

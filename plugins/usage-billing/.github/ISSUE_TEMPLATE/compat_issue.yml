@@ -1,0 +1,102 @@
+name: Compatibility issue
+description: 报告宿主版本兼容性 / 计费口径 / 适配矩阵问题。详见 `COMPATIBILITY.md` 双线策略与 `CHANGELOG.md` 宿主适配范围。
+title: '[compat] '
+labels: ['compat']
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 提交前
+
+        - [ ] 已查 `COMPATIBILITY.md` 双线声明的宿主版本范围
+        - [ ] 已查 `CHANGELOG.md` 最近发版的「预览线适配范围」一行
+        - [ ] 在 Issue 列表没找到同类兼容问题
+
+  - type: dropdown
+    id: compat_type
+    attributes:
+      label: 兼容问题类型
+      options:
+        - 插件装不上 / 装载即崩
+        - 路由 500 / 404 / 405
+        - 计费口径错（按官方 / 按量 / 订阅归类错）
+        - 余额 / 订阅 / 中转站端点读不到
+        - 真实账本与本机聚合对不上（余额差对账漂移）
+        - 视觉 / Modal / portal 叠压异常
+        - 其他
+    validations:
+      required: true
+
+  - type: input
+    id: dsh_version
+    attributes:
+      label: DSH 宿主版本
+      description: '`pnpm ls -g @deepseek-ai/dsh` 或 `dsh --version` 的输出'
+      placeholder: '例：0.2.1-rc.2'
+    validations:
+      required: true
+
+  - type: input
+    id: plugin_version
+    attributes:
+      label: 本插件版本
+      description: '`pnpm ls -g @kenz1117/dsh-ui-usage-billing` 或 `dsh plugin list`'
+      placeholder: '例：1.5.1'
+    validations:
+      required: true
+
+  - type: dropdown
+    id: line
+    attributes:
+      label: 影响的发布线
+      description: 详见 COMPATIBILITY.md
+      options:
+        - 预览线（1.5.x 适配 DSH 0.1.2+）
+        - 稳定线（1.1.x 适配 DSH 0.1.0-0.1.1，已冻结）
+        - 都不确定
+    validations:
+      required: true
+
+  - type: dropdown
+    id: api_layer
+    attributes:
+      label: 出问题的 API 层
+      options:
+        - 服务端 HTTP 端点（9 条）
+        - 服务端聚合器（`src/aggregate.ts`）
+        - 服务端账本 / 快照
+        - 客户端 fetch / 接口
+        - 客户端 UI 组件
+        - 客户端 i18n / 主题
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现 / 现象
+      description: 怎么操作看到了兼容问题？预期 vs 实际？
+      placeholder: '例：在 DSH 0.2.1-rc.1 跑本插件 1.5.1，打开仪表盘 → 余额行不显示 → 宿主日志报 [usage-billing] refreshBalances failed ...'
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 关键日志（必填）
+      description: '本插件 `console.warn/error` 行（以 `[usage-billing]` 前缀）+ 宿主 `~/.dsh/logs/dsh-service.log` 相关段'
+      placeholder: |
+        [usage-billing] refreshBalances failed; serving cached balances: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: bisect
+    attributes:
+      label: 是否做过版本二分定位（可选）
+      description: '降级到哪个版本正常？升级到哪个版本崩？'
+      placeholder: '1.5.0 正常，1.5.1 崩；1.5.0 升 1.5.1 后回不去（已发布到 npm latest）'
+    validations:
+      required: false

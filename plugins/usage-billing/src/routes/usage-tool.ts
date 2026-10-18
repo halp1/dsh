@@ -42,23 +42,25 @@ export function registerUsageToolRoute(ctx: Context, deps: UsageToolDeps): void 
           res.end(JSON.stringify({ error: 'method not allowed' }))
           return
         }
+        // 跨站写保护必须先于状态行（v1.5.2 修复）：POST 的 Origin / Content-Type
+        // 校验原先排在 writeHead(200) 之后，校验失败时二次 writeHead(403/415)
+        // 抛 ERR_HTTP_HEADERS_SENT，宿主直接断连——跨站攻击请求得到的是
+        // connection reset 而非可诊断的 403。GET 只读不涉 CSRF，无需这些校验。
+        if (req.method === 'POST') {
+          if (!isLoopbackOrigin(req.headers.origin)) {
+            res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' })
+            res.end(JSON.stringify({ error: 'forbidden: loopback only' }))
+            return
+          }
+          if (!(req.headers['content-type'] ?? '').toLowerCase().includes('application/json')) {
+            res.writeHead(415, { 'content-type': 'application/json; charset=utf-8' })
+            res.end(JSON.stringify({ error: 'unsupported content-type' }))
+            return
+          }
+        }
         res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
         if (req.method === 'GET') {
           res.end(JSON.stringify({ enabled: deps.read() }))
-          return
-        }
-        // 跨站写保护：POST 是写操作（改写设置命名空间/条目 config），必须校验 Origin
-        // 头是回环，且 Content-Type 为 application/json。跨站表单/fetch 的简单请求只
-        // 能带 text/plain 等，带不了 application/json（会触发 CORS preflight 而被上方
-        // guardLoopback 的 methodOk 拒绝），从两个维度堵住 CSRF。
-        if (!isLoopbackOrigin(req.headers.origin)) {
-          res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify({ error: 'forbidden: loopback only' }))
-          return
-        }
-        if (!(req.headers['content-type'] ?? '').toLowerCase().includes('application/json')) {
-          res.writeHead(415, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify({ error: 'unsupported content-type' }))
           return
         }
         // 读取并解析 JSON body 后写回；body 只承载一个布尔开关，512 字节上限
@@ -68,6 +70,8 @@ export function registerUsageToolRoute(ctx: Context, deps: UsageToolDeps): void 
           for await (const chunk of req) {
             body += String(chunk)
             if (body.length > 512) {
+              // 状态行显式（同 notify-claim 的 413）：无 writeHead 时默认 200。
+              res.writeHead(413, { 'content-type': 'application/json; charset=utf-8' })
               res.end(JSON.stringify({ error: 'body too large' }))
               return
             }
