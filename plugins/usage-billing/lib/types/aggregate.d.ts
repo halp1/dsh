@@ -389,6 +389,17 @@ export interface SessionUsageRow {
     title?: string;
     /** 会话创建时的工作目录（项目路径）；未知时缺失。 */
     cwd?: string;
+    /**
+     * 直接父会话 id（仅子智能体会话携带）：宿主 header 的 `origin: "subagent"`
+     * 会话经 parentSession 指向委派它的对话。fork/resume 的种子血缘
+     * （isSeeded）不满足子智能体门，不带本字段。旧宿主 header 无标记，
+     * 按顶层会话处理。
+     */
+    parentId?: string;
+    /** 全部后代子会话的费用合计（人民币元，多级委派整链递归）；无后代或后代全免费时缺失。 */
+    subCost?: number;
+    /** 全部后代子会话的调用数；无后代时缺失。 */
+    subCalls?: number;
     calls: number;
     cost: number;
     /** 最后一个事件的时间戳（毫秒）。 */
@@ -396,6 +407,20 @@ export interface SessionUsageRow {
     /** 数据来自旧算法折叠的持久账本行（日志已删/不可读，无法重算）；UI 据此标注置信度。 */
     stale?: boolean;
 }
+/**
+ * 从会话 header 提取子智能体归并标记（直接父会话 id）：`origin: "subagent"`
+ * （宿主的产品分类）或 `delegationDepth > 0`（持久化委派深度）任一命中即视为
+ * 子会话。子会话但 header 无 parentSession（异常数据）返回 undefined——无法
+ * 归位就按顶层会话处理，保守不标。导出供测试。
+ */
+export declare function subParentOf(meta: SessionHeader): string | undefined;
+/**
+ * 给会话行补后代合计（subCost/subCalls）：按 parentId 建子索引，对每行递归
+ * 汇总全部后代子会话（多级委派整链计入根对话）。纯展示层归因——不改任何
+ * 总额桶（子会话费用本就在 total/byDay/byModel 里，行级只是拆出来给人看）。
+ * 环引用（异常数据）按 visited 跳过，不死循环。原地修改传入行。导出供测试。
+ */
+export declare function foldSubagentFamilies(rows: SessionUsageRow[]): void;
 /** 每轮费用明细行：仪表盘「每轮费用」图的数据源。 */
 export interface TurnUsageRow {
     /** 会话 id（字符串形式）：不同会话的轮次号相互独立，展示时需区分。 */
@@ -563,6 +588,12 @@ export interface SerializedSessionFold {
 export interface UsageLedgerSession {
     id: string;
     cwd?: string;
+    /**
+     * 子智能体归并标记（直接父会话 id）：仅宿主 header 带 `origin: "subagent"`
+     * 的会话行携带。日志已删、只剩账本行时仍能归位到父对话；缺失 = 顶层会话
+     * （含 fork/resume 血缘）。可选字段，旧账本行缺失按顶层处理，无需迁移。
+     */
+    subOf?: string;
     /** Stable log stamp (mtime + size) when the persistence backend exposes it. */
     stamp?: string;
     /**

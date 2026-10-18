@@ -1059,9 +1059,14 @@ export const BUILTIN_MODEL_KEY_ALIASES: Readonly<Record<string, string>> = {
   // 官方价目页 09-10 更新后的新规范名 deepseek-flash（模型版本 V4.1-Flash，
   // 含图像理解——vision 并入 flash 主线）：计费同 flash 时间线。
   'deepseek-flash': 'flash',
+  // V4.1-Flash-1017（宿主 0.2.1-rc.2 起适配的 2026-10-17 快照版）：官方公告
+  // 明确按 Flash 价计费、无新调价节点（旧 v4-flash 名请求也由它服务），
+  // 归一 flash 键沿用现行价与峰谷时间线。
+  'deepseek-v4.1-flash-1017': 'flash',
   // 中转站厂商前缀形态（CommandCode 等 OpenRouter 式 `deepseek/<id>` 命名，
   // issue #91）：上游 id 不改写，仅加命名空间前缀，归一到既有键按官方价计。
   'deepseek/deepseek-v4.1-flash': 'flash',
+  'deepseek/deepseek-v4.1-flash-1017': 'flash',
   'deepseek/deepseek-flash': 'flash',
   'deepseek/deepseek-v4-pro': 'pro',
   'deepseek-v4-pro': 'pro',

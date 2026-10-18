@@ -178,6 +178,15 @@ interface SessionBillingRow {
     id: string;
     title?: string;
     cwd?: string;
+    /**
+     * 直接父会话 id（仅子智能体会话携带）：宿主把子智能体落成独立会话，
+     * header 的 origin: subagent + parentSession 指向委派它的对话。
+     */
+    parentId?: string;
+    /** 全部后代子会话费用合计（服务端递归算好）；无后代时缺失。 */
+    subCost?: number;
+    /** 全部后代子会话调用数；无后代时缺失。 */
+    subCalls?: number;
     /** 数据来自旧算法折叠的持久账本行（原始日志已删，无法重算）。 */
     stale?: boolean;
     calls: number;
@@ -187,6 +196,8 @@ interface SessionBillingRow {
     mergedCount?: number;
     /** 合并组的段明细（展示层专用）：一级行默认收起，展开后逐段显示。合并函数需 push，故非 readonly。 */
     children?: SessionBillingRow[];
+    /** 挂到本组下的子智能体行（展示层专用）：与段明细并列展开，带子智能体徽标。 */
+    subs?: SessionBillingRow[];
 }
 /** Usage stats structure from `.dsh-usage-stats.json`. */
 export interface UsageStats {

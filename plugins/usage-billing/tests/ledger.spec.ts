@@ -65,7 +65,9 @@ describe('createFileUsageLedgerStore', () => {
     const path = join(root, 'usage-ledger.json')
     const store = createFileUsageLedgerStore(path)
     // 新鲜锁：可能是慢 writer 的活跃锁，不做年龄自愈，等待超时后原样失败。
-    await writeFile(`${path}.lock`, '999\n')
+    // 持有者 pid 须真实存活（上游 dsh-atomic-write 0.2.1 起按 kill(pid,0) 回收
+    // 死进程孤儿锁，不存在 pid 会立即被抢占而不是超时）：pid 1 恒存活。
+    await writeFile(`${path}.lock`, '1\n')
 
     await expect(store.save({ version: 1, updatedAt: 1, sessions: [] }))
       .rejects.toThrow('timed out waiting for the writer lock')

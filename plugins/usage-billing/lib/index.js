@@ -2301,7 +2301,9 @@ const BUILTIN_MODEL_KEY_ALIASES = {
 	"deepseek-v4.1-flash": "flash",
 	"deepseek-v4.1-flash-expires-on-0910": "flash",
 	"deepseek-flash": "flash",
+	"deepseek-v4.1-flash-1017": "flash",
 	"deepseek/deepseek-v4.1-flash": "flash",
+	"deepseek/deepseek-v4.1-flash-1017": "flash",
 	"deepseek/deepseek-flash": "flash",
 	"deepseek/deepseek-v4-pro": "pro",
 	"deepseek-v4-pro": "pro",
@@ -2732,6 +2734,57 @@ function hostTimeZone(now = /* @__PURE__ */ new Date()) {
 function workspaceNameOf(cwd) {
 	if (cwd === void 0 || cwd === "") return "—";
 	return cwd.split(/[\\/]/).filter(Boolean).at(-1) ?? "—";
+}
+/**
+* 从会话 header 提取子智能体归并标记（直接父会话 id）：`origin: "subagent"`
+* （宿主的产品分类）或 `delegationDepth > 0`（持久化委派深度）任一命中即视为
+* 子会话。子会话但 header 无 parentSession（异常数据）返回 undefined——无法
+* 归位就按顶层会话处理，保守不标。导出供测试。
+*/
+function subParentOf(meta) {
+	if (meta.origin !== "subagent" && !((meta.delegationDepth ?? 0) > 0)) return void 0;
+	const parent = meta.parentSession;
+	return typeof parent === "string" && parent !== "" ? parent : void 0;
+}
+/**
+* 给会话行补后代合计（subCost/subCalls）：按 parentId 建子索引，对每行递归
+* 汇总全部后代子会话（多级委派整链计入根对话）。纯展示层归因——不改任何
+* 总额桶（子会话费用本就在 total/byDay/byModel 里，行级只是拆出来给人看）。
+* 环引用（异常数据）按 visited 跳过，不死循环。原地修改传入行。导出供测试。
+*/
+function foldSubagentFamilies(rows) {
+	const subsOf = /* @__PURE__ */ new Map();
+	for (const row of rows) {
+		const parent = row.parentId;
+		if (parent === void 0) continue;
+		const list = subsOf.get(parent);
+		if (list !== void 0) list.push(row);
+		else subsOf.set(parent, [row]);
+	}
+	const familyOf = (id, visited) => {
+		let cost = 0;
+		let calls = 0;
+		for (const child of subsOf.get(id) ?? []) {
+			if (visited.has(child.id)) continue;
+			visited.add(child.id);
+			cost += child.cost;
+			calls += child.calls;
+			const nested = familyOf(child.id, visited);
+			cost += nested.cost;
+			calls += nested.calls;
+		}
+		return {
+			cost,
+			calls
+		};
+	};
+	for (const row of rows) {
+		const family = familyOf(row.id, /* @__PURE__ */ new Set([row.id]));
+		if (family.calls > 0) {
+			row.subCalls = family.calls;
+			if (family.cost > 0) row.subCost = family.cost;
+		}
+	}
 }
 /** TTFT 尖峰阈值（毫秒）：超过计为一次尖峰样本，用于定位服务端抖动。 */
 const PERF_SPIKE_MS = 1e4;
@@ -3533,11 +3586,12 @@ function createUsageAggregator(persistence, options = {}) {
 	*  价目表变化后未受影响行（无 unpriced 模型）依旧零读取复用。 */
 	const foldNeedsReprice = (fold) => fold.unpricedModels.some((key) => isPriced(key));
 	/** 把一份（全量或增量）折叠结果登记进 durable ledger；内容无变化时不落盘。 */
-	const recordLedger = (id, cwd, stamp, fold) => {
+	const recordLedger = (id, cwd, stamp, fold, subOf) => {
 		if (options.ledger === void 0) return;
 		const entry = {
 			id,
 			...cwd === void 0 ? {} : { cwd },
+			...subOf === void 0 ? {} : { subOf },
 			...stamp === null ? {} : { stamp },
 			foldVersion: 23,
 			fingerprint: foldFingerprint,
@@ -3545,7 +3599,7 @@ function createUsageAggregator(persistence, options = {}) {
 			fold: serializeFold(fold)
 		};
 		const row = ledger.get(id);
-		if (row === void 0 || row.stamp !== entry.stamp || row.cwd !== entry.cwd || row.foldVersion !== entry.foldVersion || row.fingerprint !== entry.fingerprint || stamp === null && JSON.stringify(row.fold) !== JSON.stringify(entry.fold) || stamp !== null && foldNeedsReprice(row.fold)) {
+		if (row === void 0 || row.stamp !== entry.stamp || row.cwd !== entry.cwd || row.subOf !== entry.subOf || row.foldVersion !== entry.foldVersion || row.fingerprint !== entry.fingerprint || stamp === null && JSON.stringify(row.fold) !== JSON.stringify(entry.fold) || stamp !== null && foldNeedsReprice(row.fold)) {
 			ledger.set(id, entry);
 			ledgerNeedsSave = true;
 		}
@@ -3637,12 +3691,14 @@ function createUsageAggregator(persistence, options = {}) {
 			}
 			try {
 				const cwd = meta.cwd;
+				const subOf = subParentOf(meta);
 				const ledgerRow = ledger.get(id);
 				if (ledgerRow !== void 0 && ledgerRow.stamp !== void 0 && stamp !== null && ledgerRow.stamp === stamp && (ledgerRow.foldVersion ?? 1) === 23 && ledgerRow.fingerprint === foldFingerprint && !foldNeedsReprice(ledgerRow.fold)) {
 					const fold = deserializedFoldOf(ledgerRow.fold);
 					folds.push({
 						id,
 						...cwd === void 0 ? {} : { cwd },
+						...subOf === void 0 ? {} : { subOf },
 						fold
 					});
 					included.add(id);
@@ -3655,6 +3711,7 @@ function createUsageAggregator(persistence, options = {}) {
 					folds.push({
 						id,
 						...meta.cwd === void 0 ? {} : { cwd: meta.cwd },
+						...subOf === void 0 ? {} : { subOf },
 						fold: hit.fold
 					});
 					included.add(id);
@@ -3683,10 +3740,11 @@ function createUsageAggregator(persistence, options = {}) {
 					folds.push({
 						id,
 						...cwd === void 0 ? {} : { cwd },
+						...subOf === void 0 ? {} : { subOf },
 						fold: previous.fold
 					});
 					included.add(id);
-					recordLedger(id, cwd, stamp, previous.fold);
+					recordLedger(id, cwd, stamp, previous.fold, subOf);
 					continue;
 				}
 				const { events, inheritedEventCount } = await persistence.readFrom(meta.id, sessionLogOffsetOf(0));
@@ -3712,10 +3770,11 @@ function createUsageAggregator(persistence, options = {}) {
 				folds.push({
 					id,
 					...cwd === void 0 ? {} : { cwd },
+					...subOf === void 0 ? {} : { subOf },
 					fold
 				});
 				included.add(id);
-				recordLedger(id, cwd, stamp, fold);
+				recordLedger(id, cwd, stamp, fold, subOf);
 			} catch (error) {
 				skipped.push(id);
 				const format = isFormatUnsupportedError(error);
@@ -3743,6 +3802,7 @@ function createUsageAggregator(persistence, options = {}) {
 					folds.push({
 						id: entry.id,
 						...entry.cwd === void 0 ? {} : { cwd: entry.cwd },
+						...entry.subOf === void 0 ? {} : { subOf: entry.subOf },
 						...stale ? { staleLedger: true } : {},
 						fold: deserializedFoldOf(entry.fold)
 					});
@@ -3779,7 +3839,7 @@ function createUsageAggregator(persistence, options = {}) {
 		const perfHourModel = /* @__PURE__ */ new Map();
 		const perfModelDigest = /* @__PURE__ */ new Map();
 		const perfHourDigest = /* @__PURE__ */ new Map();
-		for (const { id: sessionId, cwd, fold, staleLedger } of folds) {
+		for (const { id: sessionId, cwd, subOf, fold, staleLedger } of folds) {
 			mergeUsageInto(total, fold.total);
 			roles.userChars += fold.roles.userChars;
 			roles.toolChars += fold.roles.toolChars;
@@ -3858,12 +3918,14 @@ function createUsageAggregator(persistence, options = {}) {
 				id: sessionId,
 				...fold.title !== void 0 ? { title: fold.title } : {},
 				...cwd !== void 0 ? { cwd } : {},
+				...subOf !== void 0 ? { parentId: subOf } : {},
 				...staleLedger === true ? { stale: true } : {},
 				calls: fold.total.calls,
 				cost: fold.total.cost,
 				lastActive: fold.lastActive
 			});
 		}
+		foldSubagentFamilies(sessionRows);
 		sessionRows.sort((a, b) => b.cost - a.cost || b.lastActive - a.lastActive);
 		turnRows.sort((a, b) => b.startedAt - a.startedAt);
 		const workspaces = [...workspaceMap.values()].sort((a, b) => b.cost - a.cost || b.lastActive - a.lastActive);

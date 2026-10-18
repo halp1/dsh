@@ -22,6 +22,7 @@ export interface LiveStats {
     bySession?: readonly {
         id: string;
         cost: number;
+        subCost?: number;
     }[];
     byTurn?: readonly {
         sessionId: string;
@@ -40,13 +41,22 @@ export interface QuotaSlice {
     }[];
 }
 /**
- * 当前会话累计费用：bySession 里会话 id 匹配的那行；缺省为 0。
- * 导出供测试：纯函数。
+ * 当前会话累计费用：bySession 里会话 id 匹配的那行（含后代子智能体费用
+ * subCost——子智能体是宿主的独立会话，其消耗按父链并入本对话的口径）；
+ * 缺省为 0。导出供测试：纯函数。
  * @param stats - 薄统计切片。
  * @param sessionId - 当前会话 id。
- * @returns 该会话累计费用（人民币元）。
+ * @returns 该会话累计费用（人民币元，含子智能体）。
  */
 export declare function sessionCostOf(stats: LiveStats | null, sessionId: string | undefined): number;
+/**
+ * 当前会话的后代子智能体费用（bySession 行的 subCost）：供「含子」拆分展示，
+ * 让胶囊上的总额与本体会话费用对得上账。导出供测试：纯函数。
+ * @param stats - 薄统计切片。
+ * @param sessionId - 当前会话 id。
+ * @returns 后代子会话费用合计（人民币元）；无则 0。
+ */
+export declare function sessionSubCostOf(stats: LiveStats | null, sessionId: string | undefined): number;
 /**
  * 当前轮费用：byTurn 里该会话最新一轮的 cost；缺省为 0。
  * byTurn 服务端按起始时间倒序下发，但求 max(turn) 更稳健（不依赖顺序）。

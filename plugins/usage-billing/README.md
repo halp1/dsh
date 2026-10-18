@@ -49,6 +49,7 @@ DeepSeek / Kimi / 智谱 GLM / 腾讯云 TokenHub 等 7 家官方余额、Coding
 ### 还有这些同类少见的细节
 
 - 不止「花了多少」还答「花在哪」：输入按缓存命中 / 未命中分桶（含 reasoning）、官方 / 三方分桶、按工作区 / 会话 / 中转站下钻、每轮费用突增归因。
+- 子智能体费用并入对话口径：宿主把子智能体落成独立会话，账本按父链把后代消耗归并到委派它的对话（多级委派整链递归），父行「含子智能体」徽标明示合计、展开可见逐个子会话——胶囊上的会话总额与账单对本体+子会话对得上账。
 - 性能面板：各模型首字延时（TTFT）均值 / P50 / P90 与生成速度，同类少有。
 - 未收录模型显著标注「未收录」、绝不静默计 0；目录外模型配一条别名即完成识别与计价。
 - 可选的 `usage_stats` 工具让模型直接回答「今天花了多少」「哪个站点用得最多」。
@@ -251,7 +252,7 @@ npm publish --access public
 
 - **权限等级：high**：读取持久会话日志（文件）、访问多厂商官方 / 订阅 / 余额 / 定价 API（网络）、经凭据 seam 读取 `apiKeyEnv`（凭据）、写入 harness home（`DSH_HOME` / `~/.dsh`）下的账本与快照（持久状态）；**不含**命令执行 / Shell。
 - **更新通道：`user-reviewed`**：本插件具备文件 / 网络 / 凭据能力，DSH STORE 采用每次安装需本机人工确认的通道；安装前请复核仓库、固定 Commit、生命周期脚本与影响范围。
-- **兼容范围**：预览线（npm `latest`/`alpha`，1.4.x，自 v1.2.0 起恒高于稳定线以消除版本号倒挂）适配 DSH `0.1.2` ~ `0.2.0` 系（宿主 `latest` 现指向 0.2.0-rc.2，逐版本兼容声明随真机验证扩展）；稳定线（npm `stable`，1.1.x，**已冻结**，终版 v1.1.17）适配旧宿主 `0.1.0-rc.8` ~ `0.1.1-rc.2`。逐版本声明见 `package.json` 的 `dsh.compatibility`，双线对照与监控机制见 [COMPATIBILITY.md](COMPATIBILITY.md)。Node.js `^22.19.0 || >=24.0.0`。
+- **兼容范围**：预览线（npm `latest`/`alpha`，1.5.x，自 v1.2.0 起恒高于稳定线以消除版本号倒挂）适配 DSH `0.1.2-alpha.1` ~ `0.2.1-rc.2`（宿主 `latest` 现指向 0.2.0-rc.2、预览线最新为 0.2.1-rc.2；0.2.1-alpha.4/5 与 rc.1 未真机验证不声明，rc.2 起恢复逐版本扩展）；稳定线（npm `stable`，1.1.x，**已冻结**，终版 v1.1.17）适配旧宿主 `0.1.0-rc.8` ~ `0.1.1-rc.2`。逐版本声明见 `package.json` 的 `dsh.compatibility`，双线对照与监控机制见 [COMPATIBILITY.md](COMPATIBILITY.md)。Node.js `^22.19.0 || >=24.0.0`。
 - **生命周期**：无 `preinstall` / `install` / `postinstall` / `prepare`（安装即用）。
 - **不冒用官方**：仅新增自有 entry id `ui-usage-billing`；对 `@deepseek-ai/dsh-*` 仅为 `peerDependencies` 依赖（不重复安装 / 不替换 / 不遮蔽官方组件），包名使用第三方命名空间 `@kenz1117/*`。
 - **打包产物**：运行文件 `lib/*` 与 `cordis.patch.yml` 已随固定 Commit 提交并声明在 `files`。
