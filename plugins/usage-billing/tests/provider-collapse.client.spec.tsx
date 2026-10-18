@@ -24,7 +24,12 @@ import {
   PROVIDERS_TODAY_STORAGE_KEY,
 } from '../src/client/usage-billing-settings.ts'
 
-beforeEach(() => { localStorage.clear() })
+beforeEach(() => {
+    localStorage.clear()
+    // 本批用例测分组/折叠逻辑本身：显式关闭「隐藏未识别/未知」偏好，
+    // 让未知路由组可见（开关语义由真机验收与专门用例覆盖）。
+    localStorage.setItem('dsh.ui-usage-billing.sites', '{"hideUnidentified":false}')
+  })
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
@@ -56,6 +61,9 @@ const makeProps = (): ComponentProps<typeof UsageBilling> => {
     publishCosts: () => {},
     registerOpen: () => () => {},
     renderSlot: () => null,
+    // 显式关闭「隐藏未识别/未知」偏好：本批用例测分组逻辑本身，
+    // 未知路由组必须可见（隐藏行为由开关语义单独覆盖）。
+    sitePrefs: { hideUnidentified: false },
     useStore: bindSnapshotSelector(budgetStore),
     actions: budgetStore.actions,
   } as unknown as ComponentProps<typeof UsageBilling>

@@ -1587,7 +1587,12 @@ function BillingDashboard({
       }
     }
     // 仅看今日：无当日模型消耗的组（纯订阅 / 纯余额组）一并隐藏。
-    const visible = providersTodayOnly ? groups.filter(group => group.models.length > 0) : groups
+    // 中转站列表开关（issue #17 扩展）：开启时「未知路由」组一并隐藏——
+    // 用户反馈该开关只藏了未识别占位，供应商组里的「未知」还挂着。
+    const visible = groups.filter(group => {
+      if (sitePrefs.hideUnidentified && group.channelKind === 'unknown') return false
+      return providersTodayOnly ? group.models.length > 0 : true
+    })
     return visible
       .sort((a, b) => {
         const diff = providerCostOf(b) - providerCostOf(a)
@@ -1598,7 +1603,7 @@ function BillingDashboard({
         if (a.models.length === 0) return 1
         return a.name.localeCompare(b.name, 'zh')
       })
-  }, [stats.byDayModelsSite, stats.byModel, quotas, balances, health, lang, t, providersTodayOnly])
+  }, [stats.byDayModelsSite, stats.byModel, quotas, balances, health, lang, t, providersTodayOnly, sitePrefs.hideUnidentified])
 
   /* v1.5 Tab 徽章数据信号：从已聚合的 providerGroups / stats / pricingSyncedAt 派生。
      放这里是为了引用顺序正确（providerGroups 在 line 2406 才声明）。
@@ -2799,6 +2804,37 @@ function BillingDashboard({
 
               {/* 6. 插件信息卡：作者 / 仓库 / 版本 / 许可证（设置 Tab 常驻）。 */}
               <div hidden={settingsSectionHiddenBy(SETTINGS_KEYWORDS.about)} id="settings-about"><PluginInfoCard t={t} version={stats.pluginVersion} /></div>
+
+              {/* 更多作品：同作者的两个配套插件（设置-关于分组）。 */}
+              <section hidden={settingsSectionHiddenBy(SETTINGS_KEYWORDS.about)} className={css.setCard} data-testid="billing-more-works">
+                <div className={css.setCardHead}>
+                  <div className={css.setCardMeta}>
+                    <h3 className={css.setCardTitle}>{t('moreWorksTitle')}</h3>
+                  </div>
+                </div>
+                <div className={css.moreWorkList}>
+                  <a
+                    className={css.moreWorkRow}
+                    href="https://github.com/kenz1117/dsh-engram"
+                    target="_blank"
+                    rel="noreferrer"
+                    data-testid="billing-ad-engram"
+                  >
+                    <span className={css.moreWorkName}>{t('adEngramName')}</span>
+                    <span className={css.moreWorkDesc}>{t('adEngramDesc')}</span>
+                  </a>
+                  <a
+                    className={css.moreWorkRow}
+                    href="https://github.com/kenz1117/dsh-ui-rainbowspeak"
+                    target="_blank"
+                    rel="noreferrer"
+                    data-testid="billing-ad-rainbowspeak"
+                  >
+                    <span className={css.moreWorkName}>{t('adRainbowName')}</span>
+                    <span className={css.moreWorkDesc}>{t('adRainbowDesc')}</span>
+                  </a>
+                </div>
+              </section>
                 </div>{/* settingsPane */}
               </div>{/* settingsLayout */}
             </div>

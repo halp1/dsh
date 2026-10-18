@@ -289,6 +289,11 @@ export type UsageBillingKey =
   | 'modelBudgetHint'
   | 'modelBudgetBody'
   | 'modelBudgetPlaceholder'
+  | 'moreWorksTitle'
+  | 'adEngramName'
+  | 'adEngramDesc'
+  | 'adRainbowName'
+  | 'adRainbowDesc'
   | 'kpiDescCacheHit'
   | 'kpiDescTokens'
   | 'kpiDescAvgCost'
@@ -474,8 +479,8 @@ export const zh: Record<UsageBillingKey, string> = {
   'cardDisplay': '计费卡显示',
   'cardDisplayHint': '切换左下角计费卡的主指标与主数字统计范围（迷你柱跟随视角，悬浮窗不受影响）；「今日环比」徽章太醒目可在此隐藏。',
   'cardMetric': '主指标',
-  'cardMetricMoney': '花费金额',
-  'cardMetricTokens': 'Token 消耗',
+  'cardMetricMoney': '金额',
+  'cardMetricTokens': 'Token',
   'cardSpan': '统计范围',
   'cardSpanDay': '日',
   'cardSpanWeek': '周',
@@ -644,6 +649,11 @@ export const zh: Record<UsageBillingKey, string> = {
   'modelBudgetHint': '为单个模型设本月上限（人民币元）；跨 80% / 100% 各提醒一次，留空 = 不限。',
   'modelBudgetBody': '「{model}」本月已 {cost}（预算 {budget} 的 {pct}%）',
   'modelBudgetPlaceholder': '上限',
+  'moreWorksTitle': '更多作品',
+  'adEngramName': 'DSH Engram · 记忆宫殿',
+  'adEngramDesc': '跨会话长期记忆：记忆图谱 · 混合检索 · 知识飞轮',
+  'adRainbowName': 'RainbowSpeak · 虹语',
+  'adRainbowDesc': '聊天输入框的彩虹流光边框，持续流动的渐变光环',
   'kpiDescCacheHit': '缓存命中 token ÷ 总输入 token。命中率越高，输入费用越低（缓存读单价约为未命中的 1/10）。',
   'kpiDescTokens': '总处理 token = 输入 + 输出。缓存读/写已含在输入内，不重复计数（issue #85 口径）。',
   'kpiDescAvgCost': '统计范围内总费用 ÷ 总调用次数，单次调用的平均开销。',
@@ -677,7 +687,7 @@ export const zh: Record<UsageBillingKey, string> = {
   'unpricedHint': '{count} 个模型未收录计价，费用已按 0 计',
   'searchEstimateHint': '含 {count} 次联网搜索请求的估算费用（每次约 {each}；日志无用量事件，按次估算，可在配置 searchCallEstimateCny 调整或关闭）',
   'siteListDisplay': '中转站列表',
-  'siteListDisplayHint': '隐藏「未识别」占位条目，净化中转站额度列表',
+  'siteListDisplayHint': '隐藏「未识别」占位条目与「未知路由」分组，净化列表',
   'liveCostBar': '平价消耗胶囊',
   'liveCostBarHint': '输入框旁的即时代费条，悬浮可看详情',
   'liveCostBarPosition': '位置',
@@ -824,7 +834,7 @@ export const en: Record<UsageBillingKey, string> = {
   'cardDisplayHint': 'Switch the bottom-left billing card between cost and token usage, and pick the figure range (sparkline follows; the popover is unaffected). The day-over-day badge can be hidden here.',
   'cardMetric': 'Main metric',
   'cardMetricMoney': 'Cost',
-  'cardMetricTokens': 'Token usage',
+  'cardMetricTokens': 'Tokens',
   'cardSpan': 'Range',
   'cardSpanDay': 'Day',
   'cardSpanWeek': 'Week',
@@ -991,6 +1001,11 @@ export const en: Record<UsageBillingKey, string> = {
   'modelBudgetHint': 'Set a monthly cap per model (CNY); alerts fire once each at 80% / 100%. Empty = unlimited.',
   'modelBudgetBody': '"{model}" has spent {cost} this month ({pct}% of {budget})',
   'modelBudgetPlaceholder': 'Cap',
+  'moreWorksTitle': 'More plugins',
+  'adEngramName': 'DSH Engram · Memory Palace',
+  'adEngramDesc': 'Cross-session long-term memory: graph · hybrid retrieval · flywheel',
+  'adRainbowName': 'RainbowSpeak',
+  'adRainbowDesc': 'A flowing rainbow marquee border for the chat composer',
   'kpiDescCacheHit': 'Cache-hit tokens ÷ total input tokens. Higher hit rate means lower input cost (cache reads are ~1/10 the miss price).',
   'kpiDescTokens': 'Total tokens = input + output. Cache reads/writes are already part of input and are not double-counted (issue #85).',
   'kpiDescAvgCost': 'Total cost ÷ total calls within the selected range — the average cost per call.',

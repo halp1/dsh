@@ -4908,3 +4908,45 @@ span.bandDot { cursor: default; }
   cursor: help;
   vertical-align: 1px;
 }
+
+/* 关于页「更多作品」广告位：两行可点卡片（GitHub 外链）。 */
+.moreWorkList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.moreWorkRow {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--ds-border);
+  border-radius: var(--ds-r-1);
+  background: var(--dsb-3);
+  color: inherit;
+  text-decoration: none;
+  transition: border-color var(--ds-t-fast), background-color var(--ds-t-fast);
+}
+
+.moreWorkRow:hover {
+  border-color: var(--ds-border-strong);
+  background: var(--dsb-2);
+}
+
+.moreWorkName {
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 600;
+  color: var(--ds-t-1);
+}
+
+.moreWorkRow:hover .moreWorkName {
+  color: var(--ds-blue);
+}
+
+.moreWorkDesc {
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--ds-t-3);
+}
