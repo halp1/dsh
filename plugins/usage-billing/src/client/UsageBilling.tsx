@@ -2311,7 +2311,7 @@ function BillingDashboard({
                 <div className={css.settingsPane}>
                   {/* U-4 设置页全文搜索：按关键词过滤分区（hidden 属性，锚点 id 保留）。 */}
                   <input
-                    className={css.ubSearch}
+                    className={clsx(css.ubSearch, css.settingsSearch)}
                     type="search"
                     value={settingsQuery}
                     placeholder={t('settingsSearchPlaceholder')}
@@ -2445,33 +2445,37 @@ function BillingDashboard({
                 )}
                 {/* U-3 按模型预算：本月消耗模型逐个设月度上限；与全局预算开关独立。 */}
                 <div className={css.ctlCol} data-testid="billing-model-budgets">
-                  <span className={css.ctlLabel}>{t('modelBudgetTitle')}</span>
-                  <p className={css.setCardDesc}>{t('modelBudgetHint')}</p>
+                  <span className={css.modelBudgetTitle}>{t('modelBudgetTitle')}</span>
+                  <p className={css.modelBudgetHint}>{t('modelBudgetHint')}</p>
                   {modelBudgetRows.length === 0 && (
-                    <p className={css.setCardDesc}>{t('emptyHint')}</p>
+                    <p className={css.modelBudgetHint}>{t('emptyHint')}</p>
                   )}
-                  {modelBudgetRows.map(row => (
-                    <div key={row.key} className={css.ctlRow}>
-                      <span className={css.ctlLabel}>{row.name ?? row.key}</span>
-                      <span className={css.setCardDesc} data-testid={`billing-model-budget-cost-${row.key}`}>
-                        {money(row.cost)}
-                      </span>
-                      <span className={css.inp}>
-                        <span className={css.affix} aria-hidden="true">¥</span>
-                        <input
-                          className={css.budgetInput}
-                          type="number"
-                          min={0}
-                          step={1}
-                          value={modelBudgets[row.key] ?? ''}
-                          placeholder={t('modelBudgetPlaceholder')}
-                          aria-label={`${t('modelBudgetTitle')} · ${row.name ?? row.key}`}
-                          data-testid={`billing-model-budget-${row.key}`}
-                          onChange={e => { onModelBudget(row.key, e.target.valueAsNumber) }}
-                        />
-                      </span>
-                    </div>
-                  ))}
+                  <div className={css.modelBudgetList}>
+                    {modelBudgetRows.map(row => (
+                      <div key={row.key} className={css.modelBudgetRow}>
+                        <span className={css.modelBudgetName} title={row.name ?? row.key}>
+                          {row.name ?? row.key}
+                        </span>
+                        <span className={css.modelBudgetCost} data-testid={`billing-model-budget-cost-${row.key}`}>
+                          {money(row.cost)}
+                        </span>
+                        <span className={css.inp}>
+                          <span className={css.affix} aria-hidden="true">¥</span>
+                          <input
+                            className={css.budgetInput}
+                            type="number"
+                            min={0}
+                            step={1}
+                            value={modelBudgets[row.key] ?? ''}
+                            placeholder={t('modelBudgetPlaceholder')}
+                            aria-label={`${t('modelBudgetTitle')} · ${row.name ?? row.key}`}
+                            data-testid={`billing-model-budget-${row.key}`}
+                            onChange={e => { onModelBudget(row.key, e.target.valueAsNumber) }}
+                          />
+                        </span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </section>
 

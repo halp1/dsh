@@ -4822,3 +4822,62 @@ span.bandDot { cursor: default; }
   outline: 2px solid var(--ds-blue);
   outline-offset: 1px;
 }
+
+/* S-5 设置搜索：[hidden] 会被 author 的 display:flex 等规则覆盖
+   （UA 的 [hidden]{display:none} 输给 author 规则），过滤必须强制生效。 */
+.dashboard [hidden] {
+  display: none !important;
+}
+
+/* S-5 设置搜索框：独占一行（ubSearch 的 margin-left:auto 会浮到右上角）。 */
+.settingsSearch {
+  width: 100%;
+  max-width: none;
+  margin: 0 0 12px;
+  align-self: stretch;
+}
+
+/* U-3 按模型预算：专用行样式。不复用 ctlRow/ctlLabel——ctlLabel 的
+   flex-basis 96px 在横行里是宽度，裸放纵向 ctlCol 会变成 96px 高（布局 bug 根因）。 */
+.modelBudgetList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.modelBudgetTitle {
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--ds-t-3);
+}
+
+.modelBudgetHint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--ds-t-3);
+}
+
+.modelBudgetRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 56px 84px;
+  align-items: center;
+  gap: 8px;
+}
+
+.modelBudgetName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--ds-t-2);
+}
+
+.modelBudgetCost {
+  text-align: right;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--ds-t-3);
+  font-variant-numeric: tabular-nums;
+}
