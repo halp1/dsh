@@ -8,6 +8,10 @@
 
 > **版本序列说明**：自 v1.2.0 起预览线序列恒高于稳定线 1.1.x——消除此前 1.0.x < 1.1.x 的版本号倒挂（pnpm `minimumReleaseAge` 冷静期会把刚发布的 latest 跳过、回退到旧稳定线，issue #40 有实测案例）。安装建议钉具体版本号。
 
+### v1.6.3（2026-10-19）
+
+- **修复：新版宿主设置页形态下订阅卡全部消失 + 同类取 key 缺陷清偿**（涉及面：订阅额度 / 中转站 / 声明端点 / 余额四个面板）。新代际宿主的 llm-pi-ai 把路由 key 从 `providers.<id>.apiKeyEnv` 改存为凭据 refs（路由约定名 `<ROUTE>_API_KEY`，如 kimi-coding → `KIMI_CODING_API_KEY`；kimi-coding 与 opencode-go 另有目录 ambient 名补候选），providers 配置里只剩 models 列表——插件所有「按路由取 key」的读取口都只认显式 `apiKeyEnv`，识别为零、路由整条消失。修复：识别放宽为三信号（显式 apiKeyEnv / 非空 models 列表 / 约定 ref 解析出 key 任一），key 解析统一走显式引用优先、约定 ref 补后的候选链（共享于新模块 `route-keys.ts`，覆盖订阅适配器、中转站探测、声明端点、余额查询四处）；显式 `apiKeyEnv` 恒优先，经典配置行为逐位不变，聚合层按 token 豁免口径不受影响。真机验证：MiniMax / Z.ai 额度实查恢复，无 apiKeyEnv 的中转路由重新出现在中转站面板。注意：Kimi 若显示「鉴权失败」是 key 本身过期，请在宿主里更新 key。
+
 ### v1.6.2（2026-10-18）
 
 - **修复：v1.5.x 升级用户左下角计费卡消失**（v1.6.0 引入，崩溃级）。宿主 store 引擎 rehydrate 按**整体替换**恢复持久化状态（`api.setState(parsed, true)`，不与 `init()` 合并），v1.5.x 写入的预算状态缺 v1.6.0 新增的 `modelBudgets` / `modelTierAlertDays` 两键，读取点拿到 `undefined` 后 `Object.entries(undefined)` 在挂载 effect 抛 TypeError，整个侧栏计费条目被槽位错误边界弹出。修复：两个读取点就地补空表兜底（模块级常量，引用稳定不触发重渲染）。新增 jsdom 回归测试（种入 v1.5.x 形状种子复刻宿主装载路径，修复前精确复现该 TypeError）。新装用户（空持久化）不受影响——这也是真机验收（全新 profile 自动化浏览器）未能提前暴露的原因；受影响的是所有从 v1.5.x 就地升级且用过预算功能的浏览器（Chrome / 桌面 App webview 各自独立命中）。
