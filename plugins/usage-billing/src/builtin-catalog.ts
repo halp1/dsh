@@ -397,15 +397,17 @@ export const BUILTIN_MODEL_CATALOG: readonly ModelEntry[] = [
     colorVar: 'ds-amber',
     price: { currency: 'CNY', input: 1, cacheHit: 0.1, output: 4 },
   },
-  // MiniMax-M3.1 Flash Preview：已下线，旧 id 的请求由 MiniMax-M3.1-Flash 提供服务
-  // （官方 M Plan 文档），计费按新价而非 M3（issue #97 推翻 #86 的「随 M3 计费」
-  // 旧口径——Preview 无独立价的前提已变）。保留条目以给历史日志计价。
+  // MiniMax-M3.1 Flash Preview：会员侧预览模型（已下线，官方称旧 id 请求由
+  // MiniMax-M3.1-Flash 提供服务）。价格保留 M3 口径（issue #86）：其存续期内
+  // 的调用 MiniMax 按 M3 计费，计费红线要求历史事件按事件时点规则计价，故
+  // 不随正式版新价改写；转发后仍发旧 id 的残留调用按 M3 估算属可接受的
+  // 高估偏差（新调用日志 id 已是 minimax-m3.1-flash，见上条）。
   {
     key: 'minimax-m3.1-flash-preview',
     name: 'MiniMax M3.1 Flash Preview',
     provider: 'MiniMax',
     colorVar: 'ds-amber',
-    price: { currency: 'CNY', input: 1, cacheHit: 0.1, output: 4 },
+    price: { currency: 'CNY', input: 2.1, cacheHit: 0.42, output: 8.4 },
   },
   // 云知声 U2 系列（OpenAI-compatible，云知声 MaaS，2026-10）。价格取 issue #86
   // 报告的用户侧计费口径（元/百万 token），官方 MaaS 平台价如有出入以后者为准。
@@ -1220,7 +1222,7 @@ export const BUILTIN_MODEL_KEY_ALIASES: Readonly<Record<string, string>> = {
   // MiniMax-M3.1 Flash：2026-10-19 正式版，官方 id 即目录键（点/横杠变体归一，issue #97）。
   'minimax-m3.1-flash': 'minimax-m3.1-flash',
   'minimax-m3-1-flash': 'minimax-m3.1-flash',
-  // Preview 旧 id：服务端已转发到正式版，计价同 M3.1-Flash（issue #97）。
+  // Preview 旧 id：保留独立条目（历史日志按事件时点的 M3 口径计价，issue #97）。
   'minimax-m3.1-flash-preview': 'minimax-m3.1-flash-preview',
   'minimax-m3-1-flash-preview': 'minimax-m3.1-flash-preview',
   // 云知声 U2 系列：官方 id 即目录键，收录即覆盖归一（issue #86）。

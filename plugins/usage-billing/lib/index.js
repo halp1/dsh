@@ -1330,9 +1330,9 @@ const BUILTIN_MODEL_CATALOG = [
 		colorVar: "ds-amber",
 		price: {
 			currency: "CNY",
-			input: 1,
-			cacheHit: .1,
-			output: 4
+			input: 2.1,
+			cacheHit: .42,
+			output: 8.4
 		}
 	},
 	{

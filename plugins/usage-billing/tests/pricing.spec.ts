@@ -77,14 +77,15 @@ describe('modelOf', () => {
     expect(modelOf('MiniMax-M3').uncatalogued).toBeUndefined()
   })
 
-  it('prices MiniMax-M3.1-Flash at its own launch rate and reprices the retired preview id (issue #97)', () => {
+  it('prices MiniMax-M3.1-Flash at its own launch rate, preview stays at its event-time rate (issue #97)', () => {
     // 正式版独立刊例价（元/百万 token）：输入 1.00 / 缓存读取 0.10 / 输出 4.00——
     // 不再沿用 #86 时代「随 M3 计费」的 2.1/0.42/8.4。
     expect(resolveCatalogKey('MiniMax-M3.1-Flash')).toBe('minimax-m3.1-flash')
     expect(resolveCatalogKey('minimax-m3-1-flash')).toBe('minimax-m3.1-flash')
     expect(modelOf('MiniMax-M3.1-Flash').price).toMatchObject({ currency: 'CNY', input: 1, cacheHit: 0.1, output: 4 })
-    // 旧 Preview id 已被服务端转发到正式版，计费按新价（保留条目给历史日志）。
-    expect(modelOf('MiniMax-M3.1-Flash-Preview').price).toMatchObject({ currency: 'CNY', input: 1, cacheHit: 0.1, output: 4 })
+    // 计费红线：Preview 存续期内的调用按当时生效的 M3 规则计费，不追溯改写；
+    // 转发后残留旧 id 调用的高估偏差被有意接受（新调用日志 id 已是正式版）。
+    expect(modelOf('MiniMax-M3.1-Flash-Preview').price).toMatchObject({ currency: 'CNY', input: 2.1, cacheHit: 0.42, output: 8.4 })
   })
 })
 
@@ -767,9 +768,9 @@ describe('catalog additions for issue #86 (U2 family, M3.1 Flash Preview)', () =
   it('carries the reported user-side CNY prices', () => {
     expect(modelOf('u2').price).toMatchObject({ currency: 'CNY', input: 1, cacheHit: 0.2, output: 2 })
     expect(modelOf('u2-med').price).toMatchObject({ currency: 'CNY', input: 8, cacheHit: 2, output: 28 })
-    // M3.1 Flash Preview 不再随 M3 计费（#97 推翻本用例当年的口径）：旧 id 被服务端
-    // 转发到正式版，按 M3.1-Flash 新刊例价 1/0.1/4；正式版断言在 modelOf 组。
-    expect(modelOf('minimax-m3.1-flash-preview').price).toMatchObject({ currency: 'CNY', input: 1, cacheHit: 0.1, output: 4 })
+    // Preview 条目按其存续期生效的 M3 口径保留（issue #97 未推翻历史计价，只新增
+    // 正式版条目；正式版断言在 modelOf 组）。
+    expect(modelOf('minimax-m3.1-flash-preview').price).toMatchObject({ currency: 'CNY', input: 2.1, cacheHit: 0.42, output: 8.4 })
   })
 })
 
