@@ -6,7 +6,8 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { collectSubscriptions, EMPTY_SUBSCRIPTION_KEYS, identifySubscriptionPlans, parseAnthropicUsage, parseCommandCodeCredits, parseMiniMaxRemains, parseOpenCodeAuthDocument, parseOpenRouterCredits, resolveSubscriptionAccess, subscriptionKeyRefCandidates } from '../src/subscriptions.ts'
+import { collectSubscriptions, EMPTY_SUBSCRIPTION_KEYS, identifySubscriptionPlans, parseAnthropicUsage, parseCommandCodeCredits, parseMiniMaxRemains, parseOpenCodeAuthDocument, parseOpenRouterCredits, resolveSubscriptionAccess } from '../src/subscriptions.ts'
+import { routeKeyRefCandidates } from '../src/route-keys.ts'
 
 /** A stubbed fetch answering one JSON body with the given status. */
 function stubFetch(body: unknown, status = 200): void {
@@ -87,18 +88,18 @@ describe('identifySubscriptionPlans', () => {
   })
 })
 
-describe('subscriptionKeyRefCandidates', () => {
+describe('routeKeyRefCandidates', () => {
   it('leads with the route-id convention name', () => {
-    expect(subscriptionKeyRefCandidates('minimax-cn')).toEqual(['MINIMAX_CN_API_KEY'])
-    expect(subscriptionKeyRefCandidates('zai-coding-cn')).toEqual(['ZAI_CODING_CN_API_KEY'])
-    expect(subscriptionKeyRefCandidates('openrouter')).toEqual(['OPENROUTER_API_KEY'])
+    expect(routeKeyRefCandidates('minimax-cn')).toEqual(['MINIMAX_CN_API_KEY'])
+    expect(routeKeyRefCandidates('zai-coding-cn')).toEqual(['ZAI_CODING_CN_API_KEY'])
+    expect(routeKeyRefCandidates('openrouter')).toEqual(['OPENROUTER_API_KEY'])
   })
 
   it('appends the pi-ai catalog ambient name where it differs from the convention', () => {
     // 目录把 kimi-coding 指到 KIMI_API_KEY（约定名 KIMI_CODING_API_KEY 仍在先）。
-    expect(subscriptionKeyRefCandidates('kimi-coding')).toEqual(['KIMI_CODING_API_KEY', 'KIMI_API_KEY'])
+    expect(routeKeyRefCandidates('kimi-coding')).toEqual(['KIMI_CODING_API_KEY', 'KIMI_API_KEY'])
     // opencode-go 与 opencode 路由共用 OPENCODE_API_KEY。
-    expect(subscriptionKeyRefCandidates('opencode-go')).toEqual(['OPENCODE_GO_API_KEY', 'OPENCODE_API_KEY'])
+    expect(routeKeyRefCandidates('opencode-go')).toEqual(['OPENCODE_GO_API_KEY', 'OPENCODE_API_KEY'])
   })
 })
 

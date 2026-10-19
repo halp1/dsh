@@ -3,9 +3,10 @@
  *
  * 适用场景：用户把某条 llm-pi-ai provider 路由的 `baseURL` 指向第三方中转站
  * （New API / One API / VoAPI / Sub2API 等）。这类站点不卖官方余额，卖的是
- * 按 key 的额度（used/total）或多个滚动窗口。本模块对**配了 baseURL 且有
- * apiKeyEnv** 的路由逐个探测两个已知端点，能解析出额度就返回；解析不出的
- * 静默标记 unavailable，绝不臆造金额（与 balance/subscriptions 一致的姿态）。
+ * 按 key 的额度（used/total）或多个滚动窗口。本模块对**配了 baseURL 且 key 可得**
+ * （显式 `apiKeyEnv`，或新版宿主存进凭据 refs 的路由约定名，见 route-keys.ts）
+ * 的路由逐个探测两个已知端点，能解析出额度就返回；解析不出的静默标记
+ * unavailable，绝不臆造金额（与 balance/subscriptions 一致的姿态）。
  *
  * 探测顺序：先 Sub2API `/v1/usage`（标准化程度高），再 New API `/api/status`；
  * 404 = 不是该套程序，继续试下一种；401/403 = 是但 key 不对（unauthorized）；
@@ -13,14 +14,14 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { RelayQuota, SubscriptionWindow } from './pricing-shared.ts';
-/** 一个待探测的中转站路由（来自 llm-pi-ai providers 的 baseURL + apiKeyEnv）。 */
+/** 一个待探测的中转站路由（来自 llm-pi-ai providers 的 baseURL + key 候选 ref）。 */
 export interface RelayRoute {
     /** llm-pi-ai providers 路由名（key）。 */
     route: string;
     /** 该路由配置的端点地址（origin 来源）。 */
     baseURL: string;
-    /** 该路由解析到的 apiKeyEnv 引用。 */
-    apiKeyEnv: string;
+    /** 该路由的凭据 ref 候选（按优先序：显式 apiKeyEnv 在首，路由约定名补后）。 */
+    apiKeyRefs: readonly string[];
     /** 站点显示名；缺省用路由名。 */
     displayName?: string;
 }
@@ -53,14 +54,14 @@ export declare function isOfficialBaseUrl(baseURL: string): boolean;
 /**
  * 查询单个中转站路由的额度。先试 Sub2API，再试 New API；任一读出额度即返回。
  * @param ctx - host context carrying the credentials seam.
- * @param route - 待探测的路由（baseURL + apiKeyEnv）。
+ * @param route - 待探测的路由（baseURL + 凭据 ref 候选）。
  * @returns 该路由的一行额度结果（status 标记成败）。
  */
 export declare function queryRelayQuota(ctx: Context, route: RelayRoute): Promise<RelayQuota>;
 /**
  * 批量查询多个中转站路由的额度（每个独立成败，互不影响）。
  * @param ctx - host context carrying the credentials seam.
- * @param routes - 配了 baseURL 且 apiKeyEnv 有值的路由列表。
+ * @param routes - 配了 baseURL 且 key 候选可得（显式引用存在或约定 ref 解析出值）的路由列表。
  * @returns 每个路由一行的额度结果。
  */
 export declare function queryRelayQuotas(ctx: Context, routes: readonly RelayRoute[]): Promise<readonly RelayQuota[]>;

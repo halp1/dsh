@@ -46,6 +46,7 @@ import type { LivePricing, RelayQuota, SubscriptionQuota } from './pricing-share
 import type { UsageBillingConfig } from './config.ts'
 import { collectSubscriptions, identifySubscriptionPlans, parseOpenCodeAuthDocument, resolveSubscriptionAccess, type IdentifiedSubscriptionPlan, type SubscriptionKeys } from './subscriptions.ts'
 import { isOfficialBaseUrl, queryRelayQuotas, type RelayRoute } from './relay.ts'
+import { firstResolvedRef, routeKeyRefCandidates } from './route-keys.ts'
 import { planTypeOf, subscriptionFeeCnyOf } from './client/plan-knowledge.ts'
 import { swallowed } from './silent.ts'
 // v1.5.2 抽出：共享 loopback 守卫 + 9 条 HTTP 路由的注册块各自独立成文件，apply() 收缩为装配器。
@@ -395,6 +396,23 @@ function buildWorkspaceTitleResolver(ctx: Context): ((cwd: string) => string | u
 }
 
 /**
+ * 凭据 seam 的宽容解析：ref 名 → 非空值；失败/缺失返回 undefined（多 surface 共用，
+ * 失败按结构化静默记录）。
+ */
+function refResolver(credentials: CredentialProvider): (name: string) => Promise<string | undefined> {
+  return async (name) => {
+    try {
+      const resolved = await credentials.resolve(credentialRef(name))
+      return resolved?.value !== undefined && resolved.value !== '' ? resolved.value : undefined
+    } catch (error) {
+      // 单个 ref 解析失败视为未配置（查询走「未读出」兜底，不抛错）。
+      swallowed('credential-resolve-failed', error)
+      return undefined
+    }
+  }
+}
+
+/**
  * 解析订阅适配器需要的 API Key：经典形态从 llm-pi-ai 设置的 `providers.<id>.apiKeyEnv`
  * 读引用（如 kimi-coding → KIMI_CODING_API_KEY）；新版宿主设置页把 key 直接存成
  * 凭据 refs（路由约定名 `<ROUTE>_API_KEY`，pi-ai 目录 ambient 名补充），显式引用
@@ -407,16 +425,7 @@ export async function resolveSubscriptionKeys(
   credentials: CredentialProvider,
 ): Promise<{ keys: SubscriptionKeys; identified: IdentifiedSubscriptionPlan[] }> {
   const providers = await readPiAiProviders(settings)
-  const resolve = async (name: string): Promise<string | undefined> => {
-    try {
-      const resolved = await credentials.resolve(credentialRef(name))
-      return resolved?.value !== undefined && resolved.value !== '' ? resolved.value : undefined
-    } catch (error) {
-      // 单个 ref 解析失败视为未配置（订阅查询走「未读出」兜底，不抛错）。
-      swallowed('credential-resolve-failed', error)
-      return undefined
-    }
-  }
+  const resolve = refResolver(credentials)
   const { keys, keyConfigured } = await resolveSubscriptionAccess(providers, resolve)
   // zai-coding-cn 是智谱国内域：CN key 在手即跟随 bigmodel-cn。只影响未显式
   // 声明 region 的声明式 plan 配置——identify 出的两条 Z.ai 路由各带固定区域。
@@ -1071,23 +1080,32 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
   registerSubscriptionsRoute(ctx, { trustedHosts, cached: () => quotaCache, refreshOnce: refreshQuotasOnce, cacheMs: SUBSCRIPTION_CACHE_MS })
 
 
-  // 中转站额度：识别配了 baseURL + apiKeyEnv 的路由所指向的中转站程序（New API /
-  // Sub2API），读出「余额 / 额度窗口」。外部 API 低频变化，缓存 5 分钟避免每次
-  // 轮询都打上游；只返回配了 baseURL 的路由，官方直连/未配置路由不出现。
+  // 中转站额度：识别配了 baseURL 的路由所指向的中转站程序（New API / Sub2API），
+  // 读出「余额 / 额度窗口」。key 候选 = 显式 apiKeyEnv（经典形态）+ 路由约定 ref
+  // （新版宿主把路由 key 存进凭据 refs）；显式引用存在或任一候选解析出值才探测，
+  // 两者皆无不列行。外部 API 低频变化，缓存 5 分钟避免每次轮询都打上游；官方
+  // 直连/未配置路由不出现。
   let relayCache: { at: number; quotas: readonly RelayQuota[] } = { at: 0, quotas: [] }
   const refreshRelay = async (): Promise<void> => {
     const providers = await readPiAiProviders(ctx.settings)
+    const resolve = refResolver(ctx.credentials)
     const routes: RelayRoute[] = []
     for (const [route, entry] of Object.entries(providers)) {
-      if (entry.baseURL === undefined || entry.apiKeyEnv === undefined) continue
+      if (entry.baseURL === undefined) continue
       // 官方厂商端点（DeepSeek/OpenAI 等）卖的是官方按量余额而非中转站额度，
       // 探测其 /v1/usage、/api/status 只会得到 404 或非中转站格式，面板应排除
       // 这类域，避免误判为「未识别」。中转站面板只列真正的第三方中转程序。
       if (isOfficialBaseUrl(entry.baseURL)) continue
+      const apiKeyRefs = [...new Set([
+        ...(entry.apiKeyEnv !== undefined ? [entry.apiKeyEnv] : []),
+        ...routeKeyRefCandidates(route),
+      ])]
+      const hit = await firstResolvedRef(apiKeyRefs, resolve)
+      if (entry.apiKeyEnv === undefined && hit === undefined) continue
       routes.push({
         route,
         baseURL: entry.baseURL,
-        apiKeyEnv: entry.apiKeyEnv,
+        apiKeyRefs,
         ...(entry.displayName === undefined ? {} : { displayName: entry.displayName }),
       })
     }

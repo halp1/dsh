@@ -24,8 +24,10 @@ import type { CustomBalanceConfig, CustomBalanceExtract, ProviderBalance } from 
 export declare function pickTokenDanceBalanceCny(data: unknown): number | undefined;
 /**
  * Query every configured provider's account balance. A provider is queried only
- * when its llm-pi-ai route has an `apiKeyEnv`; absent routes answer
- * `unconfigured` so the dashboard shows a stable state instead of dropping the row.
+ * when its llm-pi-ai route has a key: an explicit `apiKeyEnv`, or — on hosts
+ * whose settings UI stores route keys as credentials refs — the route's
+ * conventional ref (route-keys.ts). Absent routes answer `unconfigured` so the
+ * dashboard shows a stable state instead of dropping the row.
  * @param ctx - host context carrying the credentials seam.
  * @param providers - the llm-pi-ai providers dict (`<route> → { apiKeyEnv? }`).
  * @returns the balance rows (one per provider).

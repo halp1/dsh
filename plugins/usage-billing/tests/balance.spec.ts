@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { pickTokenDanceBalanceCny, resolveHeaders } from '../src/balance.ts'
+import { describe, expect, it, vi } from 'vitest'
+import { pickTokenDanceBalanceCny, queryBalances, resolveHeaders } from '../src/balance.ts'
 
 /** 凭据 seam 桩：KEY/TOKEN 可解析，EMPTY 为空串，其余未配置。credentialRef 是 branded 字符串。 */
 function ctxWith(entries: Record<string, string>) {
@@ -64,5 +64,42 @@ describe('pickTokenDanceBalanceCny (issue #27)', () => {
     expect(pickTokenDanceBalanceCny({})).toBeUndefined()
     expect(pickTokenDanceBalanceCny({ balance: {} })).toBeUndefined()
     expect(pickTokenDanceBalanceCny({ error: { code: 'unauthorized' } })).toBeUndefined()
+  })
+})
+
+describe('queryBalances（新版宿主形态）', () => {
+  it('queries the wallet via the route conventional ref when apiKeyEnv is absent', async () => {
+    // 新版宿主把路由 key 存成凭据 refs（<ROUTE>_API_KEY）：zai-coding-cn 路由没配
+    // apiKeyEnv，余额面板应按约定 ref 找回 key 并读出智谱钱包。
+    const ctx = {
+      credentials: {
+        resolve: async (ref: unknown) => {
+          return ref === 'ZAI_CODING_CN_API_KEY' ? { value: 'zai-cn-key' } : undefined
+        },
+      },
+    } as never
+    const fetchSpy = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ balance: { available: 42.5 } }),
+    }))
+    vi.stubGlobal('fetch', fetchSpy)
+    const rows = await queryBalances(ctx, { 'zai-coding-cn': {} })
+    const zhipu = rows.find(row => row.displayName === '智谱 AI')
+    expect(zhipu).toMatchObject({ displayName: '智谱 AI', totalBalance: 42.5, currency: 'CNY' })
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'https://open.bigmodel.cn/api/paas/v4/balance',
+      expect.objectContaining({ headers: expect.objectContaining({ authorization: 'Bearer zai-cn-key' }) }),
+    )
+  })
+
+  it('answers unconfigured without network when no ref resolves', async () => {
+    const ctx = { credentials: { resolve: async () => undefined } } as never
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    const rows = await queryBalances(ctx, { 'zai-coding-cn': {} })
+    const zhipu = rows.find(row => row.displayName === '智谱 AI')
+    expect(zhipu).toMatchObject({ displayName: '智谱 AI', error: 'unconfigured' })
+    expect(fetchSpy).not.toHaveBeenCalled()
   })
 })

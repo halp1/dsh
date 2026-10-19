@@ -4045,6 +4045,35 @@ function createUsageAggregator(persistence, options = {}) {
 	};
 }
 //#endregion
+//#region lib/types/route-keys.js
+/**
+* 宿主 llm-pi-ai 新代际的路由 key 约定（订阅额度 / 余额 / 中转站 / 声明端点共用）。
+*
+* 新版宿主设置页把路由 key 直接存成凭据 refs（命名 = 路由 id 大写下划线 +
+* `_API_KEY`），providers 配置里只剩 models 列表；chat 认证走 pi-ai 目录路由的
+* ambient 发现，不再需要显式 `apiKeyEnv`。插件侧所有「按路由取 key」的读取口
+* 共用本模块的候选名推导与顺序解析——显式引用优先，约定名补后。
+*/
+/** 候选 ref 名：路由 id 约定名（`<ROUTE 大写下划线>_API_KEY`）优先，其后补宿主
+*  pi-ai 目录的 ambient env 名（仅当与约定名不同——目录把 kimi-coding 指到
+*  KIMI_API_KEY、opencode-go 与 opencode 同用 OPENCODE_API_KEY）。 */
+function routeKeyRefCandidates(route) {
+	return [`${route.replaceAll("-", "_").toUpperCase()}_API_KEY`, ...{
+		"kimi-coding": ["KIMI_API_KEY"],
+		"opencode-go": ["OPENCODE_API_KEY"]
+	}[route] ?? []];
+}
+/** 依次解析候选 ref，返回第一个解析出非空值的 ref 与值；全部落空返回 undefined。 */
+async function firstResolvedRef(refs, resolveRef) {
+	for (const ref of refs) {
+		const value = await resolveRef(ref);
+		if (value !== void 0) return {
+			ref,
+			value
+		};
+	}
+}
+//#endregion
 //#region lib/types/resilience.js
 /**
 * 上游网络请求的稳定性工具：有限重试（指数退避）与每平台熔断冷却门。
@@ -4650,32 +4679,51 @@ const QUERIERS = [
 ];
 /**
 * Query every configured provider's account balance. A provider is queried only
-* when its llm-pi-ai route has an `apiKeyEnv`; absent routes answer
-* `unconfigured` so the dashboard shows a stable state instead of dropping the row.
+* when its llm-pi-ai route has a key: an explicit `apiKeyEnv`, or — on hosts
+* whose settings UI stores route keys as credentials refs — the route's
+* conventional ref (route-keys.ts). Absent routes answer `unconfigured` so the
+* dashboard shows a stable state instead of dropping the row.
 * @param ctx - host context carrying the credentials seam.
 * @param providers - the llm-pi-ai providers dict (`<route> → { apiKeyEnv? }`).
 * @returns the balance rows (one per provider).
 */
 async function queryBalances(ctx, providers) {
-	const byName = /* @__PURE__ */ new Map();
-	for (const { route, querier, displayName } of QUERIERS) {
+	const resolveRef = async (name) => {
+		try {
+			const hit = await ctx.credentials.resolve(credentialRef(name));
+			return hit?.value !== void 0 && hit.value !== "" ? hit.value : void 0;
+		} catch {
+			return;
+		}
+	};
+	const resolved = await Promise.all(QUERIERS.map(async ({ route, querier, displayName }) => {
 		const env = providers[route]?.apiKeyEnv;
-		const configured = typeof env === "string" && env !== "";
-		const existing = byName.get(displayName);
-		if (existing !== void 0 && existing.env !== void 0) continue;
-		byName.set(displayName, {
+		const explicit = typeof env === "string" && env !== "" ? env : void 0;
+		const hit = await firstResolvedRef([...explicit !== void 0 ? [explicit] : [], ...routeKeyRefCandidates(route)], resolveRef);
+		return {
 			displayName,
 			querier,
-			env: configured ? env : void 0
+			ref: hit?.ref ?? explicit,
+			configured: explicit !== void 0 || hit !== void 0
+		};
+	}));
+	const byName = /* @__PURE__ */ new Map();
+	for (const item of resolved) {
+		const existing = byName.get(item.displayName);
+		if (existing !== void 0 && existing.ref !== void 0) continue;
+		byName.set(item.displayName, {
+			displayName: item.displayName,
+			querier: item.querier,
+			ref: item.configured ? item.ref : void 0
 		});
 	}
-	return await Promise.all([...byName.values()].map(({ querier, displayName, env }) => {
-		if (env === void 0) return Promise.resolve({
+	return await Promise.all([...byName.values()].map(({ displayName, querier, ref }) => {
+		if (ref === void 0) return Promise.resolve({
 			provider: displayName,
 			displayName,
 			error: "unconfigured"
 		});
-		return querier(ctx, env);
+		return querier(ctx, ref);
 	}));
 }
 /**
@@ -4913,8 +4961,9 @@ async function queryCustomBalances(ctx, configs) {
 * 2. `path` 必须单斜杠绝对路径：`//evil.example/x` 是协议相对 URL，`new URL()` 会
 *    把它解析到别的主机；构造后还会再校验一次 origin。
 * 3. 只发 GET，无请求体，无自定义 method / headers。
-* 4. 凭据仍从匹配 provider 自己的 `apiKeyEnv` 取，经同一凭据 seam 解析；声明不能
-*    指定任何凭据。
+* 4. 凭据仍只从匹配 provider 自己的凭据取：显式 `apiKeyEnv` 优先，缺省按路由
+*    约定 ref（新版宿主的存放形态，见 route-keys.ts）经同一凭据 seam 解析；声明
+*    不能指定任何凭据。
 * 5. 跨源重定向直接失败，不跟随——那是绕过第 1 条最省事的办法。
 * 6. 响应体有大小上限与共享超时，坏 / 恶意端点拖不住面板。
 * 7. 声明不能覆盖内置读法：只在内置表答不上来时它才轮到。
@@ -5052,10 +5101,21 @@ function compileDeclaredEndpoint(decl) {
 */
 async function queryDeclaredEndpoints(ctx, providers, declarations) {
 	const byOrigin = /* @__PURE__ */ new Map();
-	for (const entry of Object.values(providers)) {
+	for (const [route, entry] of Object.entries(providers)) {
 		const origin = entry.baseURL === void 0 ? void 0 : normalizeDeclaredOrigin(entry.baseURL);
-		if (origin !== void 0 && !byOrigin.has(origin)) byOrigin.set(origin, entry);
+		if (origin !== void 0 && !byOrigin.has(origin)) byOrigin.set(origin, {
+			route,
+			...entry.apiKeyEnv !== void 0 ? { apiKeyEnv: entry.apiKeyEnv } : {}
+		});
 	}
+	const resolveRef = async (name) => {
+		try {
+			const hit = await ctx.credentials.resolve(credentialRef(name));
+			return hit?.value !== void 0 && hit.value !== "" ? hit.value : void 0;
+		} catch {
+			return;
+		}
+	};
 	return await Promise.all(declarations.map(async (decl) => {
 		const displayName = typeof decl.displayName === "string" && decl.displayName !== "" ? decl.displayName : "已声明";
 		const provider = `declared:${displayName}`;
@@ -5083,8 +5143,8 @@ async function queryDeclaredEndpoints(ctx, providers, declarations) {
 			declared: true,
 			error: "unreachable"
 		};
-		const hit = await ctx.credentials.resolve(credentialRef(matched.apiKeyEnv ?? ""));
-		if (hit === void 0 || hit.value === "") return {
+		const hit = await firstResolvedRef([...matched.apiKeyEnv !== void 0 ? [matched.apiKeyEnv] : [], ...routeKeyRefCandidates(matched.route)], resolveRef);
+		if (hit === void 0) return {
 			provider,
 			displayName,
 			declared: true,
@@ -5817,22 +5877,9 @@ const SUBSCRIPTION_KEY_SOURCES = [
 	}
 ];
 /**
-* 一条订阅路由的候选凭据 ref 名：路由 id 约定名（`<ROUTE 大写下划线>_API_KEY`）
-* 优先，其后补宿主 pi-ai 目录的 ambient env 名（仅当与约定名不同——目录把
-* kimi-coding 指到 KIMI_API_KEY、opencode-go 与 opencode 同用 OPENCODE_API_KEY）。
-* 新版宿主设置页把路由 key 存成凭据 refs 而不再写 providers.apiKeyEnv，订阅
-* 额度查询据此按约定名找回同一把 key。
-*/
-function subscriptionKeyRefCandidates(provider) {
-	return [`${provider.replaceAll("-", "_").toUpperCase()}_API_KEY`, ...{
-		"kimi-coding": ["KIMI_API_KEY"],
-		"opencode-go": ["OPENCODE_API_KEY"]
-	}[provider] ?? []];
-}
-/**
 * key 解析的可测核心（无文件 I/O）：先显式 `apiKeyEnv`（旧口径，优先），key 仍缺
-* 时按约定 ref 名解析（新版宿主的存放形态）。`keyConfigured` 回报每条路由的 key
-* 是否解析成功，供识别层作为第三配置信号（refResolved）。
+* 时按约定 ref 名解析（新版宿主的存放形态，见 route-keys.ts）。`keyConfigured`
+* 回报每条路由的 key 是否解析成功，供识别层作为第三配置信号（refResolved）。
 * @param providers - llm-pi-ai 的 providers 视图。
 * @param resolveRef - 凭据 seam：ref 名 → 非空 key 值；未配置/失败返回 undefined。
 */
@@ -5849,13 +5896,10 @@ async function resolveSubscriptionAccess(providers, resolveRef) {
 				continue;
 			}
 		}
-		for (const ref of subscriptionKeyRefCandidates(provider)) {
-			const value = await resolveRef(ref);
-			if (value !== void 0) {
-				keys[key] = value;
-				keyConfigured.add(provider);
-				break;
-			}
+		const hit = await firstResolvedRef(routeKeyRefCandidates(provider), resolveRef);
+		if (hit !== void 0) {
+			keys[key] = hit.value;
+			keyConfigured.add(provider);
 		}
 	}
 	return {
@@ -6655,9 +6699,10 @@ async function collectSubscriptions(keys, plans = [], timeoutMs = DEFAULT_TIMEOU
 *
 * 适用场景：用户把某条 llm-pi-ai provider 路由的 `baseURL` 指向第三方中转站
 * （New API / One API / VoAPI / Sub2API 等）。这类站点不卖官方余额，卖的是
-* 按 key 的额度（used/total）或多个滚动窗口。本模块对**配了 baseURL 且有
-* apiKeyEnv** 的路由逐个探测两个已知端点，能解析出额度就返回；解析不出的
-* 静默标记 unavailable，绝不臆造金额（与 balance/subscriptions 一致的姿态）。
+* 按 key 的额度（used/total）或多个滚动窗口。本模块对**配了 baseURL 且 key 可得**
+* （显式 `apiKeyEnv`，或新版宿主存进凭据 refs 的路由约定名，见 route-keys.ts）
+* 的路由逐个探测两个已知端点，能解析出额度就返回；解析不出的静默标记
+* unavailable，绝不臆造金额（与 balance/subscriptions 一致的姿态）。
 *
 * 探测顺序：先 Sub2API `/v1/usage`（标准化程度高），再 New API `/api/status`；
 * 404 = 不是该套程序，继续试下一种；401/403 = 是但 key 不对（unauthorized）；
@@ -6847,7 +6892,7 @@ async function readRelayByKind(baseURL, apiKey, kind) {
 /**
 * 查询单个中转站路由的额度。先试 Sub2API，再试 New API；任一读出额度即返回。
 * @param ctx - host context carrying the credentials seam.
-* @param route - 待探测的路由（baseURL + apiKeyEnv）。
+* @param route - 待探测的路由（baseURL + 凭据 ref 候选）。
 * @returns 该路由的一行额度结果（status 标记成败）。
 */
 async function queryRelayQuota(ctx, route) {
@@ -6856,32 +6901,32 @@ async function queryRelayQuota(ctx, route) {
 		origin: originOf(route.baseURL),
 		displayName: route.displayName ?? route.route
 	};
-	const gateKey = `${route.baseURL}::${route.apiKeyEnv}`;
+	const gateKey = `${route.baseURL}::${route.route}`;
 	if (!relayGate.check(gateKey)) return {
 		...base,
 		kind: "unknown",
 		status: "unavailable"
 	};
-	let hit;
-	try {
-		hit = await ctx.credentials.resolve(credentialRef(route.apiKeyEnv));
-	} catch {
-		return {
-			...base,
-			kind: "unknown",
-			status: "not-configured"
-		};
-	}
-	if (hit === void 0 || hit.value === "") return {
+	const resolveRef = async (name) => {
+		try {
+			const hit = await ctx.credentials.resolve(credentialRef(name));
+			return hit?.value !== void 0 && hit.value !== "" ? hit.value : void 0;
+		} catch {
+			return;
+		}
+	};
+	const hit = await firstResolvedRef(route.apiKeyRefs, resolveRef);
+	if (hit === void 0) return {
 		...base,
 		kind: "unknown",
 		status: "not-configured"
 	};
+	const apiKey = hit.value;
 	const cached = fingerprintCache.get(base.origin);
 	const knownKind = cached !== void 0 && Date.now() - cached.at < FINGERPRINT_TTL_MS ? cached.kind : void 0;
 	try {
 		if (knownKind === "sub2api" || knownKind === "new-api") {
-			const parsed = await readRelayByKind(route.baseURL, hit.value, knownKind);
+			const parsed = await readRelayByKind(route.baseURL, apiKey, knownKind);
 			if (parsed !== null) {
 				relayGate.success(gateKey);
 				return {
@@ -6899,7 +6944,7 @@ async function queryRelayQuota(ctx, route) {
 				status: "invalid-response"
 			};
 		}
-		const sub2 = await fetchRelayJson(endpointOf(route.baseURL, "/v1/usage"), hit.value);
+		const sub2 = await fetchRelayJson(endpointOf(route.baseURL, "/v1/usage"), apiKey);
 		if (sub2.ok) {
 			const parsed = parseSub2ApiUsage(sub2.data);
 			if (parsed !== null) {
@@ -6923,7 +6968,7 @@ async function queryRelayQuota(ctx, route) {
 				status: "invalid-response"
 			};
 		}
-		const na = await fetchRelayJson(endpointOf(route.baseURL, "/api/status"), hit.value);
+		const na = await fetchRelayJson(endpointOf(route.baseURL, "/api/status"), apiKey);
 		if (na.ok) {
 			const parsed = parseNewApiStatus(na.data);
 			if (parsed !== null) {
@@ -6965,7 +7010,7 @@ async function queryRelayQuota(ctx, route) {
 /**
 * 批量查询多个中转站路由的额度（每个独立成败，互不影响）。
 * @param ctx - host context carrying the credentials seam.
-* @param routes - 配了 baseURL 且 apiKeyEnv 有值的路由列表。
+* @param routes - 配了 baseURL 且 key 候选可得（显式引用存在或约定 ref 解析出值）的路由列表。
 * @returns 每个路由一行的额度结果。
 */
 async function queryRelayQuotas(ctx, routes) {
@@ -7811,6 +7856,21 @@ function buildWorkspaceTitleResolver(ctx) {
 	};
 }
 /**
+* 凭据 seam 的宽容解析：ref 名 → 非空值；失败/缺失返回 undefined（多 surface 共用，
+* 失败按结构化静默记录）。
+*/
+function refResolver(credentials) {
+	return async (name) => {
+		try {
+			const resolved = await credentials.resolve(credentialRef(name));
+			return resolved?.value !== void 0 && resolved.value !== "" ? resolved.value : void 0;
+		} catch (error) {
+			swallowed("credential-resolve-failed", error);
+			return;
+		}
+	};
+}
+/**
 * 解析订阅适配器需要的 API Key：经典形态从 llm-pi-ai 设置的 `providers.<id>.apiKeyEnv`
 * 读引用（如 kimi-coding → KIMI_CODING_API_KEY）；新版宿主设置页把 key 直接存成
 * 凭据 refs（路由约定名 `<ROUTE>_API_KEY`，pi-ai 目录 ambient 名补充），显式引用
@@ -7820,16 +7880,7 @@ function buildWorkspaceTitleResolver(ctx) {
 */
 async function resolveSubscriptionKeys(settings, credentials) {
 	const providers = await readPiAiProviders(settings);
-	const resolve = async (name) => {
-		try {
-			const resolved = await credentials.resolve(credentialRef(name));
-			return resolved?.value !== void 0 && resolved.value !== "" ? resolved.value : void 0;
-		} catch (error) {
-			swallowed("credential-resolve-failed", error);
-			return;
-		}
-	};
-	const { keys, keyConfigured } = await resolveSubscriptionAccess(providers, resolve);
+	const { keys, keyConfigured } = await resolveSubscriptionAccess(providers, refResolver(credentials));
 	if (keys.zaiCnApiKey !== "") keys.zaiRegion = "bigmodel-cn";
 	if (keys.opencodeApiKey === "") keys.opencodeApiKey = await readOpenCodeToken();
 	keys.anthropicApiKey = await readClaudeOAuthToken();
@@ -8381,14 +8432,18 @@ function apply(ctx, config = {}) {
 	};
 	const refreshRelay = async () => {
 		const providers = await readPiAiProviders(ctx.settings);
+		const resolve = refResolver(ctx.credentials);
 		const routes = [];
 		for (const [route, entry] of Object.entries(providers)) {
-			if (entry.baseURL === void 0 || entry.apiKeyEnv === void 0) continue;
+			if (entry.baseURL === void 0) continue;
 			if (isOfficialBaseUrl(entry.baseURL)) continue;
+			const apiKeyRefs = [.../* @__PURE__ */ new Set([...entry.apiKeyEnv !== void 0 ? [entry.apiKeyEnv] : [], ...routeKeyRefCandidates(route)])];
+			const hit = await firstResolvedRef(apiKeyRefs, resolve);
+			if (entry.apiKeyEnv === void 0 && hit === void 0) continue;
 			routes.push({
 				route,
 				baseURL: entry.baseURL,
-				apiKeyEnv: entry.apiKeyEnv,
+				apiKeyRefs,
 				...entry.displayName === void 0 ? {} : { displayName: entry.displayName }
 			});
 		}

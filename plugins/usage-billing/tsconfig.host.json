@@ -20,6 +20,7 @@
     "src/client/usage-billing-settings.ts",
     "src/pricing-fetch.ts",
     "src/pricing-shared.ts",
+    "src/route-keys.ts",
     "src/balance.ts",
     "src/subscriptions.ts",
     "src/resilience.ts",

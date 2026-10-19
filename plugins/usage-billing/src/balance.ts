@@ -16,6 +16,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { CustomBalanceConfig, CustomBalanceExtract, ProviderBalance } from './pricing-shared.ts'
+import { firstResolvedRef, routeKeyRefCandidates } from './route-keys.ts'
 import { createCooldownGate, withRetry } from './resilience.ts'
 import { callTokenHub, firstEnabledTeamId, parseTencentCredential, pickRemainingQuota, toNumber } from './tc3.ts'
 
@@ -349,8 +350,10 @@ const QUERIERS: readonly BalanceQuerier[] = [
 
 /**
  * Query every configured provider's account balance. A provider is queried only
- * when its llm-pi-ai route has an `apiKeyEnv`; absent routes answer
- * `unconfigured` so the dashboard shows a stable state instead of dropping the row.
+ * when its llm-pi-ai route has a key: an explicit `apiKeyEnv`, or — on hosts
+ * whose settings UI stores route keys as credentials refs — the route's
+ * conventional ref (route-keys.ts). Absent routes answer `unconfigured` so the
+ * dashboard shows a stable state instead of dropping the row.
  * @param ctx - host context carrying the credentials seam.
  * @param providers - the llm-pi-ai providers dict (`<route> → { apiKeyEnv? }`).
  * @returns the balance rows (one per provider).
@@ -359,24 +362,42 @@ export async function queryBalances(
   ctx: Context,
   providers: Readonly<Record<string, { apiKeyEnv?: string }>>,
 ): Promise<readonly ProviderBalance[]> {
+  // 宽容解析口：单条 ref 解析失败不影响其他 route。
+  const resolveRef = async (name: string): Promise<string | undefined> => {
+    try {
+      const hit = await ctx.credentials.resolve(credentialRef(name))
+      return hit?.value !== undefined && hit.value !== '' ? hit.value : undefined
+    } catch {
+      return undefined
+    }
+  }
+  // 每条 route 先解析 key 候选：显式 apiKeyEnv 在首（经典形态），路由约定 ref 补后
+  // （新版宿主把路由 key 存进凭据 refs，providers 配置里不再有 apiKeyEnv）。
+  const resolved = await Promise.all(QUERIERS.map(async ({ route, querier, displayName }) => {
+    const env = providers[route]?.apiKeyEnv
+    const explicit = typeof env === 'string' && env !== '' ? env : undefined
+    const hit = await firstResolvedRef(
+      [...(explicit !== undefined ? [explicit] : []), ...routeKeyRefCandidates(route)],
+      resolveRef,
+    )
+    return { displayName, querier, ref: hit?.ref ?? explicit, configured: explicit !== undefined || hit !== undefined }
+  }))
   // 同一 displayName 的多条 route（如智谱的 zhipu / zai-coding-cn）共用同一钱包，
   // 按名字去重：只查询第一个配了 key 的 route，避免对同一钱包重复请求；同名的
   // 后续 route 无论配没配 key 都跳过，未配置时也只保留一条「未配置」行。
-  const byName = new Map<string, { displayName: string; querier: BalanceQuerier['querier']; env: string | undefined }>()
-  for (const { route, querier, displayName } of QUERIERS) {
-    const env = providers[route]?.apiKeyEnv
-    const configured = typeof env === 'string' && env !== ''
-    const existing = byName.get(displayName)
+  const byName = new Map<string, { displayName: string; querier: BalanceQuerier['querier']; ref: string | undefined }>()
+  for (const item of resolved) {
+    const existing = byName.get(item.displayName)
     // 该厂商已确定用某个配了 key 的 route 查询，跳过后续同名 route。
-    if (existing !== undefined && existing.env !== undefined) continue
-    byName.set(displayName, { displayName, querier, env: configured ? env : undefined })
+    if (existing !== undefined && existing.ref !== undefined) continue
+    byName.set(item.displayName, { displayName: item.displayName, querier: item.querier, ref: item.configured ? item.ref : undefined })
   }
-  return await Promise.all([...byName.values()].map(({ querier, displayName, env }) => {
-    // 未配置 key 的厂商直接标未配置，不走 credentialRef（空 env 会被其拒绝）。
-    if (env === undefined) {
+  return await Promise.all([...byName.values()].map(({ displayName, querier, ref }) => {
+    // 未配置 key 的厂商直接标未配置，不走 credentialRef（空 ref 会被其拒绝）。
+    if (ref === undefined) {
       return Promise.resolve({ provider: displayName, displayName, error: 'unconfigured' as const })
     }
-    return querier(ctx, env)
+    return querier(ctx, ref)
   }))
 }
 

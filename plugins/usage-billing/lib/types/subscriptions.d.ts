@@ -51,17 +51,9 @@ export declare function parseOpenCodeAuthDocument(document: unknown): string;
 /** 空凭据：全部未配置时的初始值。 */
 export declare const EMPTY_SUBSCRIPTION_KEYS: SubscriptionKeys;
 /**
- * 一条订阅路由的候选凭据 ref 名：路由 id 约定名（`<ROUTE 大写下划线>_API_KEY`）
- * 优先，其后补宿主 pi-ai 目录的 ambient env 名（仅当与约定名不同——目录把
- * kimi-coding 指到 KIMI_API_KEY、opencode-go 与 opencode 同用 OPENCODE_API_KEY）。
- * 新版宿主设置页把路由 key 存成凭据 refs 而不再写 providers.apiKeyEnv，订阅
- * 额度查询据此按约定名找回同一把 key。
- */
-export declare function subscriptionKeyRefCandidates(provider: string): readonly string[];
-/**
  * key 解析的可测核心（无文件 I/O）：先显式 `apiKeyEnv`（旧口径，优先），key 仍缺
- * 时按约定 ref 名解析（新版宿主的存放形态）。`keyConfigured` 回报每条路由的 key
- * 是否解析成功，供识别层作为第三配置信号（refResolved）。
+ * 时按约定 ref 名解析（新版宿主的存放形态，见 route-keys.ts）。`keyConfigured`
+ * 回报每条路由的 key 是否解析成功，供识别层作为第三配置信号（refResolved）。
  * @param providers - llm-pi-ai 的 providers 视图。
  * @param resolveRef - 凭据 seam：ref 名 → 非空 key 值；未配置/失败返回 undefined。
  */

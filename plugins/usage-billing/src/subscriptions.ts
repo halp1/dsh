@@ -17,6 +17,7 @@
  */
 
 import type { SubscriptionPlanConfig, SubscriptionQuota, SubscriptionStatus, SubscriptionWindow } from './pricing-shared.ts'
+import { firstResolvedRef, routeKeyRefCandidates } from './route-keys.ts'
 import { createCooldownGate, withRetry } from './resilience.ts'
 import { callTokenHub, firstEnabledTeamId, parseTencentCredential, pickRemainingQuota, pickTotalQuota } from './tc3.ts'
 import { swallowed } from './silent.ts'
@@ -107,25 +108,9 @@ const SUBSCRIPTION_KEY_SOURCES: ReadonlyArray<{ provider: string; key: Exclude<k
 ]
 
 /**
- * 一条订阅路由的候选凭据 ref 名：路由 id 约定名（`<ROUTE 大写下划线>_API_KEY`）
- * 优先，其后补宿主 pi-ai 目录的 ambient env 名（仅当与约定名不同——目录把
- * kimi-coding 指到 KIMI_API_KEY、opencode-go 与 opencode 同用 OPENCODE_API_KEY）。
- * 新版宿主设置页把路由 key 存成凭据 refs 而不再写 providers.apiKeyEnv，订阅
- * 额度查询据此按约定名找回同一把 key。
- */
-export function subscriptionKeyRefCandidates(provider: string): readonly string[] {
-  const convention = `${provider.replaceAll('-', '_').toUpperCase()}_API_KEY`
-  const extras: Readonly<Record<string, readonly string[]>> = {
-    'kimi-coding': ['KIMI_API_KEY'],
-    'opencode-go': ['OPENCODE_API_KEY'],
-  }
-  return [convention, ...(extras[provider] ?? [])]
-}
-
-/**
  * key 解析的可测核心（无文件 I/O）：先显式 `apiKeyEnv`（旧口径，优先），key 仍缺
- * 时按约定 ref 名解析（新版宿主的存放形态）。`keyConfigured` 回报每条路由的 key
- * 是否解析成功，供识别层作为第三配置信号（refResolved）。
+ * 时按约定 ref 名解析（新版宿主的存放形态，见 route-keys.ts）。`keyConfigured`
+ * 回报每条路由的 key 是否解析成功，供识别层作为第三配置信号（refResolved）。
  * @param providers - llm-pi-ai 的 providers 视图。
  * @param resolveRef - 凭据 seam：ref 名 → 非空 key 值；未配置/失败返回 undefined。
  */
@@ -147,13 +132,10 @@ export async function resolveSubscriptionAccess(
       }
     }
     // 2) 新版宿主：key 存凭据 refs，按路由约定名（+目录 ambient 名）找回。
-    for (const ref of subscriptionKeyRefCandidates(provider)) {
-      const value = await resolveRef(ref)
-      if (value !== undefined) {
-        keys[key] = value
-        keyConfigured.add(provider)
-        break
-      }
+    const hit = await firstResolvedRef(routeKeyRefCandidates(provider), resolveRef)
+    if (hit !== undefined) {
+      keys[key] = hit.value
+      keyConfigured.add(provider)
     }
   }
   return { keys, keyConfigured }

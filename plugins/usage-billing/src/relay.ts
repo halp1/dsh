@@ -3,9 +3,10 @@
  *
  * 适用场景：用户把某条 llm-pi-ai provider 路由的 `baseURL` 指向第三方中转站
  * （New API / One API / VoAPI / Sub2API 等）。这类站点不卖官方余额，卖的是
- * 按 key 的额度（used/total）或多个滚动窗口。本模块对**配了 baseURL 且有
- * apiKeyEnv** 的路由逐个探测两个已知端点，能解析出额度就返回；解析不出的
- * 静默标记 unavailable，绝不臆造金额（与 balance/subscriptions 一致的姿态）。
+ * 按 key 的额度（used/total）或多个滚动窗口。本模块对**配了 baseURL 且 key 可得**
+ * （显式 `apiKeyEnv`，或新版宿主存进凭据 refs 的路由约定名，见 route-keys.ts）
+ * 的路由逐个探测两个已知端点，能解析出额度就返回；解析不出的静默标记
+ * unavailable，绝不臆造金额（与 balance/subscriptions 一致的姿态）。
  *
  * 探测顺序：先 Sub2API `/v1/usage`（标准化程度高），再 New API `/api/status`；
  * 404 = 不是该套程序，继续试下一种；401/403 = 是但 key 不对（unauthorized）；
@@ -15,6 +16,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { RelayQuota, SubscriptionStatus, SubscriptionWindow } from './pricing-shared.ts'
+import { firstResolvedRef } from './route-keys.ts'
 import { createCooldownGate, withRetry } from './resilience.ts'
 
 /** 单个中转站额度请求的熔断门：按 baseURL 独立熔断（各站点互不干扰）。 */
@@ -29,14 +31,14 @@ const FINGERPRINT_TTL_MS = 5 * 60 * 1000
 /** 每 origin 的识别结果缓存：`kind` 是识别出的中转站程序，`at` 是探测时刻。 */
 const fingerprintCache = new Map<string, { kind: 'new-api' | 'sub2api' | 'unknown'; at: number }>()
 
-/** 一个待探测的中转站路由（来自 llm-pi-ai providers 的 baseURL + apiKeyEnv）。 */
+/** 一个待探测的中转站路由（来自 llm-pi-ai providers 的 baseURL + key 候选 ref）。 */
 export interface RelayRoute {
   /** llm-pi-ai providers 路由名（key）。 */
   route: string
   /** 该路由配置的端点地址（origin 来源）。 */
   baseURL: string
-  /** 该路由解析到的 apiKeyEnv 引用。 */
-  apiKeyEnv: string
+  /** 该路由的凭据 ref 候选（按优先序：显式 apiKeyEnv 在首，路由约定名补后）。 */
+  apiKeyRefs: readonly string[]
   /** 站点显示名；缺省用路由名。 */
   displayName?: string
 }
@@ -220,22 +222,28 @@ async function readRelayByKind(
 /**
  * 查询单个中转站路由的额度。先试 Sub2API，再试 New API；任一读出额度即返回。
  * @param ctx - host context carrying the credentials seam.
- * @param route - 待探测的路由（baseURL + apiKeyEnv）。
+ * @param route - 待探测的路由（baseURL + 凭据 ref 候选）。
  * @returns 该路由的一行额度结果（status 标记成败）。
  */
 export async function queryRelayQuota(ctx: Context, route: RelayRoute): Promise<RelayQuota> {
   const base = { route: route.route, origin: originOf(route.baseURL), displayName: route.displayName ?? route.route }
-  // 熔断 key 按「站点 + key」维度：同一中转站多把 key 是独立额度，一把失败不应熔断整站。
-  const gateKey = `${route.baseURL}::${route.apiKeyEnv}`
+  // 熔断 key 按「站点 + 路由」维度：同一中转站多把 key 是独立额度（多条路由指向
+  // 同站），一条路由失败不应熔断整站。
+  const gateKey = `${route.baseURL}::${route.route}`
   if (!relayGate.check(gateKey)) return { ...base, kind: 'unknown', status: 'unavailable' }
-  // resolve 可能抛错（凭据服务异常），单条路由失败不能拖垮整批；与查询体分离，失败降级为 not-configured。
-  let hit: { value: string } | undefined
-  try {
-    hit = await ctx.credentials.resolve(credentialRef(route.apiKeyEnv))
-  } catch {
-    return { ...base, kind: 'unknown', status: 'not-configured' }
+  // 依次解析候选 ref（显式 apiKeyEnv 在首，路由约定名补后）。resolve 可能抛错
+  // （凭据服务异常），单条路由失败不能拖垮整批；与查询体分离，失败降级为 not-configured。
+  const resolveRef = async (name: string): Promise<string | undefined> => {
+    try {
+      const hit = await ctx.credentials.resolve(credentialRef(name))
+      return hit?.value !== undefined && hit.value !== '' ? hit.value : undefined
+    } catch {
+      return undefined
+    }
   }
-  if (hit === undefined || hit.value === '') return { ...base, kind: 'unknown', status: 'not-configured' }
+  const hit = await firstResolvedRef(route.apiKeyRefs, resolveRef)
+  if (hit === undefined) return { ...base, kind: 'unknown', status: 'not-configured' }
+  const apiKey = hit.value
 
   // 指纹识别缓存：5 分钟内同 origin 已识别过程序类型时，跳过「猜哪种程序」，
   // 但仍按本路由自己的 key 实际查询额度——同站多把 key 是独立额度，缓存命中
@@ -245,7 +253,7 @@ export async function queryRelayQuota(ctx: Context, route: RelayRoute): Promise<
 
   try {
     if (knownKind === 'sub2api' || knownKind === 'new-api') {
-      const parsed = await readRelayByKind(route.baseURL, hit.value, knownKind)
+      const parsed = await readRelayByKind(route.baseURL, apiKey, knownKind)
       if (parsed !== null) {
         relayGate.success(gateKey)
         return {
@@ -262,7 +270,7 @@ export async function queryRelayQuota(ctx: Context, route: RelayRoute): Promise<
     }
 
     // 1) Sub2API `/v1/usage`
-    const sub2 = await fetchRelayJson(endpointOf(route.baseURL, '/v1/usage'), hit.value)
+    const sub2 = await fetchRelayJson(endpointOf(route.baseURL, '/v1/usage'), apiKey)
     if (sub2.ok) {
       const parsed = parseSub2ApiUsage(sub2.data)
       if (parsed !== null) {
@@ -282,7 +290,7 @@ export async function queryRelayQuota(ctx: Context, route: RelayRoute): Promise<
     }
 
     // 2) New API `/api/status`
-    const na = await fetchRelayJson(endpointOf(route.baseURL, '/api/status'), hit.value)
+    const na = await fetchRelayJson(endpointOf(route.baseURL, '/api/status'), apiKey)
     if (na.ok) {
       const parsed = parseNewApiStatus(na.data)
       if (parsed !== null) {
@@ -308,7 +316,7 @@ export async function queryRelayQuota(ctx: Context, route: RelayRoute): Promise<
 /**
  * 批量查询多个中转站路由的额度（每个独立成败，互不影响）。
  * @param ctx - host context carrying the credentials seam.
- * @param routes - 配了 baseURL 且 apiKeyEnv 有值的路由列表。
+ * @param routes - 配了 baseURL 且 key 候选可得（显式引用存在或约定 ref 解析出值）的路由列表。
  * @returns 每个路由一行的额度结果。
  */
 export async function queryRelayQuotas(ctx: Context, routes: readonly RelayRoute[]): Promise<readonly RelayQuota[]> {
