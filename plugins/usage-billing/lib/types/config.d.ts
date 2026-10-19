@@ -4,7 +4,15 @@
  * 引用（作为 Deps 类型签名），把它单独放这里让 route 文件能从 src/ 根 import。
  * 仍由 src/index.ts 的 apply(ctx, config) 消费：路由层只通过 Deps 拿到它，
  * 不直接构造。
+ *
+ * ⚠️ Config 运行时 schema 必须经 src/index.ts re-export（issue #98）：宿主
+ * dsh-settings@0.2.1-rc.2 的 settings.update 写回要求本插件条目在 loader fiber
+ * 上有 `Config` schema（`entry.fiber.runtime.Config` 且带 toJSON），缺失时抛
+ * `No configurable plugin entry`——v1.6.0 拆分时把 schema 退化成纯类型，「注入
+ * 用量查询」开关随之失效（#80 方案的回归）。schemastery 非 strict object 会
+ * merge 未声明键，其余 config 字段（statsPath / routeAliases 等）不受影响。
  */
+import z from '@deepseek-ai/schemastery';
 import type { CustomBalanceConfig, DeclaredEndpointConfig, SubscriptionPlanConfig } from './pricing-shared.ts';
 /** 宿主 0.1.7+ 经 Config schema 解析后，volatile 字段在 config 中的稳定引用形态
  *  （cosmokit `Volatile<T>` 的最小结构镜像，避免为类型引入直接依赖）。 */
@@ -12,6 +20,19 @@ export interface VolatileToggle {
     /** @returns 当前生效的布尔快照（设置写入后原位更新，无需重载插件）。 */
     get(): boolean;
 }
+/**
+ * 宿主侧条目 config schema（#80 / #98）：宿主 0.1.7+ 的设置系统据此把
+ * `enableUsageStatsTool` 投影为 volatile 引用（设置写入即时反映 + 写回走
+ * settings.update）。**必须**经 src/index.ts re-export 给 loader——宿主从插件
+ * 运行时模块的 `Config` 导出发现它；只声明类型等于没有。schemastery 非 strict
+ * object 透传未声明键，其余 config 字段不受影响；未导出 Config 的旧宿主直接
+ * 把原始 config 交给 apply，普通布尔形态由读取端兼容。
+ */
+export declare const Config: z<Schemastery.ObjectS<NoInfer<{
+    enableUsageStatsTool: z<boolean, boolean, "volatile-defined">;
+}>>, Schemastery.ObjectT<NoInfer<{
+    enableUsageStatsTool: z<boolean, boolean, "volatile-defined">;
+}>>, "plain">;
 /** Plugin configuration. */
 export interface UsageBillingConfig {
     /** Absolute path to a `.dsh-usage-stats.json` fallback file. */

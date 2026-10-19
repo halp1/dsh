@@ -3,6 +3,8 @@
  *
  * usage_stats 工具开关：插件自带的读/写接口（不依赖宿主浏览器设置白名单）。
  * GET 返回当前是否注入；POST 写设置命名空间（重启应用后工具注入随新值生效）。
+ * 写回失败回 503 + 宿主错误文案（issue #98：此前 200 + 笼统 invalid，开关无声
+ * 弹回且无任何诊断线索）；body 非 JSON 回 400。
  *
  * 双世代宿主（issue #19 + #28 + v1.4.19）的接线在装配器里完成：
  * - 旧宿主 ≤0.1.6 走 `settings.register` 命名空间 scope。
@@ -58,37 +60,51 @@ export function registerUsageToolRoute(ctx: Context, deps: UsageToolDeps): void 
             return
           }
         }
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
         if (req.method === 'GET') {
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
           res.end(JSON.stringify({ enabled: deps.read() }))
           return
         }
-        // 读取并解析 JSON body 后写回；body 只承载一个布尔开关，512 字节上限
-        // 已足够，防坏/恶意 body 拖住 handler。
-        try {
-          let body = ''
-          for await (const chunk of req) {
-            body += String(chunk)
-            if (body.length > 512) {
-              // 状态行显式（同 notify-claim 的 413）：无 writeHead 时默认 200。
-              res.writeHead(413, { 'content-type': 'application/json; charset=utf-8' })
-              res.end(JSON.stringify({ error: 'body too large' }))
-              return
-            }
+        // POST：状态行延迟到各终局分支（issue #98 加固）——此前 writeHead(200)
+        // 先于 body 处理发出，写回失败只能以 200 + {"error":"invalid"} 回给客户端
+        // （开关无声弹回，网络面板毫无线索），413 分支更是二次 writeHead 直接抛
+        // ERR_HTTP_HEADERS_SENT。现在每条路径 writeHead 第一句且仅一次。
+        let body = ''
+        for await (const chunk of req) {
+          body += String(chunk)
+          if (body.length > 512) {
+            // 状态行显式（同 notify-claim 的 413）：防坏/恶意 body 拖住 handler。
+            res.writeHead(413, { 'content-type': 'application/json; charset=utf-8' })
+            res.end(JSON.stringify({ error: 'body too large' }))
+            return
           }
-          const parsed = JSON.parse(body === '' ? '{}' : body) as { enabled?: unknown }
-          const next = parsed.enabled === true
-          await deps.write(next)
-          // 双通道写回后显式同步工具注册（幂等）：旧宿主无 volatile 提交事件；
-          // 新宿主的真实提交也会再同步一次，此处先同步覆盖测试替身不提交场景。
-          deps.syncTool()
-          res.end(JSON.stringify({ ok: true, enabled: next }))
-        } catch (error) {
-          // 写回链路异常必须可见：settings.update 抛错（ns 不匹配/volatile 校验拒绝）
-          // 需要真机诊断线索，吞掉后只剩笼统的 invalid。
-          console.warn('[usage-billing] usage-tool toggle write-back failed:', error)
-          res.end(JSON.stringify({ error: 'invalid' }))
         }
+        let next: boolean
+        try {
+          const parsed = JSON.parse(body === '' ? '{}' : body) as { enabled?: unknown }
+          next = parsed.enabled === true
+        } catch {
+          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({ error: 'invalid json body' }))
+          return
+        }
+        try {
+          await deps.write(next)
+        } catch (error) {
+          // 写回链路异常升级为 503 并带回宿主错误文案（如 `No configurable plugin
+          // entry`）——设置系统配置缺失是可诊断状态，不能伪装成 200 的笼统 invalid；
+          // 客户端只看 body.ok !== true 的语义不变（仍会撤销乐观更新）。
+          const detail = error instanceof Error ? error.message : String(error)
+          console.warn('[usage-billing] usage-tool toggle write-back failed:', error)
+          res.writeHead(503, { 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({ error: `write failed: ${detail}` }))
+          return
+        }
+        // 双通道写回后显式同步工具注册（幂等）：旧宿主无 volatile 提交事件；
+        // 新宿主的真实提交也会再同步一次，此处先同步覆盖测试替身不提交场景。
+        deps.syncTool()
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ ok: true, enabled: next }))
       },
     }),
     'usage-billing: usage-tool route',

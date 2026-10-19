@@ -25,13 +25,14 @@ import type { UserConfig } from 'tsdown'
 import { transform } from 'lightningcss'
 
 /**
- * The host's eight-entry platform seed, copied verbatim from packages/client/web/src/platform.ts.
+ * The host's eleven-entry platform seed, copied verbatim from packages/client/web/src/platform.ts.
  * These are the specifiers the loader module table answers at runtime, so the browser
  * bundle keeps them external (require) instead of inlining. If the monorepo seed grows,
  * mirror it here.
  */
 const PLATFORM_MODULES = [
   'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client', '@deepseek-ai/cordis',
+  'zod', '@tanstack/react-virtual',
   '@deepseek-ai/dsh-client-store',
   '@deepseek-ai/dsh-client-ui-slots',
   '@deepseek-ai/dsh-client-ui-primitives',

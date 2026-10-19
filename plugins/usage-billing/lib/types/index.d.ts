@@ -28,6 +28,7 @@ interface SettingsReader {
     }[];
 }
 export type { UsageBillingConfig } from './config.ts';
+export { Config } from './config.ts';
 /**
  * Create the atomic file-backed durable-ledger store. The previous complete file
  * is retained as `.bak`; a malformed/missing main file falls back to that backup.

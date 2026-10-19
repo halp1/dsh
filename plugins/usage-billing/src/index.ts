@@ -106,6 +106,11 @@ const UsageBillingSettingsSchema: z<UsageBillingSettings> = z.object({
 })
 
 export type { UsageBillingConfig } from './config.ts'
+// ⚠️ 运行时 Config 必须从本入口 re-export（issue #98）：宿主 dsh-settings 的写回
+// 与 volatile 投影都从插件运行时模块的 `Config` 导出发现 schema；v1.6.0 拆分时
+// 退化成纯类型导致「注入用量查询」开关在 0.2.1-rc.2 上失效（No configurable
+// plugin entry）。schema 定义与详细说明见 src/config.ts。
+export { Config } from './config.ts'
 /** 实时定价的后台刷新间隔（毫秒）：汇率/模型价低频变化，6 小时一次足够。 */
 /** 实时定价的后台刷新间隔（毫秒）：汇率/模型价低频变化，6 小时一次足够。 */
 const PRICING_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000

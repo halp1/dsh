@@ -1312,15 +1312,27 @@ const BUILTIN_MODEL_CATALOG = [
 		}
 	},
 	{
+		key: "minimax-m3.1-flash",
+		name: "MiniMax-M3.1-Flash",
+		provider: "MiniMax",
+		colorVar: "ds-amber",
+		price: {
+			currency: "CNY",
+			input: 1,
+			cacheHit: .1,
+			output: 4
+		}
+	},
+	{
 		key: "minimax-m3.1-flash-preview",
 		name: "MiniMax M3.1 Flash Preview",
 		provider: "MiniMax",
 		colorVar: "ds-amber",
 		price: {
 			currency: "CNY",
-			input: 2.1,
-			cacheHit: .42,
-			output: 8.4
+			input: 1,
+			cacheHit: .1,
+			output: 4
 		}
 	},
 	{
@@ -2423,6 +2435,8 @@ const BUILTIN_MODEL_KEY_ALIASES = {
 	"minimax-m2-7": "minimax-m2.7",
 	"minimax-m2-7-highspeed": "minimax-m2.7-highspeed",
 	"minimax-m2-7-high-speed": "minimax-m2.7-highspeed",
+	"minimax-m3.1-flash": "minimax-m3.1-flash",
+	"minimax-m3-1-flash": "minimax-m3.1-flash",
 	"minimax-m3.1-flash-preview": "minimax-m3.1-flash-preview",
 	"minimax-m3-1-flash-preview": "minimax-m3.1-flash-preview",
 	"u2-flash": "u2-flash",
@@ -7290,6 +7304,8 @@ function registerBalanceRoute(ctx, deps) {
 *
 * usage_stats 工具开关：插件自带的读/写接口（不依赖宿主浏览器设置白名单）。
 * GET 返回当前是否注入；POST 写设置命名空间（重启应用后工具注入随新值生效）。
+* 写回失败回 503 + 宿主错误文案（issue #98：此前 200 + 笼统 invalid，开关无声
+* 弹回且无任何诊断线索）；body 非 JSON 回 400。
 *
 * 双世代宿主（issue #19 + #28 + v1.4.19）的接线在装配器里完成：
 * - 旧宿主 ≤0.1.6 走 `settings.register` 命名空间 scope。
@@ -7322,32 +7338,43 @@ function registerUsageToolRoute(ctx, deps) {
 					return;
 				}
 			}
-			res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
 			if (req.method === "GET") {
+				res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
 				res.end(JSON.stringify({ enabled: deps.read() }));
 				return;
 			}
-			try {
-				let body = "";
-				for await (const chunk of req) {
-					body += String(chunk);
-					if (body.length > 512) {
-						res.writeHead(413, { "content-type": "application/json; charset=utf-8" });
-						res.end(JSON.stringify({ error: "body too large" }));
-						return;
-					}
+			let body = "";
+			for await (const chunk of req) {
+				body += String(chunk);
+				if (body.length > 512) {
+					res.writeHead(413, { "content-type": "application/json; charset=utf-8" });
+					res.end(JSON.stringify({ error: "body too large" }));
+					return;
 				}
-				const next = JSON.parse(body === "" ? "{}" : body).enabled === true;
-				await deps.write(next);
-				deps.syncTool();
-				res.end(JSON.stringify({
-					ok: true,
-					enabled: next
-				}));
-			} catch (error) {
-				console.warn("[usage-billing] usage-tool toggle write-back failed:", error);
-				res.end(JSON.stringify({ error: "invalid" }));
 			}
+			let next;
+			try {
+				next = JSON.parse(body === "" ? "{}" : body).enabled === true;
+			} catch {
+				res.writeHead(400, { "content-type": "application/json; charset=utf-8" });
+				res.end(JSON.stringify({ error: "invalid json body" }));
+				return;
+			}
+			try {
+				await deps.write(next);
+			} catch (error) {
+				const detail = error instanceof Error ? error.message : String(error);
+				console.warn("[usage-billing] usage-tool toggle write-back failed:", error);
+				res.writeHead(503, { "content-type": "application/json; charset=utf-8" });
+				res.end(JSON.stringify({ error: `write failed: ${detail}` }));
+				return;
+			}
+			deps.syncTool();
+			res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+			res.end(JSON.stringify({
+				ok: true,
+				enabled: next
+			}));
 		}
 	}), "usage-billing: usage-tool route");
 }
@@ -7582,6 +7609,31 @@ function registerUsageStatsRoute(ctx, deps) {
 const BILLING_SETTINGS_NAMESPACE = "ui-usage-billing";
 /** 该命名空间下用户可编辑的字段名。 */
 const ENABLE_USAGE_STATS_TOOL_FIELD = "enableUsageStatsTool";
+//#endregion
+//#region lib/types/config.js
+/**
+* Plugin configuration（v1.5.2 抽出）：UsageBillingConfig 原本声明在 src/index.ts
+* 顶部，src/index.ts 收缩为装配器后被 src/routes/usage-stats.ts 等路由文件
+* 引用（作为 Deps 类型签名），把它单独放这里让 route 文件能从 src/ 根 import。
+* 仍由 src/index.ts 的 apply(ctx, config) 消费：路由层只通过 Deps 拿到它，
+* 不直接构造。
+*
+* ⚠️ Config 运行时 schema 必须经 src/index.ts re-export（issue #98）：宿主
+* dsh-settings@0.2.1-rc.2 的 settings.update 写回要求本插件条目在 loader fiber
+* 上有 `Config` schema（`entry.fiber.runtime.Config` 且带 toJSON），缺失时抛
+* `No configurable plugin entry`——v1.6.0 拆分时把 schema 退化成纯类型，「注入
+* 用量查询」开关随之失效（#80 方案的回归）。schemastery 非 strict object 会
+* merge 未声明键，其余 config 字段（statsPath / routeAliases 等）不受影响。
+*/
+/**
+* 宿主侧条目 config schema（#80 / #98）：宿主 0.1.7+ 的设置系统据此把
+* `enableUsageStatsTool` 投影为 volatile 引用（设置写入即时反映 + 写回走
+* settings.update）。**必须**经 src/index.ts re-export 给 loader——宿主从插件
+* 运行时模块的 `Config` 导出发现它；只声明类型等于没有。schemastery 非 strict
+* object 透传未声明键，其余 config 字段不受影响；未导出 Config 的旧宿主直接
+* 把原始 config 交给 apply，普通布尔形态由读取端兼容。
+*/
+const Config = z.object({ [ENABLE_USAGE_STATS_TOOL_FIELD]: z.boolean().default(false).volatile() });
 //#endregion
 //#region lib/types/index.js
 /**
@@ -8477,4 +8529,4 @@ function apply(ctx, config = {}) {
 	});
 }
 //#endregion
-export { adaptSessionPersistence, apply, createFileUsageLedgerStore, guardLoopback, hostNameOf, inject, isLoopbackHost, isLoopbackOrigin, isLoopbackPeer, normalizeTrustedHosts, readPiAiProviderRoutes, readRegisteredProviderIds, resolveSubscriptionKeys };
+export { Config, adaptSessionPersistence, apply, createFileUsageLedgerStore, guardLoopback, hostNameOf, inject, isLoopbackHost, isLoopbackOrigin, isLoopbackPeer, normalizeTrustedHosts, readPiAiProviderRoutes, readRegisteredProviderIds, resolveSubscriptionKeys };
