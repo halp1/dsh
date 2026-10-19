@@ -8,6 +8,12 @@
 
 > **版本序列说明**：自 v1.2.0 起预览线序列恒高于稳定线 1.1.x——消除此前 1.0.x < 1.1.x 的版本号倒挂（pnpm `minimumReleaseAge` 冷静期会把刚发布的 latest 跳过、回退到旧稳定线，issue #40 有实测案例）。安装建议钉具体版本号。
 
+### v1.6.4（2026-10-20）
+
+- **修复：「注入用量查询」开关在 DSH 0.2.1-rc.2 上无法开启（v1.6.0 引入的回归，受影响区间 1.6.0 ~ 1.6.3，issue #98）**。v1.6.0 的服务端拆分把宿主条目的运行时 `Config` schema 退化成纯 TS 类型，而 dsh-settings@0.2.1-rc.2 的设置写回要求插件运行时模块导出带 `toJSON` 的 `Config`（缺失时抛 `No configurable plugin entry`）——开关点亮后立刻弹回、GET 恒为 false、`usage_stats` 工具永不注册，且无任何提示。修复：恢复运行时 schema 并从插件入口 re-export（issue #80 的方案复位），volatile 投影与写回整条链路恢复。**连带加固**：`/api/billing/usage-tool` 写回失败从「HTTP 200 + 笼统 invalid」（网络面板无线索、开关无声弹回的帮凶）升级为 **HTTP 503 并携带宿主错误文案**，坏 body 回 400，并修掉 413 分支二次 `writeHead` 的既有隐患。桌面 App 用户更新后开关即可正常开启；Kimi 订阅额度若显示「鉴权失败」为 key 过期，与本版无关。
+- **收录：MiniMax-M3.1-Flash 正式版独立刊例价**（issue #97，2026-10-19 发布）：输入 1.00 / 缓存读取 0.10 / 输出 4.00（元/百万 token）。`MiniMax-M3.1-Flash-Preview` 旧条目保留其存续期生效的 M3 口径（历史事件按事件时点规则计价，不追溯改写）。
+- **内部**：宿主平台种子同步（新增 `zod` / `@tanstack/react-virtual` 外部化声明，issue #96 自动检测；客户端 bundle 未引用这两模块，零行为变化）。
+
 ### v1.6.3（2026-10-19）
 
 - **修复：新版宿主设置页形态下订阅卡全部消失 + 同类取 key 缺陷清偿**（涉及面：订阅额度 / 中转站 / 声明端点 / 余额四个面板）。新代际宿主的 llm-pi-ai 把路由 key 从 `providers.<id>.apiKeyEnv` 改存为凭据 refs（路由约定名 `<ROUTE>_API_KEY`，如 kimi-coding → `KIMI_CODING_API_KEY`；kimi-coding 与 opencode-go 另有目录 ambient 名补候选），providers 配置里只剩 models 列表——插件所有「按路由取 key」的读取口都只认显式 `apiKeyEnv`，识别为零、路由整条消失。修复：识别放宽为三信号（显式 apiKeyEnv / 非空 models 列表 / 约定 ref 解析出 key 任一），key 解析统一走显式引用优先、约定 ref 补后的候选链（共享于新模块 `route-keys.ts`，覆盖订阅适配器、中转站探测、声明端点、余额查询四处）；显式 `apiKeyEnv` 恒优先，经典配置行为逐位不变，聚合层按 token 豁免口径不受影响。真机验证：MiniMax / Z.ai 额度实查恢复，无 apiKeyEnv 的中转路由重新出现在中转站面板。注意：Kimi 若显示「鉴权失败」是 key 本身过期，请在宿主里更新 key。
