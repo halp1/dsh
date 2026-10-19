@@ -44,7 +44,7 @@ import { reconcileBalanceDelta, type BalanceRef, type ReconcileEvent } from './r
 import { fetchLivePricing } from './pricing-fetch.ts'
 import type { LivePricing, RelayQuota, SubscriptionQuota } from './pricing-shared.ts'
 import type { UsageBillingConfig } from './config.ts'
-import { collectSubscriptions, EMPTY_SUBSCRIPTION_KEYS, identifySubscriptionPlans, parseOpenCodeAuthDocument, type IdentifiedSubscriptionPlan, type SubscriptionKeys } from './subscriptions.ts'
+import { collectSubscriptions, identifySubscriptionPlans, parseOpenCodeAuthDocument, resolveSubscriptionAccess, type IdentifiedSubscriptionPlan, type SubscriptionKeys } from './subscriptions.ts'
 import { isOfficialBaseUrl, queryRelayQuotas, type RelayRoute } from './relay.ts'
 import { planTypeOf, subscriptionFeeCnyOf } from './client/plan-knowledge.ts'
 import { swallowed } from './silent.ts'
@@ -253,39 +253,19 @@ export function createFileUsageLedgerStore(ledgerPath: string): UsageLedgerStore
 export const inject = ['webServer', 'sessionPersistence', 'credentials', 'settings']
 
 /**
- * 订阅 provider id（llm-pi-ai 设置键）→ billing 适配器 key 的映射。
- * 复用 dsh 既有的 llm-pi-ai provider 配置（apiKeyEnv 引用），不引入新配置面。
- */
-/** key 只取字符串凭据字段：zaiRegion 是区域枚举，由下方区域逻辑单独赋值。 */
-const SUBSCRIPTION_KEY_SOURCES: ReadonlyArray<{ provider: string; key: Exclude<keyof SubscriptionKeys, 'zaiRegion'> }> = [
-  { provider: 'kimi-coding', key: 'kimiApiKey' },
-  { provider: 'zai-coding-cn', key: 'zaiCnApiKey' },
-  { provider: 'zai-coding', key: 'zaiApiKey' },
-  { provider: 'opencode', key: 'opencodeApiKey' },
-  { provider: 'opencode-go', key: 'opencodeApiKey' },
-  { provider: 'minimax', key: 'minmaxApiKey' },
-  { provider: 'minimax-token-plan', key: 'minmaxApiKey' },
-  { provider: 'minimax-token-plan-cn', key: 'minmaxApiKey' },
-  { provider: 'minimax-cn', key: 'minmaxApiKey' },
-  { provider: 'openrouter', key: 'openrouterApiKey' },
-  { provider: 'commandcode', key: 'commandcodeApiKey' },
-  { provider: 'tencent-token-plan', key: 'tencentCloudApi' },
-  // 注意：anthropic 有意不在此表——llm-pi-ai 的 anthropic 路由多为按量 sk-ant key
-  //（误当 OAuth token 查订阅会 401），Claude 订阅行只走 Claude Code 登录态自动发现。
-]
-
-/**
  * 读取 llm-pi-ai 设置的 `providers` 字典（`<route> → { apiKeyEnv? }`）。
  * 余额查询复用同一份来源：部署为某个 provider 配一次 key，多个 surface 共享。
  * @param settings - the settings service (reads the llm-pi-ai namespace).
  * @returns the providers dict; empty when the namespace is unreadable.
  */
-/** 一个 llm-pi-ai provider 路由的读取视图：只取三块——apiKeyEnv（凭据引用）、
- *  baseURL（中转站零配置发现的来源）、displayName（站点显示名）。 */
+/** 一个 llm-pi-ai provider 路由的读取视图：apiKeyEnv（凭据引用）、baseURL（中转站
+ *  零配置发现）、displayName（站点显示名）、hasModels（新版宿主设置页保存的
+ *  models 列表——订阅识别的第二配置信号）。 */
 export interface PiAiProviderRoute {
   apiKeyEnv?: string
   baseURL?: string
   displayName?: string
+  hasModels?: boolean
 }
 
 /** 读 llm-pi-ai 设置的 `providers` 字典（`<route> → { apiKeyEnv?, baseURL?, displayName? }`）。
@@ -302,10 +282,14 @@ async function readPiAiProviders(settings: SettingsReader): Promise<Readonly<Rec
     for (const [route, entry] of Object.entries(providers ?? {})) {
       if (entry === null || typeof entry !== 'object') continue
       const { apiKeyEnv, baseURL, displayName } = entry
+      // models 是新版宿主设置页保存路由配置的主要落点（key 走凭据 refs）；
+      // 非空数组才算「已配置」，空数组等价于未声明。
+      const models = (entry as { models?: unknown }).models
       out[route] = {
         ...(typeof apiKeyEnv === 'string' ? { apiKeyEnv } : {}),
         ...(typeof baseURL === 'string' ? { baseURL } : {}),
         ...(typeof displayName === 'string' ? { displayName } : {}),
+        ...(Array.isArray(models) && models.length > 0 ? { hasModels: true } : {}),
       }
     }
     return out
@@ -411,9 +395,10 @@ function buildWorkspaceTitleResolver(ctx: Context): ((cwd: string) => string | u
 }
 
 /**
-  * 解析订阅适配器需要的 API Key：从 llm-pi-ai 设置的 `providers.<id>.apiKeyEnv`
- * 读引用（如 kimi-coding → KIMI_CODING_API_KEY），再经凭据 seam 解析成实际值。
- * 同时识别出用户配置了 key 的订阅套餐（供面板只显示已识别的）。
+ * 解析订阅适配器需要的 API Key：经典形态从 llm-pi-ai 设置的 `providers.<id>.apiKeyEnv`
+ * 读引用（如 kimi-coding → KIMI_CODING_API_KEY）；新版宿主设置页把 key 直接存成
+ * 凭据 refs（路由约定名 `<ROUTE>_API_KEY`，pi-ai 目录 ambient 名补充），显式引用
+ * 解析不到时按约定名找回。同时识别出已配置的订阅套餐（供面板只显示已识别的）。
  * @param settings - the settings service (reads the llm-pi-ai namespace).
  * @param credentials - the credentials service (resolves the env refs).
  */
@@ -421,33 +406,22 @@ export async function resolveSubscriptionKeys(
   settings: SettingsReader,
   credentials: CredentialProvider,
 ): Promise<{ keys: SubscriptionKeys; identified: IdentifiedSubscriptionPlan[] }> {
-  const keys: SubscriptionKeys = { ...EMPTY_SUBSCRIPTION_KEYS }
-  let providers: Record<string, { apiKeyEnv?: string }> | undefined
-  try {
-    const descriptors = settings.describe({ redactSecrets: true })
-    const pi = descriptors.find(descriptor => descriptor.ns === 'llm-pi-ai')?.value
-    providers = (pi as { providers?: Record<string, { apiKeyEnv?: string }> } | null | undefined)?.providers
-  } catch {
-    // 设置服务异常时按全空 key 处理（订阅面板显示未配置）。
-    return { keys, identified: [] }
-  }
-  for (const { provider, key } of SUBSCRIPTION_KEY_SOURCES) {
-    const env = providers?.[provider]?.apiKeyEnv
-    if (typeof env !== 'string' || env === '') continue
+  const providers = await readPiAiProviders(settings)
+  const resolve = async (name: string): Promise<string | undefined> => {
     try {
-      const resolved = await credentials.resolve(credentialRef(env))
-      if (resolved?.value !== undefined && resolved.value !== '') keys[key] = resolved.value
+      const resolved = await credentials.resolve(credentialRef(name))
+      return resolved?.value !== undefined && resolved.value !== '' ? resolved.value : undefined
     } catch (error) {
-      // 凭据解析失败跳过该 provider（保持未配置）。
+      // 单个 ref 解析失败视为未配置（订阅查询走「未读出」兜底，不抛错）。
       swallowed('credential-resolve-failed', error)
+      return undefined
     }
   }
-  // zai-coding-cn 是智谱国内域：跟随它时区域固定为 bigmodel-cn。只影响未显式
+  const { keys, keyConfigured } = await resolveSubscriptionAccess(providers, resolve)
+  // zai-coding-cn 是智谱国内域：CN key 在手即跟随 bigmodel-cn。只影响未显式
   // 声明 region 的声明式 plan 配置——identify 出的两条 Z.ai 路由各带固定区域。
-  if (providers?.['zai-coding-cn']?.apiKeyEnv !== undefined && keys.zaiCnApiKey !== '') {
-    keys.zaiRegion = 'bigmodel-cn'
-  }
-  // OpenCode 便捷回退：opencode(opencode-go) 路由没配 apiKeyEnv 时，读本机 OpenCode
+  if (keys.zaiCnApiKey !== '') keys.zaiRegion = 'bigmodel-cn'
+  // OpenCode 便捷回退：opencode(opencode-go) 路由没解析出 key 时，读本机 OpenCode
   // 客户端自存的凭据文件（~/.local/share/opencode/auth.json）。文件不存在/读不动/格式变
   // 一律视为「没有凭据」安静退回，绝不报错——这只是一次便利，不是必须具备。
   if (keys.opencodeApiKey === '') {
@@ -457,14 +431,19 @@ export async function resolveSubscriptionKeys(
   // 发现到凭据时把 Claude 订阅行补进识别结果（anthropic 不在 SUBSCRIPTION_ID_RE，
   // 不补行的话自动发现永远没机会展示）。文件不存在/未登录安静退回，绝不报错。
   keys.anthropicApiKey = await readClaudeOAuthToken()
-  if (keys.anthropicApiKey !== '') {
-    const identified = identifySubscriptionPlans(providers)
-    if (!identified.some(plan => plan.provider === 'anthropic')) {
-      identified.push({ provider: 'anthropic', displayName: 'Claude (Anthropic)', adapter: true })
-    }
-    return { keys, identified }
+  // 识别视图：显式 apiKeyEnv / models 已配置 / 约定 ref 解析出 key，三信号任一即识别。
+  const identified = identifySubscriptionPlans(Object.fromEntries(Object.entries(providers).map(([route, entry]) => [
+    route,
+    {
+      ...(entry.apiKeyEnv !== undefined ? { apiKeyEnv: entry.apiKeyEnv } : {}),
+      ...(entry.hasModels === true ? { hasModels: true } : {}),
+      ...(keyConfigured.has(route) ? { refResolved: true } : {}),
+    },
+  ])))
+  if (keys.anthropicApiKey !== '' && !identified.some(plan => plan.provider === 'anthropic')) {
+    identified.push({ provider: 'anthropic', displayName: 'Claude (Anthropic)', adapter: true })
   }
-  return { keys, identified: identifySubscriptionPlans(providers) }
+  return { keys, identified }
 }
 
 /** 读本机 OpenCode 客户端的凭据 token；取不到返回空串（安静退回）。 */

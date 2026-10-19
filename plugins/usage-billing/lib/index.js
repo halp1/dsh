@@ -5712,7 +5712,11 @@ function swallowed(reason, error) {
 * other subscription providers the harness recognizes (volcengine / baidu /
 * qwen / xiaomi token plans, agent plans…) are identified and listed with a
 * "no quota API" marker rather than hidden. API keys come from the `llm-pi-ai`
-* settings namespace (`apiKeyEnv` refs) resolved through the credentials seam.
+* settings namespace resolved through the credentials seam: the classic
+* `apiKeyEnv` refs, or — on hosts whose settings UI stores route keys as
+* credentials refs named after the route (`<ROUTE>_API_KEY`, catalog ambient
+* names as fallback) — the conventional refs, matched against the same
+* subscription-class route ids.
 */
 /** 每平台熔断门：某个订阅适配器连续可重试失败（网络 / 5xx / 429）达阈值后
 *  短路由不可用，避免 30 秒轮询对已故障的上游反复打满超时。鉴权失败（unauthorized）
@@ -5761,6 +5765,104 @@ const EMPTY_SUBSCRIPTION_KEYS = {
 	tencentCloudApi: "",
 	zaiRegion: "global"
 };
+/** 订阅 provider id（llm-pi-ai 设置键）→ SubscriptionKeys 字段的映射。 */
+const SUBSCRIPTION_KEY_SOURCES = [
+	{
+		provider: "kimi-coding",
+		key: "kimiApiKey"
+	},
+	{
+		provider: "zai-coding-cn",
+		key: "zaiCnApiKey"
+	},
+	{
+		provider: "zai-coding",
+		key: "zaiApiKey"
+	},
+	{
+		provider: "opencode",
+		key: "opencodeApiKey"
+	},
+	{
+		provider: "opencode-go",
+		key: "opencodeApiKey"
+	},
+	{
+		provider: "minimax",
+		key: "minmaxApiKey"
+	},
+	{
+		provider: "minimax-token-plan",
+		key: "minmaxApiKey"
+	},
+	{
+		provider: "minimax-token-plan-cn",
+		key: "minmaxApiKey"
+	},
+	{
+		provider: "minimax-cn",
+		key: "minmaxApiKey"
+	},
+	{
+		provider: "openrouter",
+		key: "openrouterApiKey"
+	},
+	{
+		provider: "commandcode",
+		key: "commandcodeApiKey"
+	},
+	{
+		provider: "tencent-token-plan",
+		key: "tencentCloudApi"
+	}
+];
+/**
+* 一条订阅路由的候选凭据 ref 名：路由 id 约定名（`<ROUTE 大写下划线>_API_KEY`）
+* 优先，其后补宿主 pi-ai 目录的 ambient env 名（仅当与约定名不同——目录把
+* kimi-coding 指到 KIMI_API_KEY、opencode-go 与 opencode 同用 OPENCODE_API_KEY）。
+* 新版宿主设置页把路由 key 存成凭据 refs 而不再写 providers.apiKeyEnv，订阅
+* 额度查询据此按约定名找回同一把 key。
+*/
+function subscriptionKeyRefCandidates(provider) {
+	return [`${provider.replaceAll("-", "_").toUpperCase()}_API_KEY`, ...{
+		"kimi-coding": ["KIMI_API_KEY"],
+		"opencode-go": ["OPENCODE_API_KEY"]
+	}[provider] ?? []];
+}
+/**
+* key 解析的可测核心（无文件 I/O）：先显式 `apiKeyEnv`（旧口径，优先），key 仍缺
+* 时按约定 ref 名解析（新版宿主的存放形态）。`keyConfigured` 回报每条路由的 key
+* 是否解析成功，供识别层作为第三配置信号（refResolved）。
+* @param providers - llm-pi-ai 的 providers 视图。
+* @param resolveRef - 凭据 seam：ref 名 → 非空 key 值；未配置/失败返回 undefined。
+*/
+async function resolveSubscriptionAccess(providers, resolveRef) {
+	const keys = { ...EMPTY_SUBSCRIPTION_KEYS };
+	const keyConfigured = /* @__PURE__ */ new Set();
+	for (const { provider, key } of SUBSCRIPTION_KEY_SOURCES) {
+		const env = providers[provider]?.apiKeyEnv;
+		if (typeof env === "string" && env !== "") {
+			const value = await resolveRef(env);
+			if (value !== void 0) {
+				keys[key] = value;
+				keyConfigured.add(provider);
+				continue;
+			}
+		}
+		for (const ref of subscriptionKeyRefCandidates(provider)) {
+			const value = await resolveRef(ref);
+			if (value !== void 0) {
+				keys[key] = value;
+				keyConfigured.add(provider);
+				break;
+			}
+		}
+	}
+	return {
+		keys,
+		keyConfigured
+	};
+}
 /** 订阅类 provider 的显示名（未命中的回退为 id 本身）。 */
 const SUBSCRIPTION_DISPLAY_NAMES = {
 	"kimi-coding": "Kimi For Coding",
@@ -5814,14 +5916,15 @@ const SUBSCRIPTION_ADAPTERS = {
 /** 有额度适配器的 provider id 集合（识别用）。 */
 const ADAPTER_PROVIDER_IDS = new Set(Object.keys(SUBSCRIPTION_ADAPTERS));
 /**
-* 从 llm-pi-ai 设置里识别订阅套餐：带订阅类 id 且配置了 apiKeyEnv 的 provider。
+* 从 llm-pi-ai 设置里识别订阅套餐：带订阅类 id 且任一配置信号成立的 provider
+* （显式 apiKeyEnv / models 已配置 / 约定 ref 解析出了 key）。
 * @param providers - the `providers` map of the llm-pi-ai settings namespace.
 * @returns identified plans in configuration order.
 */
 function identifySubscriptionPlans(providers) {
 	const out = [];
 	for (const [id, config] of Object.entries(providers ?? {})) {
-		if (typeof config?.apiKeyEnv !== "string" || config.apiKeyEnv === "") continue;
+		if (!(typeof config?.apiKeyEnv === "string" && config.apiKeyEnv !== "" || config?.hasModels === true || config?.refResolved === true)) continue;
 		if (!isSubscriptionProviderId(id)) continue;
 		out.push({
 			provider: id,
@@ -7584,61 +7687,6 @@ const inject = [
 	"credentials",
 	"settings"
 ];
-/**
-* 订阅 provider id（llm-pi-ai 设置键）→ billing 适配器 key 的映射。
-* 复用 dsh 既有的 llm-pi-ai provider 配置（apiKeyEnv 引用），不引入新配置面。
-*/
-/** key 只取字符串凭据字段：zaiRegion 是区域枚举，由下方区域逻辑单独赋值。 */
-const SUBSCRIPTION_KEY_SOURCES = [
-	{
-		provider: "kimi-coding",
-		key: "kimiApiKey"
-	},
-	{
-		provider: "zai-coding-cn",
-		key: "zaiCnApiKey"
-	},
-	{
-		provider: "zai-coding",
-		key: "zaiApiKey"
-	},
-	{
-		provider: "opencode",
-		key: "opencodeApiKey"
-	},
-	{
-		provider: "opencode-go",
-		key: "opencodeApiKey"
-	},
-	{
-		provider: "minimax",
-		key: "minmaxApiKey"
-	},
-	{
-		provider: "minimax-token-plan",
-		key: "minmaxApiKey"
-	},
-	{
-		provider: "minimax-token-plan-cn",
-		key: "minmaxApiKey"
-	},
-	{
-		provider: "minimax-cn",
-		key: "minmaxApiKey"
-	},
-	{
-		provider: "openrouter",
-		key: "openrouterApiKey"
-	},
-	{
-		provider: "commandcode",
-		key: "commandcodeApiKey"
-	},
-	{
-		provider: "tencent-token-plan",
-		key: "tencentCloudApi"
-	}
-];
 /** 读 llm-pi-ai 设置的 `providers` 字典（`<route> → { apiKeyEnv?, baseURL?, displayName? }`）。
 *  余额与订阅查询复用同一份来源：部署为某个 provider 配一次，多 surface 共享。
 * @param settings - the settings service (reads the llm-pi-ai namespace).
@@ -7651,10 +7699,12 @@ async function readPiAiProviders(settings) {
 		for (const [route, entry] of Object.entries(providers ?? {})) {
 			if (entry === null || typeof entry !== "object") continue;
 			const { apiKeyEnv, baseURL, displayName } = entry;
+			const models = entry.models;
 			out[route] = {
 				...typeof apiKeyEnv === "string" ? { apiKeyEnv } : {},
 				...typeof baseURL === "string" ? { baseURL } : {},
-				...typeof displayName === "string" ? { displayName } : {}
+				...typeof displayName === "string" ? { displayName } : {},
+				...Array.isArray(models) && models.length > 0 ? { hasModels: true } : {}
 			};
 		}
 		return out;
@@ -7761,51 +7811,41 @@ function buildWorkspaceTitleResolver(ctx) {
 	};
 }
 /**
-* 解析订阅适配器需要的 API Key：从 llm-pi-ai 设置的 `providers.<id>.apiKeyEnv`
-* 读引用（如 kimi-coding → KIMI_CODING_API_KEY），再经凭据 seam 解析成实际值。
-* 同时识别出用户配置了 key 的订阅套餐（供面板只显示已识别的）。
+* 解析订阅适配器需要的 API Key：经典形态从 llm-pi-ai 设置的 `providers.<id>.apiKeyEnv`
+* 读引用（如 kimi-coding → KIMI_CODING_API_KEY）；新版宿主设置页把 key 直接存成
+* 凭据 refs（路由约定名 `<ROUTE>_API_KEY`，pi-ai 目录 ambient 名补充），显式引用
+* 解析不到时按约定名找回。同时识别出已配置的订阅套餐（供面板只显示已识别的）。
 * @param settings - the settings service (reads the llm-pi-ai namespace).
 * @param credentials - the credentials service (resolves the env refs).
 */
 async function resolveSubscriptionKeys(settings, credentials) {
-	const keys = { ...EMPTY_SUBSCRIPTION_KEYS };
-	let providers;
-	try {
-		providers = (settings.describe({ redactSecrets: true }).find((descriptor) => descriptor.ns === "llm-pi-ai")?.value)?.providers;
-	} catch {
-		return {
-			keys,
-			identified: []
-		};
-	}
-	for (const { provider, key } of SUBSCRIPTION_KEY_SOURCES) {
-		const env = providers?.[provider]?.apiKeyEnv;
-		if (typeof env !== "string" || env === "") continue;
+	const providers = await readPiAiProviders(settings);
+	const resolve = async (name) => {
 		try {
-			const resolved = await credentials.resolve(credentialRef(env));
-			if (resolved?.value !== void 0 && resolved.value !== "") keys[key] = resolved.value;
+			const resolved = await credentials.resolve(credentialRef(name));
+			return resolved?.value !== void 0 && resolved.value !== "" ? resolved.value : void 0;
 		} catch (error) {
 			swallowed("credential-resolve-failed", error);
+			return;
 		}
-	}
-	if (providers?.["zai-coding-cn"]?.apiKeyEnv !== void 0 && keys.zaiCnApiKey !== "") keys.zaiRegion = "bigmodel-cn";
+	};
+	const { keys, keyConfigured } = await resolveSubscriptionAccess(providers, resolve);
+	if (keys.zaiCnApiKey !== "") keys.zaiRegion = "bigmodel-cn";
 	if (keys.opencodeApiKey === "") keys.opencodeApiKey = await readOpenCodeToken();
 	keys.anthropicApiKey = await readClaudeOAuthToken();
-	if (keys.anthropicApiKey !== "") {
-		const identified = identifySubscriptionPlans(providers);
-		if (!identified.some((plan) => plan.provider === "anthropic")) identified.push({
-			provider: "anthropic",
-			displayName: "Claude (Anthropic)",
-			adapter: true
-		});
-		return {
-			keys,
-			identified
-		};
-	}
+	const identified = identifySubscriptionPlans(Object.fromEntries(Object.entries(providers).map(([route, entry]) => [route, {
+		...entry.apiKeyEnv !== void 0 ? { apiKeyEnv: entry.apiKeyEnv } : {},
+		...entry.hasModels === true ? { hasModels: true } : {},
+		...keyConfigured.has(route) ? { refResolved: true } : {}
+	}])));
+	if (keys.anthropicApiKey !== "" && !identified.some((plan) => plan.provider === "anthropic")) identified.push({
+		provider: "anthropic",
+		displayName: "Claude (Anthropic)",
+		adapter: true
+	});
 	return {
 		keys,
-		identified: identifySubscriptionPlans(providers)
+		identified
 	};
 }
 /** 读本机 OpenCode 客户端的凭据 token；取不到返回空串（安静退回）。 */

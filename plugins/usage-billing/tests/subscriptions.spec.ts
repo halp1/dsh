@@ -6,7 +6,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { collectSubscriptions, EMPTY_SUBSCRIPTION_KEYS, identifySubscriptionPlans, parseAnthropicUsage, parseCommandCodeCredits, parseMiniMaxRemains, parseOpenCodeAuthDocument, parseOpenRouterCredits } from '../src/subscriptions.ts'
+import { collectSubscriptions, EMPTY_SUBSCRIPTION_KEYS, identifySubscriptionPlans, parseAnthropicUsage, parseCommandCodeCredits, parseMiniMaxRemains, parseOpenCodeAuthDocument, parseOpenRouterCredits, resolveSubscriptionAccess, subscriptionKeyRefCandidates } from '../src/subscriptions.ts'
 
 /** A stubbed fetch answering one JSON body with the given status. */
 function stubFetch(body: unknown, status = 200): void {
@@ -61,9 +61,105 @@ describe('identifySubscriptionPlans', () => {
     })
   })
 
+  it('recognizes a models-only route (new-host settings shape, no apiKeyEnv)', () => {
+    // 新版宿主设置页把路由 key 存成凭据 refs，providers 配置里只剩 models 列表。
+    const identified = identifySubscriptionPlans({
+      'kimi-coding': { hasModels: true },
+      'zai-coding-cn': { hasModels: true },
+      // 空路由（无任何信号）仍不识别。
+      'minimax-cn': {},
+      'openrouter': { apiKeyEnv: '' },
+    })
+    expect(identified.map(item => item.provider)).toEqual(['kimi-coding', 'zai-coding-cn'])
+    expect(identified[0]).toMatchObject({ adapter: true, displayName: 'Kimi For Coding' })
+    expect(identified[1]).toMatchObject({ adapter: true, displayName: 'Z.ai Coding Plan（国内）', region: 'bigmodel-cn' })
+  })
+
+  it('recognizes a route whose conventional credential ref resolved (refResolved)', () => {
+    const identified = identifySubscriptionPlans({ 'minimax-cn': { refResolved: true } })
+    expect(identified.map(item => item.provider)).toEqual(['minimax-cn'])
+    expect(identified[0]).toMatchObject({ adapter: true })
+  })
+
   it('returns an empty list for an empty providers map', () => {
     expect(identifySubscriptionPlans(undefined)).toEqual([])
     expect(identifySubscriptionPlans({})).toEqual([])
+  })
+})
+
+describe('subscriptionKeyRefCandidates', () => {
+  it('leads with the route-id convention name', () => {
+    expect(subscriptionKeyRefCandidates('minimax-cn')).toEqual(['MINIMAX_CN_API_KEY'])
+    expect(subscriptionKeyRefCandidates('zai-coding-cn')).toEqual(['ZAI_CODING_CN_API_KEY'])
+    expect(subscriptionKeyRefCandidates('openrouter')).toEqual(['OPENROUTER_API_KEY'])
+  })
+
+  it('appends the pi-ai catalog ambient name where it differs from the convention', () => {
+    // 目录把 kimi-coding 指到 KIMI_API_KEY（约定名 KIMI_CODING_API_KEY 仍在先）。
+    expect(subscriptionKeyRefCandidates('kimi-coding')).toEqual(['KIMI_CODING_API_KEY', 'KIMI_API_KEY'])
+    // opencode-go 与 opencode 路由共用 OPENCODE_API_KEY。
+    expect(subscriptionKeyRefCandidates('opencode-go')).toEqual(['OPENCODE_GO_API_KEY', 'OPENCODE_API_KEY'])
+  })
+})
+
+describe('resolveSubscriptionAccess', () => {
+  /** 凭据 seam 桩：按 ref 名查表，未命中返回 undefined。 */
+  function refsTable(entries: Record<string, string>) {
+    return async (name: string) => entries[name]
+  }
+
+  it('resolves an explicit apiKeyEnv ref first (classic shape)', async () => {
+    const { keys, keyConfigured } = await resolveSubscriptionAccess(
+      { 'kimi-coding': { apiKeyEnv: 'MY_KIMI_REF' } },
+      refsTable({ MY_KIMI_REF: 'sk-kimi-explicit' }),
+    )
+    expect(keys.kimiApiKey).toBe('sk-kimi-explicit')
+    expect(keyConfigured.has('kimi-coding')).toBe(true)
+  })
+
+  it('recovers a models-only route key via the conventional ref (new-host shape)', async () => {
+    const { keys, keyConfigured } = await resolveSubscriptionAccess(
+      {
+        'kimi-coding': { hasModels: true },
+        'minimax-cn': { hasModels: true },
+        'zai-coding-cn': { hasModels: true },
+      },
+      refsTable({
+        KIMI_CODING_API_KEY: 'sk-kimi-convention',
+        MINIMAX_CN_API_KEY: 'sk-cp-minimax',
+        ZAI_CODING_CN_API_KEY: 'zai-cn-key',
+      }),
+    )
+    expect(keys.kimiApiKey).toBe('sk-kimi-convention')
+    expect(keys.minmaxApiKey).toBe('sk-cp-minimax')
+    expect(keys.zaiCnApiKey).toBe('zai-cn-key')
+    expect(keyConfigured).toEqual(new Set(['kimi-coding', 'minimax-cn', 'zai-coding-cn']))
+  })
+
+  it('falls back to the catalog ambient name when the convention ref is absent', async () => {
+    const { keys } = await resolveSubscriptionAccess(
+      { 'kimi-coding': { hasModels: true } },
+      refsTable({ KIMI_API_KEY: 'sk-kimi-ambient' }),
+    )
+    expect(keys.kimiApiKey).toBe('sk-kimi-ambient')
+  })
+
+  it('lets an explicit apiKeyEnv win over the convention refs', async () => {
+    const { keys } = await resolveSubscriptionAccess(
+      { 'kimi-coding': { apiKeyEnv: 'MY_KIMI_REF', hasModels: true } },
+      refsTable({ MY_KIMI_REF: 'sk-explicit', KIMI_CODING_API_KEY: 'sk-convention' }),
+    )
+    expect(keys.kimiApiKey).toBe('sk-explicit')
+  })
+
+  it('leaves keys empty when no ref resolves', async () => {
+    const { keys, keyConfigured } = await resolveSubscriptionAccess(
+      { 'kimi-coding': { hasModels: true }, 'openrouter': { apiKeyEnv: 'MISSING_REF' } },
+      refsTable({}),
+    )
+    expect(keys.kimiApiKey).toBe('')
+    expect(keys.openrouterApiKey).toBe('')
+    expect(keyConfigured.size).toBe(0)
   })
 })
 

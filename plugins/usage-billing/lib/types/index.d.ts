@@ -41,12 +41,14 @@ export declare const inject: string[];
  * @param settings - the settings service (reads the llm-pi-ai namespace).
  * @returns the providers dict; empty when the namespace is unreadable.
  */
-/** 一个 llm-pi-ai provider 路由的读取视图：只取三块——apiKeyEnv（凭据引用）、
- *  baseURL（中转站零配置发现的来源）、displayName（站点显示名）。 */
+/** 一个 llm-pi-ai provider 路由的读取视图：apiKeyEnv（凭据引用）、baseURL（中转站
+ *  零配置发现）、displayName（站点显示名）、hasModels（新版宿主设置页保存的
+ *  models 列表——订阅识别的第二配置信号）。 */
 export interface PiAiProviderRoute {
     apiKeyEnv?: string;
     baseURL?: string;
     displayName?: string;
+    hasModels?: boolean;
 }
 /** 同步读取 provider 路由的 baseURL 视图（中转站零配置发现来源）。
  *  `settings.describe` 是同步调用，聚合器每次折叠取最新站点映射，无需缓存/过期。
@@ -75,9 +77,10 @@ export declare function readRegisteredProviderIds(get: ((name: string) => unknow
     reason?: string;
 };
 /**
-  * 解析订阅适配器需要的 API Key：从 llm-pi-ai 设置的 `providers.<id>.apiKeyEnv`
- * 读引用（如 kimi-coding → KIMI_CODING_API_KEY），再经凭据 seam 解析成实际值。
- * 同时识别出用户配置了 key 的订阅套餐（供面板只显示已识别的）。
+ * 解析订阅适配器需要的 API Key：经典形态从 llm-pi-ai 设置的 `providers.<id>.apiKeyEnv`
+ * 读引用（如 kimi-coding → KIMI_CODING_API_KEY）；新版宿主设置页把 key 直接存成
+ * 凭据 refs（路由约定名 `<ROUTE>_API_KEY`，pi-ai 目录 ambient 名补充），显式引用
+ * 解析不到时按约定名找回。同时识别出已配置的订阅套餐（供面板只显示已识别的）。
  * @param settings - the settings service (reads the llm-pi-ai namespace).
  * @param credentials - the credentials service (resolves the env refs).
  */

@@ -9,7 +9,11 @@
  * other subscription providers the harness recognizes (volcengine / baidu /
  * qwen / xiaomi token plans, agent plans…) are identified and listed with a
  * "no quota API" marker rather than hidden. API keys come from the `llm-pi-ai`
- * settings namespace (`apiKeyEnv` refs) resolved through the credentials seam.
+ * settings namespace resolved through the credentials seam: the classic
+ * `apiKeyEnv` refs, or — on hosts whose settings UI stores route keys as
+ * credentials refs named after the route (`<ROUTE>_API_KEY`, catalog ambient
+ * names as fallback) — the conventional refs, matched against the same
+ * subscription-class route ids.
  */
 import type { SubscriptionPlanConfig, SubscriptionQuota, SubscriptionWindow } from './pricing-shared.ts';
 /** 订阅适配器需要的凭据（来自 llm-pi-ai 设置命名空间）。 */
@@ -46,6 +50,25 @@ export interface SubscriptionKeys {
 export declare function parseOpenCodeAuthDocument(document: unknown): string;
 /** 空凭据：全部未配置时的初始值。 */
 export declare const EMPTY_SUBSCRIPTION_KEYS: SubscriptionKeys;
+/**
+ * 一条订阅路由的候选凭据 ref 名：路由 id 约定名（`<ROUTE 大写下划线>_API_KEY`）
+ * 优先，其后补宿主 pi-ai 目录的 ambient env 名（仅当与约定名不同——目录把
+ * kimi-coding 指到 KIMI_API_KEY、opencode-go 与 opencode 同用 OPENCODE_API_KEY）。
+ * 新版宿主设置页把路由 key 存成凭据 refs 而不再写 providers.apiKeyEnv，订阅
+ * 额度查询据此按约定名找回同一把 key。
+ */
+export declare function subscriptionKeyRefCandidates(provider: string): readonly string[];
+/**
+ * key 解析的可测核心（无文件 I/O）：先显式 `apiKeyEnv`（旧口径，优先），key 仍缺
+ * 时按约定 ref 名解析（新版宿主的存放形态）。`keyConfigured` 回报每条路由的 key
+ * 是否解析成功，供识别层作为第三配置信号（refResolved）。
+ * @param providers - llm-pi-ai 的 providers 视图。
+ * @param resolveRef - 凭据 seam：ref 名 → 非空 key 值；未配置/失败返回 undefined。
+ */
+export declare function resolveSubscriptionAccess(providers: Readonly<Record<string, SubscriptionRouteConfigView | undefined>>, resolveRef: (name: string) => Promise<string | undefined>): Promise<{
+    keys: SubscriptionKeys;
+    keyConfigured: ReadonlySet<string>;
+}>;
 /** 已识别的一个订阅套餐（用户在 llm-pi-ai 里配置了 key 的订阅类 provider）。 */
 export interface IdentifiedSubscriptionPlan {
     /** llm-pi-ai 的 provider id（如 kimi-coding、xiaomi-token-plan-cn）。 */
@@ -57,16 +80,28 @@ export interface IdentifiedSubscriptionPlan {
     /** 适配器区域覆盖：两个 Z.ai 路由各自固定区域，互不跟随 keys.zaiRegion。 */
     region?: 'global' | 'bigmodel-cn';
 }
+/**
+ * 一条 llm-pi-ai 路由的订阅识别视图：三个「已配置」信号任一为真即识别。
+ * 新版宿主（内置目录 + ambient 发现）把路由 key 存进凭据 refs，providers 配置里
+ * 只剩 models 列表——`apiKeyEnv` 不再是唯一的配置信号。
+ */
+export interface SubscriptionRouteConfigView {
+    /** 显式凭据引用（旧口径）。 */
+    apiKeyEnv?: string;
+    /** 路由声明了非空 models 列表（新版设置页保存的配置形态）。 */
+    hasModels?: boolean;
+    /** 路由约定 ref（`<ROUTE>_API_KEY` / 目录 ambient 名）解析出了非空 key。 */
+    refResolved?: boolean;
+}
 /** 是否是订阅类 provider id（如 kimi-coding、xiaomi-token-plan-cn）。 */
 export declare function isSubscriptionProviderId(providerId: string): boolean;
 /**
- * 从 llm-pi-ai 设置里识别订阅套餐：带订阅类 id 且配置了 apiKeyEnv 的 provider。
+ * 从 llm-pi-ai 设置里识别订阅套餐：带订阅类 id 且任一配置信号成立的 provider
+ * （显式 apiKeyEnv / models 已配置 / 约定 ref 解析出了 key）。
  * @param providers - the `providers` map of the llm-pi-ai settings namespace.
  * @returns identified plans in configuration order.
  */
-export declare function identifySubscriptionPlans(providers: Record<string, {
-    apiKeyEnv?: string;
-} | undefined> | undefined): IdentifiedSubscriptionPlan[];
+export declare function identifySubscriptionPlans(providers: Record<string, SubscriptionRouteConfigView | undefined> | undefined): IdentifiedSubscriptionPlan[];
 /**
  * 解析 MiniMax Token Plan `/v1/token_plan/remains` 响应。取 general(或 MiniMax-M*)
  * 一行抽出 5h/7d 窗口(total_count 常为 0,以 remaining_percent 为准),不按模型拆条。
