@@ -15,7 +15,7 @@
  * PositionMenu / SubscriptionWindowRow / BalanceDetailPopover+Row）。
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState, Fragment } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, Fragment, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import clsx from 'clsx'
 import type { InjectFace, PropsLocale, PropsRenderSlots, PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
@@ -1127,6 +1127,38 @@ function BillingDashboard({
   }, [])
   // 同名会话合并行一次计算（此前渲染期调用两次：空态判断 + 行渲染各一遍全量排序）。
   const mergedSessions = useMemo(() => buildSessionDisplay(stats.bySession ?? []), [stats.bySession])
+  // 会话明细数值列（调用/费用/最近活跃）：一级行与各级子智能体行共用（无行级闭包，提升到组件级）。
+  const sessionNumCells = (r: SessionBillingRow): ReactNode => (
+    <>
+      <td className={css.numCol}>{r.calls.toLocaleString()}</td>
+      <td className={css.numCol}>{money(r.cost)}</td>
+      <td className={css.numCol}>
+        {r.lastActive > 0 ? `${localDayStamp(r.lastActive)} ${formatClock(r.lastActive)}` : '—'}
+      </td>
+    </>
+  )
+  // 子智能体行递归渲染（issue #99 A）：一阶挂对话下，二阶起缩进嵌套；有下级者
+  // 带链合计徽标（本行+全部下级），回答「哪一次委派最贵」。费用列恒为本行口径。
+  // buildSessionDisplay 的环防护保证树无环，递归必然终止。
+  const renderSubRow = (sub: SessionBillingRow, depth: number): ReactNode => (
+    <Fragment key={sub.id}>
+      <tr className={clsx(css.sessionChildRow, depth > 0 && css.sessionSubDeepRow)} data-testid="billing-session-sub-row">
+        <td>
+          <span className={clsx(css.ubTag, css.ubTagNeutral)}>{t('sessionSubRow')}</span>
+          {(sub.subCalls ?? 0) > 0 && (
+            <span className={clsx(css.ubTag, css.ubTagNeutral)} data-testid="billing-session-sub-chain">
+              {sub.subCost !== undefined && sub.subCost > 0
+                ? t('sessionSubCost').replace('{cost}', money(sub.subCost))
+                : t('sessionSubCalls').replace('{calls}', (sub.subCalls ?? 0).toLocaleString())}
+            </span>
+          )}
+          <span className={css.modelProvider}>{sub.title ?? sub.id.slice(0, 8)}</span>
+        </td>
+        {sessionNumCells(sub)}
+      </tr>
+      {sub.subs?.map(child => renderSubRow(child, depth + 1))}
+    </Fragment>
+  )
   // U-7 全屏查看器行：原始 bySession 全量（不做标题合并——搜索场景下平铺直接）
   // 按查询过滤标题 / 项目 / id。
   const viewerRows = useMemo(
@@ -3426,15 +3458,6 @@ function BillingDashboard({
                           const open = isGroup && expandedSessions.has(row.id)
                           // 后代子智能体合计（合并组对成员段求和）：徽标展示，费用列仍为本行口径。
                           const family = subFamilyOf(row)
-                          const numCells = (r: SessionBillingRow) => (
-                            <>
-                              <td className={css.numCol}>{r.calls.toLocaleString()}</td>
-                              <td className={css.numCol}>{money(r.cost)}</td>
-                              <td className={css.numCol}>
-                                {r.lastActive > 0 ? `${localDayStamp(r.lastActive)} ${formatClock(r.lastActive)}` : '—'}
-                              </td>
-                            </>
-                          )
                           return (
                             <Fragment key={row.id}>
                               <tr
@@ -3472,7 +3495,7 @@ function BillingDashboard({
                                     </span>
                                   )}
                                 </td>
-                                {numCells(row)}
+                                {sessionNumCells(row)}
                               </tr>
                               {/* 二级段明细（issue #42）：默认收起，点击一级展开。 */}
                               {open && row.children?.map(child => (
@@ -3480,19 +3503,14 @@ function BillingDashboard({
                                   <td>
                                     <span className={css.modelProvider}>{child.id.slice(0, 8)}</span>
                                   </td>
-                                  {numCells(child)}
+                                  {sessionNumCells(child)}
                                 </tr>
                               ))}
-                              {/* 子智能体段（宿主独立会话，按父链挂到本对话下）：徽标 + 标题/短 id。 */}
-                              {open && row.subs?.map(sub => (
-                                <tr key={sub.id} className={css.sessionChildRow} data-testid="billing-session-sub-row">
-                                  <td>
-                                    <span className={clsx(css.ubTag, css.ubTagNeutral)}>{t('sessionSubRow')}</span>
-                                    <span className={css.modelProvider}>{sub.title ?? sub.id.slice(0, 8)}</span>
-                                  </td>
-                                  {numCells(sub)}
-                                </tr>
-                              ))}
+                              {/* 子智能体段（宿主独立会话，按父链挂树，issue #99 A）：
+                                  一阶挂对话下，二阶起缩进嵌套在直接委派方之下；
+                                  有下级者带链合计徽标（本行+全部下级，回答「哪次委派最贵」）。
+                                  费用列恒为本行口径——徽标是展示拆分，总额桶不含重复。 */}
+                              {open && row.subs?.map(sub => renderSubRow(sub, 0))}
                             </Fragment>
                           )
                         })}

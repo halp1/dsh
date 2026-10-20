@@ -2562,6 +2562,11 @@ span.bandDot { cursor: default; }
   padding-left: 30px;
 }
 
+/* 二阶及更深的委派子行（issue #99 A 树形）：比一阶再缩进一档，层级一眼可辨。 */
+.sessionSubDeepRow td:first-child {
+  padding-left: 46px;
+}
+
 .modelTable thead th {
   padding: 8px 12px;
   font-size: 11px;
