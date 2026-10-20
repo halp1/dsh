@@ -16,6 +16,11 @@
  * 4. CSS↔TSX 类名 parity（S-5）：import UsageBilling.module.css 的文件里
  *    `css.X` 引用必须在 .module.css 有 `.X` 定义——类名哈希在模块内解析，
  *    缺定义不报错只静默无效（v1.5.2 清出 8 个历史死引用）。
+ * 5. 令牌 parity（#100）：模块样式 var(--x) 引用的令牌必须有定义或属宿主
+ *    --dsw-* 别名族——缺定义使 var() 替换失败、属性静默退化。
+ * 6. 字体纪律（#100 复验）：font-family 只能引用令牌或关键字，font 简写只允许
+ *    关键字，TSX 内联 fontFamily 只能是 var()——硬编码字体栈在 Windows 落到
+ *    宋体，且绕过令牌统一调整。
  *
  * 全绿退出 0；违规打印 文件:行 退出 1。CI 与 `pnpm lint` 共用本脚本。
  */
@@ -35,6 +40,16 @@ function* walk(dir) {
     const stat = statSync(path)
     if (stat.isDirectory()) yield* walk(path)
     else if (EXTS.has(name.slice(name.lastIndexOf('.')))) yield path
+  }
+}
+
+/** 同 walk，但只产出 .css（守卫 6 的字体纪律按样式文件扫）。 */
+function* walkCss(dir) {
+  for (const name of readdirSync(dir)) {
+    const path = join(dir, name)
+    const stat = statSync(path)
+    if (stat.isDirectory()) yield* walkCss(path)
+    else if (name.endsWith('.css')) yield path
   }
 }
 
@@ -139,9 +154,48 @@ for (const dir of SCAN_DIRS) {
   console.log(`[lint] 令牌 parity：${String(referenced.size)} 个 var() 引用全部可解析（自有 ${String(own)} + 宿主 ${String(referenced.size - own)}）`)
 }
 
+// 守卫 6（#100 复验）：字体纪律——模块样式里 font-family 只能引用令牌
+// （var(--font-num) / var(--mono)）或写 CSS 关键字，font 简写只允许关键字，
+// TSX 内联 fontFamily 只能是 var() 字串。v1.6.5 补了令牌定义却漏改 12 处硬编码
+// 字体栈（侧栏主数字、hero 大数字、KPI 等全在其中），Windows 上 monospace 落到
+// 宋体，主视觉等于没修——守卫 5 看引用侧，这里按声明侧收口：硬编码栈一处不留。
+{
+  const KEYWORDS = new Set(['inherit', 'initial', 'unset', 'revert', 'revert-layer'])
+  const isToken = (value) => /^var\(--[A-Za-z][A-Za-z0-9-]*\)$/.test(value)
+  let declarations = 0
+  for (const path of walkCss('src/client')) {
+    const rel = relative('.', path)
+    const cssCode = readFileSync(path, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
+    for (const [index, line] of cssCode.split('\n').entries()) {
+      for (const m of line.matchAll(/(?<![-A-Za-z])(font-family|font)\s*:\s*([^;}]*)/g)) {
+        const [, property, raw] = m
+        const value = raw.trim()
+        declarations += 1
+        if (KEYWORDS.has(value)) continue
+        if (property === 'font-family' && isToken(value)) continue
+        VIOLATIONS.push(property === 'font'
+          ? `${rel}:${index + 1}  字体纪律：font 简写只允许关键字，字体族请拆成 font-family: var(--font-num)（现为「${value}」）`
+          : `${rel}:${index + 1}  字体纪律：font-family 不得硬编码字体栈，只能引用令牌 var(--font-num)/var(--mono) 或 inherit（现为「${value}」）`)
+      }
+    }
+  }
+  for (const path of walk('src/client')) {
+    const rel = relative('.', path)
+    for (const [index, line] of readFileSync(path, 'utf8').split('\n').entries()) {
+      for (const m of line.matchAll(/fontFamily\s*[=:]\s*["'{]+\s*([^"'}]*)/g)) {
+        declarations += 1
+        const value = m[1].trim()
+        if (isToken(value) || KEYWORDS.has(value)) continue
+        VIOLATIONS.push(`${rel}:${index + 1}  字体纪律：内联 fontFamily 只能是 var(--font-num)/var(--mono)（现为「${value}」）`)
+      }
+    }
+  }
+  console.log(`[lint] 字体纪律：${String(declarations)} 处 font/font-family/fontFamily 声明全部走令牌或关键字`)
+}
+
 if (VIOLATIONS.length > 0) {
   console.error(`[lint] ${VIOLATIONS.length} 项纪律违规：`)
   for (const v of VIOLATIONS) console.error(`  ${v}`)
   process.exit(1)
 }
-console.log('[lint] 纪律守卫全绿（类型 / 日志 / 空 catch 注释 / CSS parity / 令牌 parity）')
+console.log('[lint] 纪律守卫全绿（类型 / 日志 / 空 catch 注释 / CSS parity / 令牌 parity / 字体纪律）')

@@ -49,11 +49,15 @@
   /* 字体令牌（两主题同值）：数字/代码列的等宽栈，v1.5 设计语言（tabular 对齐）。
      #100 教训：这两个令牌此前只在 docs/redesign-mockup.html 里定义过，线上样式
      引用而未定义 → var() 替换失败使 font-family 退化（Windows 中文区默认字体是
-     宋体/Times，所有数字渲染成衬线；macOS 默认无衬线，真机验收不可见）。栈序同
-     设计稿：JetBrains Mono（本机装有则优先）→ SF Mono/Menlo（macOS）→ Consolas
-     （Windows）→ ui-monospace/monospace 兜底。var() 引用/定义 parity 由 lint
-     守卫 5 把关。 */
-  --font-num: 'JetBrains Mono', 'SF Mono', ui-monospace, 'Menlo', 'Consolas', monospace;
+     宋体/Times，所有数字渲染成衬线；macOS 默认无衬线，真机验收不可见）。栈序：
+     JetBrains Mono（本机装有则优先）→ SF Mono/Menlo（macOS）→ Consolas（Windows）
+     → ui-monospace/monospace 兜底。Consolas 必须排在 ui-monospace 之前：Windows
+     Chromium 不识别 ui-monospace，但一旦某引擎把它解析成默认等宽（中文区 =
+     宋体），Consolas 就永远轮不到（#100 复验）。
+     纪律：模块样式里 font-family 只能引用本令牌（var(--font-num) / var(--mono)）
+     或写 inherit，不得再出现硬编码字体栈——v1.6.5 只补了令牌定义、漏改 12 处硬
+     编码栈，主数字仍是宋体；lint 守卫 6 按声明侧把关。 */
+  --font-num: 'JetBrains Mono', 'SF Mono', 'Menlo', 'Consolas', ui-monospace, monospace;
   --mono: var(--font-num);
 }
 body {
@@ -404,7 +408,7 @@ body {
   line-height: 26px;
   font-weight: 600;
   color: var(--ds-t-1);
-  font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+  font-family: var(--font-num);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   min-width: 0;
@@ -662,7 +666,7 @@ body {
   line-height: 16px;
   font-weight: 700;
   color: var(--ds-t-1);
-  font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+  font-family: var(--font-num);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -1122,7 +1126,7 @@ body {
 
 /* 币种符号：中号，弱化为读数前缀，突出右侧主数字。 */
 .heroCurrency {
-  font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+  font-family: var(--font-num);
   font-size: 22px;
   line-height: 26px;
   font-weight: 600;
@@ -1133,7 +1137,7 @@ body {
 
 /* 本月主数字：52px 等宽（规格 huge 级，仅概览出现一次），主锚点靠尺寸与灰度对比。 */
 .heroValue {
-  font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+  font-family: var(--font-num);
   font-size: 52px;
   line-height: 56px;
   font-weight: 600;
@@ -1218,7 +1222,7 @@ body {
 
 /* 中心剩余金额（两位小数）：96px 表盘内放得下 ¥199.80 的宽度上限。 */
 .heroGaugeRemain {
-  font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+  font-family: var(--font-num);
   font-size: 16px;
   line-height: 18px;
   font-weight: 600;
@@ -1239,7 +1243,7 @@ body {
 
 /* 表盘下方的「已用 / 预算总额」读数（原底部进度行的数值，不带百分比）。 */
 .heroGaugeSub {
-  font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+  font-family: var(--font-num);
   font-size: 10px;
   line-height: 12px;
   font-variant-numeric: tabular-nums;
@@ -1285,7 +1289,7 @@ body {
   display: inline-flex;
   align-items: baseline;
   gap: 6px;
-  font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+  font-family: var(--font-num);
   font-size: 15px;
   line-height: 20px;
   font-weight: 600;
@@ -1429,7 +1433,7 @@ body {
 
 /* KPI 值：22px 等宽读数 —— 与 hero 52px 主锚点拉开两级，弹窗内不做第二层大数字。 */
 .kpiValue {
-  font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+  font-family: var(--font-num);
   font-size: 22px;
   line-height: 26px;
   font-weight: 600;
@@ -1444,7 +1448,7 @@ body {
 }
 
 .kpiDetail {
-  font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+  font-family: var(--font-num);
   font-size: 11px;
   line-height: 15px;
   color: var(--ds-t-3);
@@ -2875,7 +2879,7 @@ span.bandDot { cursor: default; }
   font-size: 11px;
   line-height: 16px;
   color: var(--ds-t-2);
-  font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+  font-family: var(--font-num);
   font-variant-numeric: tabular-nums;
 }
 
@@ -3737,7 +3741,7 @@ span.bandDot { cursor: default; }
 
 .heatmapHover {
   margin-left: auto;
-  font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+  font-family: var(--font-num);
   font-variant-numeric: tabular-nums;
 }
 
@@ -4292,7 +4296,7 @@ span.bandDot { cursor: default; }
 
 /* 大号等宽倒计时：突出剩余分钟。 */
 .peakCount {
-  font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+  font-family: var(--font-num);
   font-size: 28px;
   line-height: 1;
   font-weight: 600;
