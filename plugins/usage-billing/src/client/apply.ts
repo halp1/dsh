@@ -21,8 +21,8 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 // Type-only: pulls the assembled Remote namespaces (ctx.remote.llm).
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
-// Type-only: pulls the ui-conversation SlotMap merge (the composer.dock entry the live cost bar rides,
-// and the tool-row 'conversation.input.right' seat the chip injects into).
+// Type-only: pulls the ui-conversation SlotMap merge (the composer.dock / input.dock seats the live
+// cost bar rides, and the tool-row 'conversation.input.right' seat the chip injects into).
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { UsageBilling } from './UsageBilling.tsx'
 import type { ModelHealth, UsageBillingInjected } from './domain/types.ts'
@@ -162,16 +162,29 @@ export function apply(ctx: Context): void {
     }),
   }, UsageBilling))
 
-  // 即时代费用条：挂在会话 composer 的 dock（stats-line 家族座位），随输入框
-  // 常驻显示当前会话累计费用与最新一轮费用，无需打开完整仪表盘。
-  // 用 inject 往宿主（ui-conversation）已声明的 composer.dock 注入条目，而非 register 声明；
+  // 即时代费用条：随输入框常驻显示当前会话累计费用与最新一轮费用，无需打开
+  // 完整仪表盘。位置「下方」挂宿主 composer.dock（输入框卡片下方的 stats-line
+  // 家族座位）；位置「上方」挂宿主 input.dock（卡片上方的整行座位）。两个座位
+  // 同时注册、按位置偏好互斥渲染（issue #101：宿主 0.2.1 起把 composer.dock
+  // 包进卡片下方独立容器，CSS order 跨不出容器，「上方」必须换座位）。
+  // 用 inject 往宿主（ui-conversation）已声明的槽注入条目，而非 register 声明；
   // sessionId 由会话作用域经 inject 提供给组件。
   ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
     name: 'conversation.composer.dock',
     id: 'usage-billing-cost',
     order: 0,
     locale: NS,
-    inject: (sessionId: string) => ({ sessionId: SessionId(sessionId) }),
+    inject: (sessionId: string) => ({ sessionId: SessionId(sessionId), seat: 'below' as const }),
+  }, LiveCostBar))
+
+  // 宿主自己的 input.dock 占位：todo 面板 order 0、消息队列 order 20。胶囊排在
+  // 它们之后，紧贴输入框卡片——与「下方」紧贴卡片底部对称。
+  ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
+    name: 'conversation.input.dock',
+    id: 'usage-billing-cost-above',
+    order: 100,
+    locale: NS,
+    inject: (sessionId: string) => ({ sessionId: SessionId(sessionId), seat: 'above' as const }),
   }, LiveCostBar))
 
   // 工具行内联 chip（位置「输入框内部」）：宿主 input.right list 槽，

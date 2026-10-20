@@ -2879,14 +2879,13 @@ span.bandDot { cursor: default; }
   font-variant-numeric: tabular-nums;
 }
 
-/* 上方位置（设置「位置：输入框上方」）：dock list 槽以 Fragment 直排进宿主
-   composer 卡（flex column），胶囊是卡片的直接子元素——order:-1 即浮到
-   输入框区之前；居中与下方一致，补一点下边距与输入框呼吸，整体高度由
-   内容撑开不变。 */
+/* 上方位置（设置「位置：输入框上方」）：挂宿主 conversation.input.dock——卡片
+   上方的整行座位，条目经 display:contents 锚点直排进 composerStack（flex
+   column，gap 6px），胶囊在布局上就是输入框卡片的前一个兄弟。只需居中（与下方
+   一致），间距由 stack gap 给；不再用 order 挪位——宿主 0.2.1 起 composer.dock
+   被包进卡片下方独立容器，CSS order 跨不出容器（issue #101）。 */
 .feeBarAbove {
-  order: -1;
   align-self: center;
-  margin-bottom: 8px;
 }
 
 /* 工具行内联 chip（位置「输入框内部」）：恒定最小占位（档位 + 会话费用），

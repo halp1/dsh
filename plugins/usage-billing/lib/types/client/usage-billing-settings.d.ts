@@ -98,7 +98,7 @@ export declare function saveSiteListPrefs(prefs: SiteListPrefs): void;
 export interface LiveCostBarPrefs {
     /** 是否显示输入框下方的即时代费条胶囊（默认 true：保持历史行为）。 */
     show: boolean;
-    /** 胶囊位置：toolbar = 输入框内部工具行内联 chip（默认，issue #47）；below = 输入框下方；above = 输入框上方。 */
+    /** 胶囊位置：toolbar = 输入框内部工具行内联 chip（默认，issue #47）；below = 输入框下方（宿主 composer.dock 座位）；above = 输入框上方（宿主 input.dock 座位，issue #101）。 */
     position: 'below' | 'above' | 'toolbar';
 }
 /** 默认即时代费条偏好：显示在输入框内部（工具行内联 chip，issue #47 反馈「上方/下方」都打断输入视线）。 */

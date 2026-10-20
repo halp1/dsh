@@ -1,12 +1,15 @@
 /**
- * LiveCostBar: the session-scope cost ticker mounted on the composer's dock,
+ * LiveCostBar: the session-scope cost ticker mounted beside the composer,
  * showing the current session's accumulated spend and the latest turn's cost.
  *
- * It rides `conversation.composer.dock` (the stats-line family seat under the
- * composer card, same posture as ui-conversation's own StatsLine), so it stays
- * visible while working without opening the full dashboard. Data comes from the
- * same `/api/billing/usage-stats` endpoint the dashboard polls; the bar reads
- * the current session id from the session-scope standard kit and matches
+ * It is registered on two host seats and renders in exactly one of them per the
+ * position preference: `conversation.composer.dock` (the stats-line family seat
+ * under the composer card, same posture as ui-conversation's own StatsLine) for
+ * 「下方」, and `conversation.input.dock` (the full-width seat above the composer
+ * card, where the host's todo panel and queue dock live) for 「上方」. Either way
+ * it stays visible while working without opening the full dashboard. Data comes
+ * from the same `/api/billing/usage-stats` endpoint the dashboard polls; the bar
+ * reads the current session id from the session-scope standard kit and matches
  * `bySession` (session total) and `byTurn` (latest turn cost). Rendering is a
  * pure function of props and polled data, never a side effect.
  *
@@ -16,6 +19,7 @@
  * visible without opening the dashboard.
  */
 import type { SessionId } from '@deepseek-ai/dsh-session/types';
+import type { LiveCostBarPrefs } from './usage-billing-settings.ts';
 import type { UsageBillingKey } from './locales.ts';
 /** The usage-stats shape the composer bar needs (a thin slice, not the whole doc). */
 export interface LiveStats {
@@ -85,18 +89,48 @@ export declare function lowQuotaChips(quotas: readonly QuotaSlice[], threshold?:
  * @returns 该会话最近一轮的归因模型键；无轮次或轮行未带模型时 undefined。
  */
 export declare function sessionModelOf(stats: LiveStats | null, sessionId: string | undefined): string | undefined;
-/** Props: the framework's session identity plus the owning dock's locale seat. */
+/** 胶囊位置偏好（设置 Tab 三选）。 */
+type CapsulePosition = LiveCostBarPrefs['position'];
+/** 胶囊条的宿主座位：above=input.dock（卡片上方）；below=composer.dock（卡片下方）。 */
+export type CapsuleSeat = Exclude<CapsulePosition, 'toolbar'>;
+/**
+ * 宿主 SessionSnapshot 里决定 hero（空白新会话）态的字段薄切片。input.dock 座位
+ * 的 owner 快照（InputZone.session）按此结构读取。
+ */
+export interface SessionPhaseSlice {
+    readonly blank: boolean;
+    readonly running: boolean;
+    readonly promptAttempted: boolean;
+    readonly awaitingFirstTurn: boolean;
+}
+/**
+ * 会话是否处于宿主的 hero（空白）阶段：复刻 ui-conversation `conversationPhase`
+ * 的 blank 分支——无正在运行的轮次、用户尚未尝试提交、且会话仍空白或等待首轮。
+ * 宿主在 hero 态不渲染 composer.dock（输入框下方座位），但 input.dock 会渲染；
+ * 「上方」座位借此与「下方」保持同样的显隐语义，空白会话页不浮一只空壳药丸。
+ * 导出供测试：纯函数。
+ * @param session - 会话快照薄切片。
+ */
+export declare function isBlankPhase(session: SessionPhaseSlice): boolean;
+/** Props: the framework's session identity plus the owning seat's locale and identity. */
 export interface LiveCostBarProps {
     /** Current Session identity supplied by the session-scope standard kit. */
     sessionId: SessionId;
-    /** The owning dock's locale seat (bound to the billing NS). */
+    /** The owning seat's locale seat (bound to the billing NS). */
     t: (key: UsageBillingKey) => string;
+    /** Which host seat this instance occupies; it renders only when the position pref matches. */
+    seat: CapsuleSeat;
+    /** Owner snapshot the input.dock seat receives (InputZone.session); absent on composer.dock. */
+    session?: SessionPhaseSlice;
 }
 /**
- * Render the live cost ticker for the current session.
- * @param props - framework session identity and locale.
+ * Render the live cost ticker for the current session in one host seat.
+ * @param props - framework session identity, locale, the seat occupied, and
+ * (input.dock only) the owner session snapshot.
  */
-export declare function LiveCostBar({ sessionId, t }: LiveCostBarProps): React.ReactNode;
+export declare function LiveCostBar({ sessionId, t, seat, session }: LiveCostBarProps): React.ReactNode;
+/** Props of the tool-row chip: session identity and locale only (its seat is fixed to input.right). */
+export type LiveCostChipProps = Pick<LiveCostBarProps, 'sessionId' | 't'>;
 /**
  * Render the compact inline chip for the composer tool row (position
  * 「模型选择前」). Occupies a fixed minimal footprint — tier glyph + session
@@ -106,5 +140,6 @@ export declare function LiveCostBar({ sessionId, t }: LiveCostBarProps): React.R
  * amber/red instead of growing it.
  * @param props - framework session identity and locale.
  */
-export declare function LiveCostChip({ sessionId, t }: LiveCostBarProps): React.ReactNode;
+export declare function LiveCostChip({ sessionId, t }: LiveCostChipProps): React.ReactNode;
+export {};
 //# sourceMappingURL=live-cost.d.ts.map

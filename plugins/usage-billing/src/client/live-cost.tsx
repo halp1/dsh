@@ -1,12 +1,15 @@
 /**
- * LiveCostBar: the session-scope cost ticker mounted on the composer's dock,
+ * LiveCostBar: the session-scope cost ticker mounted beside the composer,
  * showing the current session's accumulated spend and the latest turn's cost.
  *
- * It rides `conversation.composer.dock` (the stats-line family seat under the
- * composer card, same posture as ui-conversation's own StatsLine), so it stays
- * visible while working without opening the full dashboard. Data comes from the
- * same `/api/billing/usage-stats` endpoint the dashboard polls; the bar reads
- * the current session id from the session-scope standard kit and matches
+ * It is registered on two host seats and renders in exactly one of them per the
+ * position preference: `conversation.composer.dock` (the stats-line family seat
+ * under the composer card, same posture as ui-conversation's own StatsLine) for
+ * 「下方」, and `conversation.input.dock` (the full-width seat above the composer
+ * card, where the host's todo panel and queue dock live) for 「上方」. Either way
+ * it stays visible while working without opening the full dashboard. Data comes
+ * from the same `/api/billing/usage-stats` endpoint the dashboard polls; the bar
+ * reads the current session id from the session-scope standard kit and matches
  * `bySession` (session total) and `byTurn` (latest turn cost). Rendering is a
  * pure function of props and polled data, never a side effect.
  *
@@ -183,16 +186,46 @@ function windowLabelKey(kind: string): UsageBillingKey {
   }
 }
 
-/** Props: the framework's session identity plus the owning dock's locale seat. */
+/** 胶囊位置偏好（设置 Tab 三选）。 */
+type CapsulePosition = LiveCostBarPrefs['position']
+
+/** 胶囊条的宿主座位：above=input.dock（卡片上方）；below=composer.dock（卡片下方）。 */
+export type CapsuleSeat = Exclude<CapsulePosition, 'toolbar'>
+
+/**
+ * 宿主 SessionSnapshot 里决定 hero（空白新会话）态的字段薄切片。input.dock 座位
+ * 的 owner 快照（InputZone.session）按此结构读取。
+ */
+export interface SessionPhaseSlice {
+  readonly blank: boolean
+  readonly running: boolean
+  readonly promptAttempted: boolean
+  readonly awaitingFirstTurn: boolean
+}
+
+/**
+ * 会话是否处于宿主的 hero（空白）阶段：复刻 ui-conversation `conversationPhase`
+ * 的 blank 分支——无正在运行的轮次、用户尚未尝试提交、且会话仍空白或等待首轮。
+ * 宿主在 hero 态不渲染 composer.dock（输入框下方座位），但 input.dock 会渲染；
+ * 「上方」座位借此与「下方」保持同样的显隐语义，空白会话页不浮一只空壳药丸。
+ * 导出供测试：纯函数。
+ * @param session - 会话快照薄切片。
+ */
+export function isBlankPhase(session: SessionPhaseSlice): boolean {
+  return !session.running && !session.promptAttempted && (session.blank || session.awaitingFirstTurn)
+}
+
+/** Props: the framework's session identity plus the owning seat's locale and identity. */
 export interface LiveCostBarProps {
   /** Current Session identity supplied by the session-scope standard kit. */
   sessionId: SessionId
-  /** The owning dock's locale seat (bound to the billing NS). */
+  /** The owning seat's locale seat (bound to the billing NS). */
   t: (key: UsageBillingKey) => string
+  /** Which host seat this instance occupies; it renders only when the position pref matches. */
+  seat: CapsuleSeat
+  /** Owner snapshot the input.dock seat receives (InputZone.session); absent on composer.dock. */
+  session?: SessionPhaseSlice
 }
-
-/** 胶囊位置偏好（设置 Tab 三选）。 */
-type CapsulePosition = LiveCostBarPrefs['position']
 
 /**
  * 被固定模型的峰谷指示点：在输入框旁常驻，不用打开仪表盘就能看到当前档位。
@@ -324,12 +357,16 @@ function useLiveCostData(sessionId: SessionId, active: boolean): {
 }
 
 /**
- * Render the live cost ticker for the current session.
- * @param props - framework session identity and locale.
+ * Render the live cost ticker for the current session in one host seat.
+ * @param props - framework session identity, locale, the seat occupied, and
+ * (input.dock only) the owner session snapshot.
  */
-export function LiveCostBar({ sessionId, t }: LiveCostBarProps): React.ReactNode {
+export function LiveCostBar({ sessionId, t, seat, session }: LiveCostBarProps): React.ReactNode {
   const { visible, position } = useLiveCostPrefs()
-  const { sessionCost, subCost, turnCost, tier, chips, hasBandPlan } = useLiveCostData(sessionId, visible && position !== 'toolbar')
+  // 座位与位置偏好互斥：另一座位（以及工具行 chip）此时渲染 null，不各跑轮询。
+  // 「上方」座位额外复刻宿主 hero 门控——空白新会话页宿主不出下方 dock，上方同样不出。
+  const active = visible && position === seat && !(seat === 'above' && session !== undefined && isBlankPhase(session))
+  const { sessionCost, subCost, turnCost, tier, chips, hasBandPlan } = useLiveCostData(sessionId, active)
 
   const currency = useCurrencyPref()
   const money = (cny: number): string => formatMoney(convertFromCny(cny, currency), currency)
@@ -337,16 +374,17 @@ export function LiveCostBar({ sessionId, t }: LiveCostBarProps): React.ReactNode
   const hasCost = sessionCost > 0 || turnCost > 0
   // 档位 chip 仅在当前会话模型涉及峰谷时渲染（tier 非 null）；倒计时随之隐藏。
   const isPeak = tier?.tier === 'peak'
-  // 设置 Tab 里关闭「平价消耗胶囊」或切到工具行 chip 后，整条不渲染
-  // （dock 槽位对 null 子元素安全，纯显隐门控：数据轮询与统计口径不受影响）。
-  if (!visible || position === 'toolbar') return null
+  // 设置 Tab 里关闭「平价消耗胶囊」、切到其它座位或处于 hero 态时整条不渲染
+  // （槽位对 null 子元素安全，纯显隐门控：数据轮询与统计口径不受影响）。
+  if (!active) return null
   // 设计 fee-bar：档位 chip → 倒计时 → 档位说明 → 本轮/会话 → 额度预警 chips。
-  // above 变体：dock list 槽以 Fragment 直排进宿主 composer 卡（flex column），
-  // 对胶囊自身 order:-1 即浮到输入框上方，零宿主 DOM 侵入。
+  // above 座位：input.dock 条目经 display:contents 锚点直排进宿主 composerStack
+  //（flex column），feeBarAbove 只负责在整行座位里居中，不再借 CSS order 挪位。
   return (
     <span
-      className={position === 'above' ? clsx(css.feeBar, css.feeBarAbove) : css.feeBar}
+      className={seat === 'above' ? clsx(css.feeBar, css.feeBarAbove) : css.feeBar}
       data-testid="billing-live-cost-bar"
+      data-seat={seat}
     >
       <PinnedBandDots hasBandPlan={hasBandPlan} />
       {tier !== null && (
@@ -389,6 +427,9 @@ export function LiveCostBar({ sessionId, t }: LiveCostBarProps): React.ReactNode
   )
 }
 
+/** Props of the tool-row chip: session identity and locale only (its seat is fixed to input.right). */
+export type LiveCostChipProps = Pick<LiveCostBarProps, 'sessionId' | 't'>
+
 /**
  * Render the compact inline chip for the composer tool row (position
  * 「模型选择前」). Occupies a fixed minimal footprint — tier glyph + session
@@ -398,7 +439,7 @@ export function LiveCostBar({ sessionId, t }: LiveCostBarProps): React.ReactNode
  * amber/red instead of growing it.
  * @param props - framework session identity and locale.
  */
-export function LiveCostChip({ sessionId, t }: LiveCostBarProps): React.ReactNode {
+export function LiveCostChip({ sessionId, t }: LiveCostChipProps): React.ReactNode {
   const currency = useCurrencyPref()
   const money = (cny: number): string => formatMoney(convertFromCny(cny, currency), currency)
   const { visible, position } = useLiveCostPrefs()
