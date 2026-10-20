@@ -14,10 +14,11 @@
 
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { act, cleanup, render, screen } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { LiveCostBar, LiveCostChip, isBlankPhase, lowQuotaChips, sessionCostOf, sessionSubCostOf, turnCostOf, type LiveStats, type QuotaSlice, type SessionPhaseSlice } from '../src/client/live-cost.tsx'
+import css from '../src/client/UsageBilling.module.css'
 import {
   LIVE_COST_BAR_PREF_EVENT,
   LIVE_COST_BAR_STORAGE_KEY,
@@ -279,5 +280,55 @@ describe('LiveCostBar seat gate (issue #101：「上方」挂 input.dock，「�
     expect(rule).not.toBeNull()
     expect(rule![1]).not.toMatch(/\border\s*:/)
     expect(rule![1]).toMatch(/align-self\s*:\s*center/)
+  })
+})
+
+describe('LiveCostChip quota tint stacks on the pill base class (告警态红底变矩形溢出的修复)', () => {
+  const sessionId = 'sess-1' as SessionId
+  /** 两端点同时打桩：usage-stats 给会话费用（让金额渲染），subscriptions 给额度窗口。 */
+  const stubEndpoints = (windows: readonly { kind: string; remainingPercent: number }[]): void => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input)
+      const body = url.includes('/api/billing/subscriptions')
+        ? { quotas: windows.length === 0 ? [] : [{ displayName: 'MiniMax Token Plan（国内）', status: 'ok', windows }] }
+        : BASE
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+    }))
+  }
+
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('keeps feeInline and adds feeInlineError when a window is at or below 10%', async () => {
+    localStorage.setItem(LIVE_COST_BAR_STORAGE_KEY, '{"show":true,"position":"toolbar"}')
+    stubEndpoints([{ kind: 'session', remainingPercent: 0 }])
+    render(<LiveCostChip sessionId={sessionId} t={t} />)
+    const chip = screen.getByTestId('billing-live-cost-chip')
+    await waitFor(() => { expect(chip.classList.contains(css.feeInlineError)).toBe(true) })
+    // 基础类承载 inline-flex / 999px 圆角 / 高度 / 内距：丢了它，红底就是一块
+    // 紧贴文字、与档位 chip 不对齐并溢出轮廓的矩形（此前三元表达式整类替换）。
+    expect(chip.classList.contains(css.feeInline)).toBe(true)
+    expect(chip.classList.contains(css.feeInlineAlert)).toBe(false)
+  })
+
+  it('keeps feeInline and adds feeInlineAlert between 10% and 20%', async () => {
+    localStorage.setItem(LIVE_COST_BAR_STORAGE_KEY, '{"show":true,"position":"toolbar"}')
+    stubEndpoints([{ kind: 'weekly', remainingPercent: 19.8 }])
+    render(<LiveCostChip sessionId={sessionId} t={t} />)
+    const chip = screen.getByTestId('billing-live-cost-chip')
+    await waitFor(() => { expect(chip.classList.contains(css.feeInlineAlert)).toBe(true) })
+    expect(chip.classList.contains(css.feeInline)).toBe(true)
+    expect(chip.classList.contains(css.feeInlineError)).toBe(false)
+  })
+
+  it('renders the plain base class with no tint when every window is healthy', async () => {
+    localStorage.setItem(LIVE_COST_BAR_STORAGE_KEY, '{"show":true,"position":"toolbar"}')
+    stubEndpoints([{ kind: 'weekly', remainingPercent: 87 }])
+    render(<LiveCostChip sessionId={sessionId} t={t} />)
+    const chip = screen.getByTestId('billing-live-cost-chip')
+    // 等到费用金额出现，说明两端点都已回包、着色已按最终数据决定。
+    await waitFor(() => { expect(chip.querySelector(`.${css.feeInlineNum}`)).not.toBeNull() })
+    expect(chip.classList.contains(css.feeInline)).toBe(true)
+    expect(chip.classList.contains(css.feeInlineAlert)).toBe(false)
+    expect(chip.classList.contains(css.feeInlineError)).toBe(false)
   })
 })

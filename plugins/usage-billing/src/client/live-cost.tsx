@@ -447,10 +447,14 @@ export function LiveCostChip({ sessionId, t }: LiveCostChipProps): React.ReactNo
   // 非工具行位置时 chip 让位给 bar（同 id 双槽互斥由位置偏好门控）。
   if (!visible || position !== 'toolbar') return null
   // 档位小徽章仅在当前会话模型涉及峰谷时渲染；额度预警压到 chip 上：
-  // 最紧张的一档决定颜色（error > alert > normal）。
+  // 最紧张的一档决定颜色（error > alert > normal）。告警色是**修饰类**，必须叠在
+  // 基础类 feeInline 之上——此前三元表达式用修饰类替换了基础类，inline-flex /
+  // 999px 圆角 / 高度 / 内距随之丢失，红底退化成紧贴文字、与档位 chip 不对齐的
+  // 矩形并溢出 chip 轮廓；正常态走基础类所以一直没暴露，首次有额度 ≤10% 才现形。
   const isPeak = tier?.tier === 'peak'
   const worst = chips.reduce<number>((min, c) => Math.min(min, c.pct), 100)
-  const cls = worst <= 10 ? css.feeInlineError : worst <= 20 ? css.feeInlineAlert : css.feeInline
+  const tint = worst <= 10 ? css.feeInlineError : worst <= 20 ? css.feeInlineAlert : undefined
+  const cls = clsx(css.feeInline, tint)
   const title = [
     ...(tier !== null
       ? [`${formatSwitchCountdown(tier.nextSwitchInMs)} ${isPeak ? t('tierToOff') : t('tierToPeak')}`]
