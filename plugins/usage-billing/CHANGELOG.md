@@ -8,6 +8,12 @@
 
 > **版本序列说明**：自 v1.2.0 起预览线序列恒高于稳定线 1.1.x——消除此前 1.0.x < 1.1.x 的版本号倒挂（pnpm `minimumReleaseAge` 冷静期会把刚发布的 latest 跳过、回退到旧稳定线，issue #40 有实测案例）。安装建议钉具体版本号。
 
+### v1.6.6（2026-10-20）
+
+- **修复：MiniMax Coding Plan 用户的用量被按量计费**。`minimax` / `minimax-cn` 是 pi-ai 官方目录路由 id，按量用户与 Coding Plan 用户两用，路由 id 分不清两类人——此前聚合层的默认豁免集合因此干脆不含 minimax，套餐用户（`sk-cp-` 前缀 key）的 MiniMax 用量全部按目录价计费，而订阅卡却照常显示套餐额度，两边口径不一致。现豁免判定下沉到 key 前缀：按路由解析其自己的 key（显式 apiKeyEnv 优先、缺省约定 ref），`sk-cp-` 即 Coding Plan 加入豁免（账单标「订阅包含」、费用计 0），普通 `sk-` 维持按量；启动即分类并在每轮配额刷新时重分类（换 key / 新配路由即时跟上），集合变化自动触发历史用量按新口径重算。用户在 `subscriptionProviders` 里显式声明的路由不会被自动踢出。
+- **修复：胶囊位置选「输入框上方」在 DSH 0.2.1 上无效（issue #101）**。宿主 0.2.1-alpha.1 起把 composer.dock 包进输入框卡片下方的独立容器，CSS order 跨不出容器，「上方」从此与「下方」无异。现「上方」改挂宿主专用的 `conversation.input.dock` 座位（卡片上方整行座位，自 dsh-v0.1.0-rc.7 即存在、覆盖整个兼容矩阵），「下方」仍挂 composer.dock；两座位同时注册、按位置偏好互斥渲染（未选中座位不渲染也不轮询）。顺带与宿主对齐 hero（空白新会话）态显隐：空白会话页不再浮一只空壳胶囊。
+- **修复：#100 补完——12 处硬编码字体栈改令牌**。v1.6.5 定义了 `--font-num` 令牌，但模块样式里仍有 12 处直写 `'JetBrains Mono', 'SF Mono', ui-monospace, monospace` 的硬编码栈——Windows 上四者均缺，落到 `monospace` 默认即 **Courier New（衬线等宽）**，报告者复验仍见衬线数字。现全部改引令牌，并把 Consolas 提到 `ui-monospace` 之前（Windows 稳定命中无衬线等宽）；新增 lint 守卫禁止模块样式再出现硬编码字体栈。
+
 ### v1.6.5（2026-10-20）
 
 - **修复：数字渲染成衬线宋体（issue #100）**。数字/代码列的字体令牌 `--font-num` / `--mono` 此前只定义在仓库的设计稿 HTML 里，线上样式引用而未定义——var() 替换失败使 font-family 退化，**Windows 中文区默认字体为宋体/Times，所有数字渲染成衬线**；macOS 默认无衬线故一直未暴露。现按设计稿栈序定义（JetBrains Mono → SF Mono/Menlo → Consolas → ui-monospace/monospace）。同源顺带修复：v1.6.0 的币种按钮选中态背景写成不存在的 `--dsb-1` 令牌，背景静默变透明，选中态强化一直未生效，已改为 `--dsb-2`。新增 lint 守卫：样式里 var() 引用的令牌必须有定义（或属宿主 `--dsw-*` 别名族），此类「引用未定义令牌」问题不再可能静默发生。
