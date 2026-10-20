@@ -222,6 +222,13 @@ export function sumSiteBuckets(
 export interface AggregateOptions {
   /** 订阅制 provider id 列表；缺省按订阅卡同款 id 判定（`isSubscriptionProviderId`）。 */
   subscriptionProviders?: readonly string[]
+  /**
+   * 订阅判定集合（**引用语义**，优先于 subscriptionProviders）：聚合器直接持有
+   * 传入的 Set 实例，调用方可在运行期原地增删——同一路由 id 按量/套餐两用的
+   * 厂商（MiniMax：`sk-cp-` 前缀 key 才是 Coding Plan）只能按 key 动态判定；
+   * 集合内容变化经 configFingerprint（按内容序列化）自动触发历史行全量重折。
+   */
+  subscriptionMatcher?: ReadonlySet<string>
   /** 官方渠道 provider id 列表；缺省按 {@link officialChannelOf} 判定（通道 origin 优先）。 */
   officialProviderIds?: readonly string[]
   /**
@@ -1918,9 +1925,11 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
   // 订阅判定默认用显式基线集合（含 tencent-token-plan）。不用 id 正则做默认——
   // 正则前缀会撞名（如名为 openrouter 的中转路由被误豁免）；需要与订阅卡完全
   // 同口径时，显式配置传 isSubscriptionProviderId 判定函数（SubscriptionMatcher）。
-  const subscriptionMatcher: SubscriptionMatcher = options.subscriptionProviders === undefined
-    ? new Set(DEFAULT_SUBSCRIPTION_PROVIDERS)
-    : new Set(options.subscriptionProviders)
+  // subscriptionMatcher 为引用语义：调用方持有的 Set 原地增删即生效（MiniMax 按 key 动态判定）。
+  const subscriptionMatcher: SubscriptionMatcher = options.subscriptionMatcher
+    ?? (options.subscriptionProviders === undefined
+      ? new Set(DEFAULT_SUBSCRIPTION_PROVIDERS)
+      : new Set(options.subscriptionProviders))
   const officialProviderIds = options.officialProviderIds === undefined
     ? undefined
     : new Set(options.officialProviderIds)

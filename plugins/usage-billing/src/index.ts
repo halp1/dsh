@@ -35,7 +35,7 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import type { CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import z from '@deepseek-ai/schemastery'
-import { createUsageAggregator, dayStamp, mergeUsageLedgerDocuments, sessionLogOffsetOf, sumSiteBuckets, type UsageLedgerDocument, type UsageLedgerStore, type UsagePersistence } from './aggregate.ts'
+import { createUsageAggregator, dayStamp, DEFAULT_SUBSCRIPTION_PROVIDERS, mergeUsageLedgerDocuments, sessionLogOffsetOf, sumSiteBuckets, type UsageLedgerDocument, type UsageLedgerStore, type UsagePersistence } from './aggregate.ts'
 import { applyBuiltinCatalog, applyLivePricing, applyUserModelAliases, formatMoney, formatTokens } from './client/pricing.ts'
 import { BUILTIN_MODEL_CATALOG, BUILTIN_MODEL_KEY_ALIASES } from './builtin-catalog.ts'
 import { queryBalances, queryCustomBalances } from './balance.ts'
@@ -44,7 +44,7 @@ import { reconcileBalanceDelta, type BalanceRef, type ReconcileEvent } from './r
 import { fetchLivePricing } from './pricing-fetch.ts'
 import type { LivePricing, RelayQuota, SubscriptionQuota } from './pricing-shared.ts'
 import type { UsageBillingConfig } from './config.ts'
-import { collectSubscriptions, identifySubscriptionPlans, parseOpenCodeAuthDocument, resolveSubscriptionAccess, type IdentifiedSubscriptionPlan, type SubscriptionKeys } from './subscriptions.ts'
+import { classifyMiniMaxPlanRoutes, collectSubscriptions, identifySubscriptionPlans, parseOpenCodeAuthDocument, resolveSubscriptionAccess, type IdentifiedSubscriptionPlan, type SubscriptionKeys } from './subscriptions.ts'
 import { isOfficialBaseUrl, queryRelayQuotas, type RelayRoute } from './relay.ts'
 import { firstResolvedRef, routeKeyRefCandidates } from './route-keys.ts'
 import { planTypeOf, subscriptionFeeCnyOf } from './client/plan-knowledge.ts'
@@ -656,10 +656,29 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
     }
     return ids
   }
+  // 订阅豁免集合（引用语义传入聚合器）：基础 = 显式配置或默认基线；MiniMax 系路由
+  // 按 key 前缀动态增删（`sk-cp-` = Coding Plan 豁免，普通 `sk-` = 按量计费）——同一
+  // 官方路由 id 两类用户两用，此前默认集合干脆不含 minimax，套餐用户被无条件按量
+  // 计费。集合内容变化经聚合器指纹自动触发历史行全量重折。
+  const subscriptionRoutes = new Set<string>(config.subscriptionProviders ?? DEFAULT_SUBSCRIPTION_PROVIDERS)
+  // 显式配置是下限：用户明写进 subscriptionProviders 的路由不被 key 分类移除
+  //（只自动补入 sk-cp- 的路由，不自动踢出用户的显式声明）。
+  const explicitSubscriptionRoutes = new Set<string>(config.subscriptionProviders ?? [])
+  const refreshMiniMaxPlanRoutes = async (): Promise<void> => {
+    try {
+      const providers = await readPiAiProviders(ctx.settings)
+      const classified = await classifyMiniMaxPlanRoutes(providers, refResolver(ctx.credentials))
+      for (const [route, isPlan] of classified) {
+        if (isPlan) subscriptionRoutes.add(route)
+        else if (!explicitSubscriptionRoutes.has(route)) subscriptionRoutes.delete(route)
+      }
+    } catch (error) {
+      // 分类失败保持现状（不豁免），下一轮配额刷新再试。
+      swallowed('minimax-plan-classify-failed', error)
+    }
+  }
   const aggregator = createUsageAggregator(adaptSessionPersistence(ctx.sessionPersistence), {
-    ...(config.subscriptionProviders === undefined
-      ? {}
-      : { subscriptionProviders: config.subscriptionProviders }),
+    subscriptionMatcher: subscriptionRoutes,
     // 历史路由别名：改名/删除路由的历史用量按别名归位（站点/订阅/官方判定同步生效）。
     ...(config.routeAliases === undefined ? {} : { routeAliases: config.routeAliases }),
     // 中转站零配置发现：每次聚合读 llm-pi-ai providers 的 baseURL（路由→站点映射）。
@@ -674,6 +693,9 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
     ...(config.searchCallEstimateCny === undefined ? {} : { searchCallEstimateCny: config.searchCallEstimateCny }),
     ledger: ledgerStore,
   })
+  // 启动即按 key 分类一次 MiniMax 路由（凭据 seam 内存解析，毫秒级），首轮聚合通常
+  // 已能拿到正确豁免；万一首轮抢先，集合变化会在下一轮触发重折自愈。
+  void refreshMiniMaxPlanRoutes()
   // 插件卸载时把落盘节流窗口内的账本改动 flush 掉（fire-and-forget：
   // disposer 不能阻塞关闭流程，等不起进行中的长折叠）。
   ctx.effect(() => () => { void aggregator.flush() }, 'usage-billing: ledger flush on dispose')
@@ -1040,6 +1062,8 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
   //（客户端显示"额度接口未接入"）；用户没配置 key 的 provider 一律不出现。
   let quotaCache: { at: number; quotas: readonly SubscriptionQuota[] } = { at: 0, quotas: [] }
   const refreshQuotas = async (): Promise<void> => {
+    // 每轮配额刷新同步重分类 MiniMax 路由（key 换了 / 新配了路由即时跟上豁免口径）。
+    await refreshMiniMaxPlanRoutes()
     const { keys, identified } = await resolveSubscriptionKeys(ctx.settings, ctx.credentials)
     // 让 llm-pi-ai 的 baseURL 可覆盖订阅查询的 region 默认值（如 MiniMax 国际版需
     // `api.minimax.io`、或自配中转/staging）：带 baseURL 的 plan 会在各 adapter 里

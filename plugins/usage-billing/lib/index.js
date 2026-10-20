@@ -3548,7 +3548,7 @@ function isFormatUnsupportedError(error) {
 * @returns the aggregator holding the per-session fold cache.
 */
 function createUsageAggregator(persistence, options = {}) {
-	const subscriptionMatcher = options.subscriptionProviders === void 0 ? new Set(DEFAULT_SUBSCRIPTION_PROVIDERS) : new Set(options.subscriptionProviders);
+	const subscriptionMatcher = options.subscriptionMatcher ?? (options.subscriptionProviders === void 0 ? new Set(DEFAULT_SUBSCRIPTION_PROVIDERS) : new Set(options.subscriptionProviders));
 	const officialProviderIds = options.officialProviderIds === void 0 ? void 0 : new Set(options.officialProviderIds);
 	const routeAliases = options.routeAliases ?? {};
 	const maxCacheSessions = options.maxCacheSessions ?? 400;
@@ -6406,9 +6406,33 @@ function minmaxDisplayName(provider) {
 /** MiniMax Token Plan / Coding Plan 的 key 判别：普通按量 API key 以 `sk-` 开头，
 *  Token Plan（订阅套餐）key 以 `sk-cp-` 开头。据此区分一个 key 是订阅还是按量，
 *  供查询失败时给出「key 类型 / region」定向提示，避免把按量 key 误当 token-plan
-*  查询后只剩一句笼统的「响应异常」。 */
+*  查询后只剩一句笼统的「响应异常」；也是聚合层订阅豁免的判定依据（同一路由 id
+*  按量/套餐两用，豁免只能按 key）。 */
 function isMiniMaxTokenPlanKey(apiKey) {
 	return apiKey.startsWith("sk-cp-");
+}
+/** MiniMax 系路由 id（官方目录 minimax / minimax-cn 与本插件早期命名 minimax-token-plan[-cn]）。 */
+function isMiniMaxProviderId(providerId) {
+	return /^minimax(?:-cn|-token-plan|-token-plan-cn)?$/i.test(providerId);
+}
+/**
+* 逐路由判定 MiniMax 系路由是否 Coding Plan：按该路由自己的 key（显式 apiKeyEnv
+* 优先，缺省按路由约定 ref）解析后看 `sk-cp-` 前缀。同一路由 id（如官方目录的
+* minimax-cn）按量用户与套餐用户两用，订阅豁免不能按路由 id 一刀切——此前聚合
+* 层默认集合干脆不含 minimax，套餐用户的用量被无条件按量计费。解析不出 key
+* 的路由判为 false（保守：不豁免）。导出供测试：无文件 I/O。
+* @param providers - llm-pi-ai providers 视图。
+* @param resolveRef - 凭据 seam：ref 名 → 非空 key 值。
+* @returns MiniMax 系路由 id → 是否 Coding Plan。
+*/
+async function classifyMiniMaxPlanRoutes(providers, resolveRef) {
+	const out = /* @__PURE__ */ new Map();
+	for (const [route, view] of Object.entries(providers)) {
+		if (!isMiniMaxProviderId(route)) continue;
+		const hit = await firstResolvedRef([...typeof view?.apiKeyEnv === "string" && view.apiKeyEnv !== "" ? [view.apiKeyEnv] : [], ...routeKeyRefCandidates(route)], resolveRef);
+		out.set(route, hit !== void 0 && isMiniMaxTokenPlanKey(hit.value));
+	}
+	return out;
 }
 /** 构造 MiniMax Token Plan 查询端点：避免 base 已含 `/v1` 时拼出 `/v1/v1/...`。 */
 function miniMaxEndpoint(base) {
@@ -8077,8 +8101,19 @@ function apply(ctx, config = {}) {
 		}
 		return ids;
 	};
+	const subscriptionRoutes = new Set(config.subscriptionProviders ?? DEFAULT_SUBSCRIPTION_PROVIDERS);
+	const explicitSubscriptionRoutes = new Set(config.subscriptionProviders ?? []);
+	const refreshMiniMaxPlanRoutes = async () => {
+		try {
+			const classified = await classifyMiniMaxPlanRoutes(await readPiAiProviders(ctx.settings), refResolver(ctx.credentials));
+			for (const [route, isPlan] of classified) if (isPlan) subscriptionRoutes.add(route);
+			else if (!explicitSubscriptionRoutes.has(route)) subscriptionRoutes.delete(route);
+		} catch (error) {
+			swallowed("minimax-plan-classify-failed", error);
+		}
+	};
 	const aggregator = createUsageAggregator(adaptSessionPersistence(ctx.sessionPersistence), {
-		...config.subscriptionProviders === void 0 ? {} : { subscriptionProviders: config.subscriptionProviders },
+		subscriptionMatcher: subscriptionRoutes,
 		...config.routeAliases === void 0 ? {} : { routeAliases: config.routeAliases },
 		resolveRoutes: () => readPiAiProviderRoutes(ctx.settings),
 		resolveRegisteredProviders: registeredProvidersOf,
@@ -8087,6 +8122,7 @@ function apply(ctx, config = {}) {
 		...config.searchCallEstimateCny === void 0 ? {} : { searchCallEstimateCny: config.searchCallEstimateCny },
 		ledger: ledgerStore
 	});
+	refreshMiniMaxPlanRoutes();
 	ctx.effect(() => () => {
 		aggregator.flush();
 	}, "usage-billing: ledger flush on dispose");
@@ -8434,6 +8470,7 @@ function apply(ctx, config = {}) {
 		quotas: []
 	};
 	const refreshQuotas = async () => {
+		await refreshMiniMaxPlanRoutes();
 		const { keys, identified } = await resolveSubscriptionKeys(ctx.settings, ctx.credentials);
 		const piProviders = await readPiAiProviders(ctx.settings);
 		const rows = [...await collectSubscriptions(keys, identified.filter((item) => item.adapter).map((item) => {

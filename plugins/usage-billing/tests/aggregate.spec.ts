@@ -2495,3 +2495,45 @@ describe('subagent session rollup (子智能体归并)', () => {
     expect(root?.subOf).toBeUndefined()
   })
 })
+
+describe('subscriptionMatcher by reference (MiniMax key-based exemption)', () => {
+  it('re-folds history when the referenced set changes, flipping MiniMax between pay-as-you-go and plan', async () => {
+    // 同一官方路由 id（minimax-cn）按量/套餐两用：集合里没有 → 按量计费；运行期按 key
+    // 前缀判出 Coding Plan 加入集合 → 指纹变化触发重折，同一批历史行变为订阅豁免。
+    const routes = new Set<string>()
+    // 路由须在 providers 表里（直连），否则落「未知路由」桶计 0（issue #91 口径）。
+    const aggregator = createUsageAggregator(
+      fakePersistence({ s1: [header(1, 'MiniMax-M3', 'minimax-cn'), message(2, 1_000, USAGE)] }),
+      { subscriptionMatcher: routes, resolveRoutes: () => ({ 'minimax-cn': {} }) },
+    )
+    vi.useFakeTimers()
+    try {
+      const before = await aggregator.aggregate()
+      expect(before.total.cost).toBeGreaterThan(0)
+      expect(before.byModel['minimax']?.plan).toBeUndefined()
+
+      // 结果有 5s TTL 缓存（生产上集合变化在下一轮 ≤5s 生效）：推进时钟越过 TTL。
+      routes.add('minimax-cn')
+      vi.advanceTimersByTime(AGGREGATE_TTL_MS + 1000)
+      const after = await aggregator.aggregate()
+      expect(after.total.cost).toBe(0)
+      expect(after.byModel['minimax']?.plan).toBe(true)
+
+      // 反向：key 换回按量（集合移除）→ 再次重折，费用恢复。
+      routes.delete('minimax-cn')
+      vi.advanceTimersByTime(AGGREGATE_TTL_MS + 1000)
+      const reverted = await aggregator.aggregate()
+      expect(reverted.total.cost).toBeCloseTo(before.total.cost, 10)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('fingerprints a referenced set by its current contents (not identity)', () => {
+    const routes = new Set<string>(['kimi-coding'])
+    const a = configFingerprint(routes, undefined, {}, 0)
+    routes.add('minimax-cn')
+    const b = configFingerprint(routes, undefined, {}, 0)
+    expect(a).not.toBe(b)
+  })
+})

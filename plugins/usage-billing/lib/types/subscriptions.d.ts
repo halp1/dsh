@@ -102,6 +102,25 @@ export declare function identifySubscriptionPlans(providers: Record<string, Subs
  * @returns 窗口列表;无可用窗口时为空数组。
  */
 export declare function parseMiniMaxRemains(body: unknown): SubscriptionWindow[];
+/** MiniMax Token Plan / Coding Plan 的 key 判别：普通按量 API key 以 `sk-` 开头，
+ *  Token Plan（订阅套餐）key 以 `sk-cp-` 开头。据此区分一个 key 是订阅还是按量，
+ *  供查询失败时给出「key 类型 / region」定向提示，避免把按量 key 误当 token-plan
+ *  查询后只剩一句笼统的「响应异常」；也是聚合层订阅豁免的判定依据（同一路由 id
+ *  按量/套餐两用，豁免只能按 key）。 */
+export declare function isMiniMaxTokenPlanKey(apiKey: string): boolean;
+/** MiniMax 系路由 id（官方目录 minimax / minimax-cn 与本插件早期命名 minimax-token-plan[-cn]）。 */
+export declare function isMiniMaxProviderId(providerId: string): boolean;
+/**
+ * 逐路由判定 MiniMax 系路由是否 Coding Plan：按该路由自己的 key（显式 apiKeyEnv
+ * 优先，缺省按路由约定 ref）解析后看 `sk-cp-` 前缀。同一路由 id（如官方目录的
+ * minimax-cn）按量用户与套餐用户两用，订阅豁免不能按路由 id 一刀切——此前聚合
+ * 层默认集合干脆不含 minimax，套餐用户的用量被无条件按量计费。解析不出 key
+ * 的路由判为 false（保守：不豁免）。导出供测试：无文件 I/O。
+ * @param providers - llm-pi-ai providers 视图。
+ * @param resolveRef - 凭据 seam：ref 名 → 非空 key 值。
+ * @returns MiniMax 系路由 id → 是否 Coding Plan。
+ */
+export declare function classifyMiniMaxPlanRoutes(providers: Readonly<Record<string, SubscriptionRouteConfigView | undefined>>, resolveRef: (name: string) => Promise<string | undefined>): Promise<ReadonlyMap<string, boolean>>;
 /**
  * 解析 OpenRouter `/api/v1/credits` 响应:已用% = total_usage / total_credits。
  * 导出供测试:纯函数。

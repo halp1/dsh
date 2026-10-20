@@ -132,6 +132,13 @@ export declare function sumSiteBuckets(bySite: Readonly<Record<string, {
 export interface AggregateOptions {
     /** 订阅制 provider id 列表；缺省按订阅卡同款 id 判定（`isSubscriptionProviderId`）。 */
     subscriptionProviders?: readonly string[];
+    /**
+     * 订阅判定集合（**引用语义**，优先于 subscriptionProviders）：聚合器直接持有
+     * 传入的 Set 实例，调用方可在运行期原地增删——同一路由 id 按量/套餐两用的
+     * 厂商（MiniMax：`sk-cp-` 前缀 key 才是 Coding Plan）只能按 key 动态判定；
+     * 集合内容变化经 configFingerprint（按内容序列化）自动触发历史行全量重折。
+     */
+    subscriptionMatcher?: ReadonlySet<string>;
     /** 官方渠道 provider id 列表；缺省按 {@link officialChannelOf} 判定（通道 origin 优先）。 */
     officialProviderIds?: readonly string[];
     /**

@@ -6,7 +6,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { collectSubscriptions, EMPTY_SUBSCRIPTION_KEYS, identifySubscriptionPlans, parseAnthropicUsage, parseCommandCodeCredits, parseMiniMaxRemains, parseOpenCodeAuthDocument, parseOpenRouterCredits, resolveSubscriptionAccess } from '../src/subscriptions.ts'
+import { classifyMiniMaxPlanRoutes, collectSubscriptions, EMPTY_SUBSCRIPTION_KEYS, identifySubscriptionPlans, isMiniMaxProviderId, parseAnthropicUsage, parseCommandCodeCredits, parseMiniMaxRemains, parseOpenCodeAuthDocument, parseOpenRouterCredits, resolveSubscriptionAccess } from '../src/subscriptions.ts'
 import { routeKeyRefCandidates } from '../src/route-keys.ts'
 
 /** A stubbed fetch answering one JSON body with the given status. */
@@ -919,5 +919,48 @@ describe('parseOpenCodeAuthDocument', () => {
     expect(parseOpenCodeAuthDocument({})).toBe('')
     expect(parseOpenCodeAuthDocument(null)).toBe('')
     expect(parseOpenCodeAuthDocument({ 'opencode-go': { type: 'api' } })).toBe('')
+  })
+})
+
+describe('MiniMax plan classification by key prefix (订阅豁免按 key 而非路由 id)', () => {
+  const refs = (table: Record<string, string>) => async (name: string) => table[name]
+
+  it('recognizes the MiniMax route family and nothing else', () => {
+    for (const id of ['minimax', 'minimax-cn', 'minimax-token-plan', 'minimax-token-plan-cn']) {
+      expect(isMiniMaxProviderId(id)).toBe(true)
+    }
+    for (const id of ['minimax-m3', 'kimi-coding', 'minimaxi', 'deepseek']) {
+      expect(isMiniMaxProviderId(id)).toBe(false)
+    }
+  })
+
+  it('marks a route as Coding Plan only when its own key starts with sk-cp-', async () => {
+    const classified = await classifyMiniMaxPlanRoutes(
+      {
+        // 官方目录路由，新版宿主形态（key 在约定 ref）：套餐 key。
+        'minimax-cn': { hasModels: true },
+        // 同族另一路由，显式 apiKeyEnv 指向按量 key。
+        'minimax': { apiKeyEnv: 'MY_MINIMAX_PAYG' },
+        // 非 MiniMax 路由不参与。
+        'kimi-coding': { hasModels: true },
+      },
+      refs({ MINIMAX_CN_API_KEY: 'sk-cp-abc', MY_MINIMAX_PAYG: 'sk-plain' }),
+    )
+    expect(classified.get('minimax-cn')).toBe(true)
+    expect(classified.get('minimax')).toBe(false)
+    expect(classified.has('kimi-coding')).toBe(false)
+  })
+
+  it('treats an unresolvable key as pay-as-you-go (conservative: no exemption)', async () => {
+    const classified = await classifyMiniMaxPlanRoutes({ 'minimax-token-plan-cn': { hasModels: true } }, refs({}))
+    expect(classified.get('minimax-token-plan-cn')).toBe(false)
+  })
+
+  it('lets an explicit apiKeyEnv win over the convention ref for the prefix check', async () => {
+    const classified = await classifyMiniMaxPlanRoutes(
+      { 'minimax-cn': { apiKeyEnv: 'EXPLICIT' } },
+      refs({ EXPLICIT: 'sk-plain', MINIMAX_CN_API_KEY: 'sk-cp-shadow' }),
+    )
+    expect(classified.get('minimax-cn')).toBe(false)
   })
 })
