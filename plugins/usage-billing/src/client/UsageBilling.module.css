@@ -46,6 +46,15 @@
   --ds-violet-soft: color-mix(in srgb, var(--ds-violet) 14%, transparent);
   --ds-violet-bg: color-mix(in srgb, var(--ds-violet) 8%, transparent);
   --ds-violet-strong: color-mix(in srgb, var(--ds-violet) 60%, transparent);
+  /* 字体令牌（两主题同值）：数字/代码列的等宽栈，v1.5 设计语言（tabular 对齐）。
+     #100 教训：这两个令牌此前只在 docs/redesign-mockup.html 里定义过，线上样式
+     引用而未定义 → var() 替换失败使 font-family 退化（Windows 中文区默认字体是
+     宋体/Times，所有数字渲染成衬线；macOS 默认无衬线，真机验收不可见）。栈序同
+     设计稿：JetBrains Mono（本机装有则优先）→ SF Mono/Menlo（macOS）→ Consolas
+     （Windows）→ ui-monospace/monospace 兜底。var() 引用/定义 parity 由 lint
+     守卫 5 把关。 */
+  --font-num: 'JetBrains Mono', 'SF Mono', ui-monospace, 'Menlo', 'Consolas', monospace;
+  --mono: var(--font-num);
 }
 body {
   --dsb: var(--dsw-alias-bg-layer-1);
@@ -3110,8 +3119,10 @@ span.bandDot { cursor: default; }
 }
 
 .currencyButtonActive {
-  /* 状态审计：原 layer-2 叠容器 layer-3 几乎不可见 */
-  background: var(--dsb-1);
+  /* 状态审计：原 layer-2 叠容器 layer-3 几乎不可见。#100 顺带修复：选中填充
+     此前写成 var(--dsb-1)——令牌阶梯里没有 1 号（本义对齐 densityButtonActive
+     的 --dsb-2），未定义令牌使 background 退化为透明，选中态强化被静默废掉。 */
+  background: var(--dsb-2);
   color: var(--dsw-alias-label-primary);
   box-shadow: 0 0 0 1px var(--ds-border-strong);
 }

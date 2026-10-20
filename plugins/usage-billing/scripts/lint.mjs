@@ -113,9 +113,35 @@ for (const dir of SCAN_DIRS) {
   console.log(`[lint] CSS parity：${String(used.size)} 个 TSX 引用类全部有定义（CSS 独有 ${String(defined.size - used.size)} 个供内部选择器）`)
 }
 
+// 守卫 5（#100）：CSS 自定义属性引用/定义 parity——模块样式里 var(--x) 引用的
+// 令牌必须在文件内有定义，或属于宿主运行时提供的 --dsw-* 别名族。缺失令牌使
+// var() 替换失败、属性退化为继承/初始值：--font-num 缺失让 Windows 中文区所有
+// 数字渲染成宋体/Times（macOS 默认无衬线，验收不可见）；--dsb-1 笔误让币种按钮
+// 选中态背景静默变透明。两起同源，故此守卫按引用侧收口。
+{
+  const cssText = readFileSync(join('src', 'client', 'UsageBilling.module.css'), 'utf8')
+  // 剥掉注释再扫：修复说明里常会引用问题令牌的旧写法，注释不应触发违规。
+  const cssCode = cssText.replace(/\/\*[\s\S]*?\*\//g, '')
+  const defined = new Set([...cssCode.matchAll(/(--[A-Za-z][A-Za-z0-9-]*)\s*:/g)].map(m => m[1]))
+  const hostProvided = (name) => name.startsWith('--dsw-')
+  const referenced = new Map()
+  for (const [index, line] of cssCode.split('\n').entries()) {
+    for (const m of line.matchAll(/var\((--[A-Za-z][A-Za-z0-9-]*)/g)) {
+      if (!referenced.has(m[1])) referenced.set(m[1], `src/client/UsageBilling.module.css:${index + 1}`)
+    }
+  }
+  for (const [name, firstUse] of referenced) {
+    if (!defined.has(name) && !hostProvided(name)) {
+      VIOLATIONS.push(`${firstUse}  CSS parity：var(${name}) 引用的令牌无定义且非宿主 --dsw-* 别名（补定义或改用既有令牌）`)
+    }
+  }
+  const own = [...referenced.keys()].filter(name => defined.has(name)).length
+  console.log(`[lint] 令牌 parity：${String(referenced.size)} 个 var() 引用全部可解析（自有 ${String(own)} + 宿主 ${String(referenced.size - own)}）`)
+}
+
 if (VIOLATIONS.length > 0) {
   console.error(`[lint] ${VIOLATIONS.length} 项纪律违规：`)
   for (const v of VIOLATIONS) console.error(`  ${v}`)
   process.exit(1)
 }
-console.log('[lint] 纪律守卫全绿（类型 / 日志 / 空 catch 注释 / CSS parity）')
+console.log('[lint] 纪律守卫全绿（类型 / 日志 / 空 catch 注释 / CSS parity / 令牌 parity）')
