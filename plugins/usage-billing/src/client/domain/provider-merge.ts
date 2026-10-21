@@ -52,7 +52,16 @@ export function mergeSessionRows(rows: readonly SessionBillingRow[]): SessionBil
  * 挂树——一阶子行挂最近顶层组，二阶起挂到**直接委派方**的子行之下（issue #99
  * 方案 A：多级委派不再拍平，「哪次委派最贵」按链合计倒序一眼可读）。挂靠目标
  * 命中合并组的任一段即可；直接父不在本批（封顶/日志已删）时沿父链回退找最近
- * 顶层组，两处都落空则作为独立行并回顶层。
+ * 顶层组，两处都落空则作为独立行并回顶层——独立子行自己仍可能是子树根（它的
+ * 下级在本批内就挂在它下面），排序规则与顶层组下的子树完全一致（issue #102）。
+ *
+ * 排序契约（两级两把尺，显式约定，见 #102 讨论）：
+ * - **顶层行按本行费用**倒序：与费用列的读数单调一致（扫列不会出现「¥5 排在
+ *   ¥50 之上」的错觉），且顶层本行相加即会话总额、不重复计。
+ * - **各级子行按链合计**（本行 + 全部下级）倒序：回答「哪一次委派最贵（含下级）」，
+ *   链合计只出现在「含子智能体 ¥x」徽标里，费用列仍是本行口径。
+ * 顶层若也想回答「哪条对话最贵（含委派）」需换 chainCost——那是另一个契约，
+ * 不要只改一处。
  */
 export function buildSessionDisplay(rows: readonly SessionBillingRow[]): SessionBillingRow[] {
   // 父链解析索引：原始行 id → 行（含子行；挂靠只认顶层组，链上子会话不作为挂点）。
@@ -116,7 +125,11 @@ export function buildSessionDisplay(rows: readonly SessionBillingRow[]): Session
     for (const sub of row.subs ?? []) sortSubs(sub)
   }
   for (const group of tops) sortSubs(group)
-  // 挂靠的子行按链合计已排；未挂上的独立子行并回顶层，与组行一起保持费用倒序。
+  // 未挂上的独立子行（父会话不在本批）并回顶层。它们自己可能是子树根——下级的
+  // 树挂靠不看父在不在批内——所以同样要过 sortSubs，否则同一棵子树的「谁最贵」
+  // 读法会取决于父会话那条日志还在不在（issue #102）。sortSubs 幂等，无 subs 空操作。
   const orphans = rows.filter(row => row.parentId !== undefined && !attached.has(row.id))
+  for (const orphan of orphans) sortSubs(orphan)
+  // 顶层按本行费用倒序（契约见函数注释：费用列单调 + 总额不重复计）。
   return [...tops, ...orphans].sort((a, b) => b.cost - a.cost || b.lastActive - a.lastActive)
 }

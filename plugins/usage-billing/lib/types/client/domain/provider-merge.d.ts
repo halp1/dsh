@@ -22,7 +22,16 @@ export declare function mergeSessionRows(rows: readonly SessionBillingRow[]): Se
  * 挂树——一阶子行挂最近顶层组，二阶起挂到**直接委派方**的子行之下（issue #99
  * 方案 A：多级委派不再拍平，「哪次委派最贵」按链合计倒序一眼可读）。挂靠目标
  * 命中合并组的任一段即可；直接父不在本批（封顶/日志已删）时沿父链回退找最近
- * 顶层组，两处都落空则作为独立行并回顶层。
+ * 顶层组，两处都落空则作为独立行并回顶层——独立子行自己仍可能是子树根（它的
+ * 下级在本批内就挂在它下面），排序规则与顶层组下的子树完全一致（issue #102）。
+ *
+ * 排序契约（两级两把尺，显式约定，见 #102 讨论）：
+ * - **顶层行按本行费用**倒序：与费用列的读数单调一致（扫列不会出现「¥5 排在
+ *   ¥50 之上」的错觉），且顶层本行相加即会话总额、不重复计。
+ * - **各级子行按链合计**（本行 + 全部下级）倒序：回答「哪一次委派最贵（含下级）」，
+ *   链合计只出现在「含子智能体 ¥x」徽标里，费用列仍是本行口径。
+ * 顶层若也想回答「哪条对话最贵（含委派）」需换 chainCost——那是另一个契约，
+ * 不要只改一处。
  */
 export declare function buildSessionDisplay(rows: readonly SessionBillingRow[]): SessionBillingRow[];
 //# sourceMappingURL=provider-merge.d.ts.map

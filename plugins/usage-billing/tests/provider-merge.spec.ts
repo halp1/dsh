@@ -108,4 +108,33 @@ describe('buildSessionDisplay 树形委派（issue #99）', () => {
     expect(display[0]?.mergedCount).toBe(1)
     expect(display[0]?.subs?.map(entry => entry.id)).toEqual(['sub'])
   })
+
+  it('sorts the subs of an orphan subtree root by chain cost, same as under a top-level group (issue #102)', () => {
+    // 孤儿子树：x 的父不在本批（封顶/日志删），x 自己成了子树根并带下级 y/z。
+    // 此前 sortSubs 只跑 tops，x.subs 保持插入序 [y, z]——「谁最贵」的读法取决于
+    // 父会话那条日志还在不在，正是孤儿场景最不该出现的不一致。
+    const x = row('x', 2, { parentId: 'MISSING', subCost: 4, subCalls: 2 })
+    const y = row('y', 1, { parentId: 'x' })
+    const z = row('z', 3, { parentId: 'x' })
+    const orphanDisplay = buildSessionDisplay([x, y, z])
+    const orphanRoot = orphanDisplay.find(entry => entry.id === 'x')
+    expect(orphanRoot?.subs?.map(sub => sub.id)).toEqual(['z', 'y'])
+    // 对照：同样的数据，x 的父换成批内顶层 → 读法必须一致。
+    const top = row('top', 10)
+    const xUnderTop = row('x', 2, { parentId: 'top', subCost: 4, subCalls: 2 })
+    const [groupDisplay] = buildSessionDisplay([top, xUnderTop, y, z])
+    expect(groupDisplay?.subs?.[0]?.subs?.map(sub => sub.id)).toEqual(['z', 'y'])
+  })
+
+  it('orders top-level rows by own cost, not chain total (explicit contract; subs use chain total)', () => {
+    // 两级两把尺（#102 讨论后显式约定）：顶层按本行费用——与费用列读数单调一致、
+    // 顶层本行相加即总额不重复计；子级按链合计——回答「哪次委派最贵（含下级）」。
+    // A 自身 5 + 下级 100（链 105），B 自身 50 无委派：顶层顺序 B、A。
+    const a = row('A', 5, { subCost: 100, subCalls: 1 })
+    const aSub = row('A-sub', 100, { parentId: 'A' })
+    const b = row('B', 50)
+    const display = buildSessionDisplay([a, aSub, b])
+    expect(display.map(entry => entry.id)).toEqual(['B', 'A'])
+    expect(display[1]?.subs?.map(sub => sub.id)).toEqual(['A-sub'])
+  })
 })
