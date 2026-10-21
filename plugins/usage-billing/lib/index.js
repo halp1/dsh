@@ -3558,6 +3558,7 @@ function createUsageAggregator(persistence, options = {}) {
 	let ledgerNeedsSave = false;
 	let lastLedgerSaveAt = 0;
 	const unreadable = /* @__PURE__ */ new Map();
+	const titleHints = /* @__PURE__ */ new Map();
 	let inflight;
 	let ledgerAppliedMigrations;
 	let lastDoc;
@@ -3798,8 +3799,13 @@ function createUsageAggregator(persistence, options = {}) {
 					stamp,
 					format
 				});
+				if (options.resolveSessionTitle !== void 0) {
+					const hint = options.resolveSessionTitle(meta);
+					if (hint !== void 0) titleHints.set(id, hint);
+				}
 				console.warn("[usage-billing] skip unreadable session", id, error);
 			}
+			if (included.has(id)) titleHints.delete(id);
 		}
 		for (const key of [...cache.keys()]) if (!seen.has(key)) cache.delete(key);
 		for (const key of [...unreadable.keys()]) if (!seen.has(key)) unreadable.delete(key);
@@ -3813,12 +3819,17 @@ function createUsageAggregator(persistence, options = {}) {
 				if (included.has(entry.id)) continue;
 				try {
 					const stale = (entry.foldVersion ?? 1) < 23 || entry.fingerprint !== foldFingerprint;
+					const fold = deserializedFoldOf(entry.fold);
+					const hint = titleHints.get(entry.id);
 					folds.push({
 						id: entry.id,
 						...entry.cwd === void 0 ? {} : { cwd: entry.cwd },
 						...entry.subOf === void 0 ? {} : { subOf: entry.subOf },
 						...stale ? { staleLedger: true } : {},
-						fold: deserializedFoldOf(entry.fold)
+						fold: hint === void 0 ? fold : {
+							...fold,
+							title: hint
+						}
 					});
 					included.add(entry.id);
 					if (stale) staleLedgerSessions += 1;
@@ -4055,6 +4066,9 @@ function createUsageAggregator(persistence, options = {}) {
 		async flush() {
 			if (inflight !== void 0) await inflight.catch(() => {});
 			await saveLedger(true);
+		},
+		lastDocOf() {
+			return lastDoc;
 		}
 	};
 }
@@ -7617,10 +7631,21 @@ function registerUsageStatsRoute(ctx, deps) {
 				res.end(statsBodyOf(fresh));
 				return;
 			}
+			const recent = deps.lastDoc?.();
+			if (recent !== void 0) {
+				res.end(JSON.stringify({
+					...decorate(recent),
+					staleSnapshot: true
+				}));
+				return;
+			}
 			for (const candidate of deps.candidates) {
 				const doc = await deps.readSnapshot(candidate);
 				if (doc === null) continue;
-				res.end(JSON.stringify(decorate(doc)));
+				res.end(JSON.stringify({
+					...decorate(doc),
+					staleSnapshot: true
+				}));
 				return;
 			}
 			res.end(JSON.stringify({ error: "usage stats unavailable" }));
@@ -7932,6 +7957,48 @@ function buildWorkspaceTitleResolver(ctx) {
 	};
 }
 /**
+* 构造「会话头 → 宿主侧会话标题」解析器（issue #103，可选依赖）。
+*
+* 插件的会话标题取自日志里的 `session/title` 事件——**日志读不动**时（宿主拒绝
+* 该格式/代际，插件折叠失败），只能吃账本旧行，标题会永远停在重命名前的值。
+* 宿主自己的会话投影缓存仍可能记得这个标题（`cachedSnapshot` / 既有能力
+* `cachedPredecessorTitle`：格式代际边缘的标题仍能跨边缘存活），用它兜底可让
+* 账单明细的标题跟随工作区。
+*
+* 宿主没有该服务（0.1.x 代际）或读取失败都返回 undefined：绝不抛错，行为与
+* 现状一致（可选依赖，不影响主流程）。
+* @param ctx - host context carrying the optional session projection cache.
+* @returns 标题解析函数；服务不可用时 undefined。
+*/
+function buildSessionTitleResolver(ctx) {
+	let cache;
+	try {
+		cache = ctx.get("sessionProjectionCache");
+	} catch {
+		return;
+	}
+	if (cache === void 0) return void 0;
+	const titleOf = (values) => {
+		const title = values?.title;
+		return typeof title === "string" && title !== "" ? title : void 0;
+	};
+	const cachedSnapshot = cache.cachedSnapshot;
+	const cachedPredecessorTitle = cache.cachedPredecessorTitle;
+	if (typeof cachedSnapshot !== "function" && typeof cachedPredecessorTitle !== "function") return void 0;
+	return (header) => {
+		try {
+			if (typeof cachedSnapshot === "function") {
+				const title = titleOf(cachedSnapshot(header, ["title"])?.values);
+				if (title !== void 0) return title;
+			}
+			if (typeof cachedPredecessorTitle === "function") return titleOf(cachedPredecessorTitle(header)?.values);
+			return;
+		} catch {
+			return;
+		}
+	};
+}
+/**
 * 凭据 seam 的宽容解析：ref 名 → 非空值；失败/缺失返回 undefined（多 surface 共用，
 * 失败按结构化静默记录）。
 */
@@ -8086,6 +8153,7 @@ function apply(ctx, config = {}) {
 		}).catch(() => {});
 	};
 	const workspaceTitleResolver = buildWorkspaceTitleResolver(ctx);
+	const sessionTitleResolver = buildSessionTitleResolver(ctx);
 	applyBuiltinCatalog(BUILTIN_MODEL_CATALOG, BUILTIN_MODEL_KEY_ALIASES);
 	applyUserModelAliases(config.modelKeyAliases);
 	let llmRegistryWarned = false;
@@ -8119,6 +8187,7 @@ function apply(ctx, config = {}) {
 		resolveRegisteredProviders: registeredProvidersOf,
 		...config.modelKeyAliases === void 0 ? {} : { modelKeyAliases: config.modelKeyAliases },
 		...workspaceTitleResolver === void 0 ? {} : { resolveWorkspaceTitle: workspaceTitleResolver },
+		...sessionTitleResolver === void 0 ? {} : { resolveSessionTitle: sessionTitleResolver },
 		...config.searchCallEstimateCny === void 0 ? {} : { searchCallEstimateCny: config.searchCallEstimateCny },
 		ledger: ledgerStore
 	});
@@ -8562,7 +8631,8 @@ function apply(ctx, config = {}) {
 		persistSnapshot,
 		readSnapshot,
 		packageVersion: PACKAGE_VERSION,
-		responseBudgetMs: RESPONSE_BUDGET_MS
+		responseBudgetMs: RESPONSE_BUDGET_MS,
+		lastDoc: () => aggregator.lastDocOf()
 	});
 }
 //#endregion

@@ -254,6 +254,15 @@ export interface AggregateOptions {
   /** 工作区标题解析：给定会话 cwd 返回项目显示标题；undefined = 回退到 cwd 末级目录名
    *  （host 的 workspaceRegistry 为可选依赖，缺失时不注入，行为保持不变）。 */
   resolveWorkspaceTitle?: (cwd: string) => string | undefined
+  /**
+   * 会话标题兜底解析：给定会话头（宿主持久层列表元数据）返回宿主侧的会话标题。
+   *
+   * 只在**日志读不动**的会话上用（宿主拒绝该格式/代际，插件折叠失败）：此时插件
+   * 只能吃账本里的旧行，标题会永远停在重命名前的值——宿主自己的投影缓存仍可能
+   * 记得这个标题（格式代际边缘的既定能力），用它兜底可让标题跟随工作区
+   * （issue #103）。读得动的会话一律以日志为准，本回调不参与。
+   */
+  resolveSessionTitle?: (header: SessionHeader) => string | undefined
   /** 独立的持久用量账本。启用后，已经成功折叠过的会话即使随后从
    *  sessionPersistence 中永久删除，也会继续计入累计用量。 */
   ledger?: UsageLedgerStore
@@ -1854,6 +1863,16 @@ export interface UsageAggregator {
    * @returns 会话累计；日志与账本均无该会话时 undefined（调用方自行兜底）。
    */
   sessionUsageOf(sessionId: string): Promise<SessionUsageSummary | undefined>
+  /**
+   * 最近一次**已完成**的聚合文档（不触发新的折叠）。
+   *
+   * 供路由的 stale-while-revalidate 兜底用：当本轮折叠超过响应预算（宿主单进程
+   * 事件循环被重活折叠占住）时，落盘快照最多落后一个节流窗口（分钟级），而这里
+   * 的内存文档只落后一个聚合周期——两者都是「上次算好的」，但内存那份更新。
+   * 从未完成过一次聚合时返回 undefined（调用方回落到磁盘快照）。
+   * @returns 最近一次完成的聚合文档；尚无完成聚合时 undefined。
+   */
+  lastDocOf(): UsageStatsDocument | undefined
   /** 立刻落盘未保存的账本改动（无视节流），供插件卸载时调用；
    *  进行中的聚合先等完再存，折叠失败仍保存已成功部分。 */
   flush(): Promise<void>
@@ -1949,6 +1968,11 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
   // 轮询）都把该日志重新解压解析一遍再失败；stamp 变化（日志被重写/追加）后自动
   // 重试一次。format 位让负缓存命中轮次仍能按原因细分未统计计数（issue #84）。
   const unreadable = new Map<string, { stamp: string; format: boolean }>()
+  // 读不动的会话的宿主侧标题（issue #103）：日志读不动时账本旧行的标题会停在
+  // 重命名前的值，用宿主投影缓存里的标题兜底。跨轮次保留——负缓存会让后续轮次
+  // 不再重读该会话，提示若只活一轮就没意义了；会话重新读得动时立即作废
+  // （那时以日志为准）。
+  const titleHints = new Map<string, string>()
   // 并发聚合共享的进行中的折叠（usage-stats / balance / usage_stats 工具会同时触发）。
   let inflight: Promise<UsageStatsDocument> | undefined
   // 加载边界跑迁移后留下的已应用 id；save 透传，避免每次重启都把迁移重跑一遍。
@@ -2266,8 +2290,17 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
           if (!ledger.has(id)) noLedgerUnreadable += 1
           // 记负缓存：stamp 不变期间不再重读该会话（下轮聚合直接跳过）。
           if (stamp !== null) unreadable.set(id, { stamp, format })
+          // 标题兜底（issue #103）：日志读不动时，账本旧行的标题会永远停在
+          // 重命名前的值；宿主侧的会话标题（投影缓存）可能仍是新值，记下来给
+          // 兜底段用。宿主没有该能力时静默跳过，行为不变。
+          if (options.resolveSessionTitle !== undefined) {
+            const hint = options.resolveSessionTitle(meta)
+            if (hint !== undefined) titleHints.set(id, hint)
+          }
           console.warn('[usage-billing] skip unreadable session', id, error)
         }
+        // 本轮真读到日志的会话：标题以日志为准，作废宿主侧提示。
+        if (included.has(id)) titleHints.delete(id)
       }
       // 已删除会话的缓存一并清除，避免内存随历史膨胀。
       for (const key of [...cache.keys()]) {
@@ -2292,12 +2325,18 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
             // 缺失 foldVersion（迁移前的异常路径）按 v1 处理：保守标注旧算法。
             // 配置指纹不一致的行同样标 stale：其归属按旧配置算，与当前口径有偏差。
             const stale = (entry.foldVersion ?? 1) < FOLD_VERSION || entry.fingerprint !== foldFingerprint
+            const fold = deserializedFoldOf(entry.fold)
+            // 标题兜底（issue #103）：该会话的日志读不动（宿主拒绝该格式/代际），
+            // 账本旧行的标题会停在重命名前的值；宿主侧的标题（投影缓存）优先。
+            // 读得动的会话不走这里（included 命中即 continue），标题以日志为准。
+            const hint = titleHints.get(entry.id)
             folds.push({
               id: entry.id,
               ...(entry.cwd === undefined ? {} : { cwd: entry.cwd }),
               ...(entry.subOf === undefined ? {} : { subOf: entry.subOf }),
               ...(stale ? { staleLedger: true as const } : {}),
-              fold: deserializedFoldOf(entry.fold),
+              // 复制一份再改标题：deserializedFoldOf 的结果被 WeakMap 记忆并共享。
+              fold: hint === undefined ? fold : { ...fold, title: hint },
             })
             included.add(entry.id)
             if (stale) staleLedgerSessions += 1
@@ -2565,6 +2604,10 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
       // 等进行中的聚合落定（折叠失败也继续保存已成功部分），无视节流落盘。
       if (inflight !== undefined) await inflight.catch(() => {})
       await saveLedger(true)
+    },
+    lastDocOf(): UsageStatsDocument | undefined {
+      // 只读已完成的文档：不触发折叠、不改 TTL 游标。
+      return lastDoc
     },
   }
 }

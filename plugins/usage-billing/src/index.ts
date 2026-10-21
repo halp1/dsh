@@ -401,6 +401,56 @@ function buildWorkspaceTitleResolver(ctx: Context): ((cwd: string) => string | u
 }
 
 /**
+ * 构造「会话头 → 宿主侧会话标题」解析器（issue #103，可选依赖）。
+ *
+ * 插件的会话标题取自日志里的 `session/title` 事件——**日志读不动**时（宿主拒绝
+ * 该格式/代际，插件折叠失败），只能吃账本旧行，标题会永远停在重命名前的值。
+ * 宿主自己的会话投影缓存仍可能记得这个标题（`cachedSnapshot` / 既有能力
+ * `cachedPredecessorTitle`：格式代际边缘的标题仍能跨边缘存活），用它兜底可让
+ * 账单明细的标题跟随工作区。
+ *
+ * 宿主没有该服务（0.1.x 代际）或读取失败都返回 undefined：绝不抛错，行为与
+ * 现状一致（可选依赖，不影响主流程）。
+ * @param ctx - host context carrying the optional session projection cache.
+ * @returns 标题解析函数；服务不可用时 undefined。
+ */
+function buildSessionTitleResolver(ctx: Context): ((header: SessionHeader) => string | undefined) | undefined {
+  interface ProjectionCacheFace {
+    cachedSnapshot?: (header: SessionHeader, keys?: readonly string[]) => { values?: Record<string, unknown> } | undefined
+    cachedPredecessorTitle?: (header: SessionHeader) => { values?: Record<string, unknown> } | undefined
+  }
+  let cache: ProjectionCacheFace | undefined
+  try {
+    cache = ctx.get('sessionProjectionCache') as ProjectionCacheFace | undefined
+  } catch {
+    return undefined
+  }
+  if (cache === undefined) return undefined
+  const titleOf = (values: Record<string, unknown> | undefined): string | undefined => {
+    const title = values?.title
+    return typeof title === 'string' && title !== '' ? title : undefined
+  }
+  const cachedSnapshot = cache.cachedSnapshot
+  const cachedPredecessorTitle = cache.cachedPredecessorTitle
+  if (typeof cachedSnapshot !== 'function' && typeof cachedPredecessorTitle !== 'function') return undefined
+  return (header) => {
+    try {
+      // 当前代际的存档行优先；旧代际（宿主读不动的那些）走既有能力的前代标题。
+      if (typeof cachedSnapshot === 'function') {
+        const title = titleOf(cachedSnapshot(header, ['title'])?.values)
+        if (title !== undefined) return title
+      }
+      if (typeof cachedPredecessorTitle === 'function') {
+        return titleOf(cachedPredecessorTitle(header)?.values)
+      }
+      return undefined
+    } catch {
+      return undefined
+    }
+  }
+}
+
+/**
  * 凭据 seam 的宽容解析：ref 名 → 非空值；失败/缺失返回 undefined（多 surface 共用，
  * 失败按结构化静默记录）。
  */
@@ -630,6 +680,8 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
   // 前端 30 秒轮询只重算写过的会话。
   // 项目归属用工作区标题（host workspaceRegistry 可选；缺失时 resolver 为 undefined，回退目录名）。
   const workspaceTitleResolver = buildWorkspaceTitleResolver(ctx)
+  // 读不动的会话的标题兜底（host sessionProjectionCache 可选；缺失时 undefined，行为不变）。
+  const sessionTitleResolver = buildSessionTitleResolver(ctx)
   // 用户自定义模型别名：聚合启动前注入（与客户端渲染共用一张表，见 pricing.ts）。
   applyBuiltinCatalog(BUILTIN_MODEL_CATALOG, BUILTIN_MODEL_KEY_ALIASES)
   applyUserModelAliases(config.modelKeyAliases)
@@ -689,6 +741,8 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
     ...(config.modelKeyAliases === undefined ? {} : { modelKeyAliases: config.modelKeyAliases }),
     // 项目归属用工作区标题命名（host workspaceRegistry 为可选依赖，缺失时回退目录名）。
     ...(workspaceTitleResolver === undefined ? {} : { resolveWorkspaceTitle: workspaceTitleResolver }),
+    // 读不动的会话：标题取宿主侧（投影缓存）的值，避免停在重命名前的旧值（issue #103）。
+    ...(sessionTitleResolver === undefined ? {} : { resolveSessionTitle: sessionTitleResolver }),
     // 联网搜索请求的单次费用估算（issue #15）；缺省 0.02 元/次，配置可覆盖/关闭。
     ...(config.searchCallEstimateCny === undefined ? {} : { searchCallEstimateCny: config.searchCallEstimateCny }),
     ledger: ledgerStore,
@@ -1160,6 +1214,9 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
     readSnapshot,
     packageVersion: PACKAGE_VERSION,
     responseBudgetMs: RESPONSE_BUDGET_MS,
+    // 超预算时的第一回落：内存里最近一次**已完成**的聚合文档（比落盘快照新——
+    // 落盘受 5 分钟节流约束，内存文档只落后一个聚合周期）。
+    lastDoc: () => aggregator.lastDocOf() as unknown as Record<string, unknown> | undefined,
   })
 
 }

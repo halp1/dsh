@@ -140,6 +140,7 @@ export type UsageBillingKey =
   | 'triggerWeekTokens'
   | 'subscriptionsStale'
   | 'staleLedgerNotice'
+  | 'staleSnapshotNotice'
   | 'unreadableNotice'
   | 'unreadableFormatNotice'
   | 'unreadableNoLedgerNotice'
@@ -493,6 +494,7 @@ export const zh: Record<UsageBillingKey, string> = {
   'floatNoTargetsHint': '暂无可选的订阅通道。',
   'subscriptionsStale': '订阅额度刷新失败，以下为缓存数据',
   'staleLedgerNotice': '{count} 个会话出自旧版算法存档（日志已删，无法重算），模型归属可能有误差',
+  'staleSnapshotNotice': '用量正在重算，以下数据来自上一次计算（可能不是最新，会话标题等以工作区为准）',
   'unreadableNotice': '{count} 个会话的用量未完整计入（原始日志未动，不会丢失）',
   'unreadableNoLedgerNotice': '其中 {count} 个无历史存档，用量完全未计入',
   'unreadableFormatNotice': '其中 {count} 个因会话格式不受当前宿主支持：过新格式升级宿主后自动恢复，过旧格式（如 v0/v3）需先迁移',
@@ -848,6 +850,7 @@ export const en: Record<UsageBillingKey, string> = {
   'floatNoTargetsHint': 'No subscription channel available.',
   'subscriptionsStale': 'Subscription refresh failed — showing cached data',
   'staleLedgerNotice': '{count} sessions use legacy-algorithm archives (logs deleted); attribution may be off',
+  'staleSnapshotNotice': 'Usage is being recomputed; the figures below come from the last completed calculation (session titles may lag the workspace)',
   'unreadableNotice': 'Usage from {count} sessions is not fully counted (raw logs untouched; no data lost)',
   'unreadableNoLedgerNotice': '{count} of them have no archived history and are not counted at all',
   'unreadableFormatNotice': '{count} of them use a session format this host cannot read: newer formats recover after a host upgrade; legacy formats (e.g. v0/v3) need a one-time migration',

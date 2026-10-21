@@ -38,6 +38,14 @@ function header(seq: number, model: string, provider = 'deepseek-official'): Ses
   } as unknown as SessionEvent
 }
 
+/** `session/title` 事件：宿主重命名会话时追加（source.kind='user'）。 */
+function titleEvent(seq: number, time: number, title: string): SessionEvent {
+  return {
+    type: 'session/title', seq, time,
+    data: { title, messageSeqs: [], source: { kind: 'user' } },
+  } as unknown as SessionEvent
+}
+
 /** Minimal `assistant/message` event carrying one provider usage report. */
 function message(seq: number, time: number, usage: TokenUsage): SessionEvent {
   return {
@@ -1307,6 +1315,103 @@ describe('createUsageAggregator (incremental cache)', () => {
     expect(listCalls).toBe(1)
     expect(docA).toBe(docB)
     expect(docA.total.calls).toBe(1)
+  })
+
+  it('exposes the last completed document without triggering a new fold (issue #103)', async () => {
+    // lastDocOf：路由超预算时的第一回落（内存里最近一次**已完成**的聚合文档）。
+    // 契约：只读、不触发折叠、不改 TTL 游标；尚无完成的聚合时 undefined。
+    let lists = 0
+    const persistence = {
+      list: async () => {
+        lists += 1
+        return [{ id: 'a' }]
+      },
+      readFrom: async (id: SessionId) => ({
+        meta: { id },
+        events: [header(1, 'deepseek-v4-flash'), message(2, 1_000, USAGE)],
+      }),
+    } as unknown as UsagePersistence
+    const aggregator = createUsageAggregator(persistence)
+
+    // 聚合前：没有已完成文档。
+    expect(aggregator.lastDocOf()).toBeUndefined()
+
+    const doc = await aggregator.aggregate()
+    expect(aggregator.lastDocOf()).toBe(doc)
+    expect(lists).toBe(1)
+
+    // 再次读取不触发新折叠（list 不再被调）。
+    expect(aggregator.lastDocOf()).toBe(doc)
+    expect(lists).toBe(1)
+  })
+
+  it('follows a rename appended to the session log (issue #103)', async () => {
+    // 重命名会话 = 日志尾部追加一条 session/title 事件（宿主 sessionTitle 服务
+    // 的行为）。插件的会话标题取日志里最后一条标题事件：增量折叠路径必须把
+    // 新标题吃进去，否则账单明细一直显示旧标题。
+    vi.useFakeTimers()
+    const logs: Record<string, SessionEvent[]> = {
+      s1: [titleEvent(0, 1_000, '旧标题'), header(1, 'deepseek-v4-flash'), message(2, 1_100, USAGE)],
+    }
+    let revision = 'rev-1'
+    const persistence = {
+      list: async () => [{ id: 's1' as SessionId }],
+      stampOf: async () => revision,
+      readFrom: async (id: SessionId, fromSeq: number) => ({
+        meta: { id },
+        inheritedEventCount: 0,
+        events: (logs[id] ?? []).filter(event => (event.seq ?? 0) >= fromSeq),
+      }),
+    } as unknown as UsagePersistence
+    const aggregator = createUsageAggregator(persistence)
+
+    const first = await aggregator.aggregate()
+    expect(first.bySession?.[0]?.title).toBe('旧标题')
+
+    // 宿主重命名：日志尾部追加标题事件，日志 revision 随之变化。
+    logs.s1 = [...logs.s1, titleEvent(3, 2_000, '新标题')]
+    revision = 'rev-2'
+    vi.advanceTimersByTime(AGGREGATE_TTL_MS + 1_000)
+    const second = await aggregator.aggregate()
+    expect(second.bySession?.[0]?.title).toBe('新标题')
+  })
+
+  it('falls back to the host-side title when the session log cannot be read (issue #103)', async () => {
+    // 日志读不动（宿主拒绝该格式/代际）时，插件只能吃账本旧行——标题会永远
+    // 停在重命名前的值。宿主侧的会话标题（投影缓存）优先：重命名后的标题
+    // 照样显示，账单明细与工作区一致。
+    const ledgerRow = legacyFold()
+    ledgerRow.title = '旧标题'
+    const store = fakeLedgerStore([{
+      id: 'broken',
+      stamp: 'v1',
+      foldVersion: FOLD_VERSION,
+      fingerprint: configFingerprint(new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {}, DEFAULT_SEARCH_CALL_ESTIMATE_CNY, {}, new Set()),
+      fold: ledgerRow,
+    }])
+    const persistence = {
+      list: async () => [{ id: 'broken' as SessionId }],
+      // stamp 与账本行不一致 → 账本快路径不命中，本轮真去读日志 → 读不动。
+      stampOf: async () => 'v2',
+      readFrom: async () => {
+        throw new Error('SessionFormatUnsupportedError: unsupported format')
+      },
+    } as unknown as UsagePersistence
+    const aggregator = createUsageAggregator(persistence, {
+      ledger: store.store,
+      resolveSessionTitle: () => '新标题',
+    })
+    const doc = await aggregator.aggregate()
+    expect(doc.bySession?.[0]?.title).toBe('新标题')
+    // 读不动的会话仍照旧计入（账本存档兜底），未统计提示不受影响。
+    expect(doc.bySession?.[0]?.calls).toBe(2)
+    expect(doc.unreadableSessions).toBe(1)
+
+    // 负缓存生效后不再重读该会话（没有新事件可折），标题仍走宿主侧兜底。
+    vi.useFakeTimers()
+    vi.advanceTimersByTime(AGGREGATE_TTL_MS + 1_000)
+    const again = await aggregator.aggregate()
+    expect(again.bySession?.[0]?.title).toBe('新标题')
   })
 
   it('negative-caches unreadable sessions by stamp until the log changes', async () => {

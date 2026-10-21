@@ -41,6 +41,13 @@ export interface UsageStatsDeps {
   packageVersion: string
   /** 等待预算（毫秒）：聚合在此预算内完成就回实时数据，超预算立即回最近快照。 */
   responseBudgetMs: number
+  /**
+   * 最近一次**已完成**的聚合文档（只读，不触发新折叠）。
+   *
+   * 超预算时的第一回落：它比磁盘快照新（磁盘快照受落盘节流影响，最多落后数分钟；
+   * 内存文档只落后一个聚合周期）。从未完成过一次聚合时 undefined，继续回落磁盘快照。
+   */
+  lastDoc?: () => Record<string, unknown> | undefined
 }
 
 /** 聚合文档核心结构的 wire 校验（S-7 可观察性金丝雀）。
@@ -178,12 +185,20 @@ export function registerUsageStatsRoute(ctx: Context, deps: UsageStatsDeps): voi
           res.end(statsBodyOf(fresh))
           return
         }
+        // 超预算 / 聚合失败：先回内存里最近一次完成的聚合文档（比磁盘快照新），
+        // 再回磁盘快照。两者的数据都「落后于本轮」，用 staleSnapshot 标记，
+        // 面板据此提示「数据来自上次计算」，避免把旧值当成最新值读。
+        const recent = deps.lastDoc?.()
+        if (recent !== undefined) {
+          res.end(JSON.stringify({ ...decorate(recent), staleSnapshot: true }))
+          return
+        }
         for (const candidate of deps.candidates) {
           const doc = await deps.readSnapshot(candidate)
           // Accept only parseable JSON so a stale or partial file never
           // reaches the dashboard as if it were real.
           if (doc === null) continue
-          res.end(JSON.stringify(decorate(doc)))
+          res.end(JSON.stringify({ ...decorate(doc), staleSnapshot: true }))
           return
         }
         res.end(JSON.stringify({ error: 'usage stats unavailable' }))

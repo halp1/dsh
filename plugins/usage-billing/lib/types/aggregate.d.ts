@@ -164,6 +164,15 @@ export interface AggregateOptions {
     /** 工作区标题解析：给定会话 cwd 返回项目显示标题；undefined = 回退到 cwd 末级目录名
      *  （host 的 workspaceRegistry 为可选依赖，缺失时不注入，行为保持不变）。 */
     resolveWorkspaceTitle?: (cwd: string) => string | undefined;
+    /**
+     * 会话标题兜底解析：给定会话头（宿主持久层列表元数据）返回宿主侧的会话标题。
+     *
+     * 只在**日志读不动**的会话上用（宿主拒绝该格式/代际，插件折叠失败）：此时插件
+     * 只能吃账本里的旧行，标题会永远停在重命名前的值——宿主自己的投影缓存仍可能
+     * 记得这个标题（格式代际边缘的既定能力），用它兜底可让标题跟随工作区
+     * （issue #103）。读得动的会话一律以日志为准，本回调不参与。
+     */
+    resolveSessionTitle?: (header: SessionHeader) => string | undefined;
     /** 独立的持久用量账本。启用后，已经成功折叠过的会话即使随后从
      *  sessionPersistence 中永久删除，也会继续计入累计用量。 */
     ledger?: UsageLedgerStore;
@@ -735,6 +744,16 @@ export interface UsageAggregator {
      * @returns 会话累计；日志与账本均无该会话时 undefined（调用方自行兜底）。
      */
     sessionUsageOf(sessionId: string): Promise<SessionUsageSummary | undefined>;
+    /**
+     * 最近一次**已完成**的聚合文档（不触发新的折叠）。
+     *
+     * 供路由的 stale-while-revalidate 兜底用：当本轮折叠超过响应预算（宿主单进程
+     * 事件循环被重活折叠占住）时，落盘快照最多落后一个节流窗口（分钟级），而这里
+     * 的内存文档只落后一个聚合周期——两者都是「上次算好的」，但内存那份更新。
+     * 从未完成过一次聚合时返回 undefined（调用方回落到磁盘快照）。
+     * @returns 最近一次完成的聚合文档；尚无完成聚合时 undefined。
+     */
+    lastDocOf(): UsageStatsDocument | undefined;
     /** 立刻落盘未保存的账本改动（无视节流），供插件卸载时调用；
      *  进行中的聚合先等完再存，折叠失败仍保存已成功部分。 */
     flush(): Promise<void>;

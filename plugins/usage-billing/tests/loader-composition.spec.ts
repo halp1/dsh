@@ -526,6 +526,44 @@ describe('usage-billing real Loader composition', () => {
     expect((fresh.json as { total: { calls: number } }).total.calls).toBe(2)
     await rm(snapshotDir, { recursive: true, force: true })
   })
+
+  it('serves the last completed aggregation when every fold exceeds the response budget', { timeout: 60_000 }, async () => {
+    // issue #103：折叠一直慢于响应预算时，落盘快照（节流 5 分钟）会落后好几分钟，
+    // 面板于是把「上一次计算」的值当最新值读（重命名前的会话标题等）。
+    // 回落顺序：内存里最近一次**已完成**的聚合文档 → 落盘快照；两者都带
+    // staleSnapshot 标记，面板据此提示「数据来自上一次计算」。
+    const snapshotDir = await mkdtemp(join(tmpdir(), 'dsh-usage-billing-snap-'))
+    const statsFile = join(snapshotDir, 'usage-stats.snapshot.json')
+    await writeFile(statsFile, JSON.stringify({
+      version: 3,
+      source: 'session-logs',
+      total: { calls: 42, input: 1, output: 1, cacheHit: 0, cacheMiss: 1, cost: 0 },
+      byModel: {}, byDay: {}, byDayModels: {}, bySession: [],
+    }))
+    const loaded = await loadCompositionWith({ slow: true, statsPath: statsFile })
+    const port = loaded.webServer.port
+
+    // 首轮：尚无已完成的聚合 → 回落落盘快照，并标记为滞后数据。
+    const first = await getJson(port, '/api/billing/usage-stats')
+    expect((first.json as { total: { calls: number } }).total.calls).toBe(42)
+    expect((first.json as { staleSnapshot?: boolean }).staleSnapshot).toBe(true)
+
+    // 等后台折叠完成（此后内存里有「最近一次完成的聚合文档」）。
+    const liveSnapshotPath = join(root!, 'usage-stats.json')
+    await vi.waitFor(async () => {
+      const doc = JSON.parse(await readFile(liveSnapshotPath, 'utf8')) as { total?: { calls?: number } }
+      expect(doc.total?.calls).toBe(2)
+    }, { timeout: 15_000, interval: 200 })
+
+    // 聚合 TTL（5s）过期后再请求：新的一轮折叠仍然慢 → 超预算 → 回落内存文档
+    // （真实值 2 次调用），而不是落后 5 分钟的落盘快照（42 次）。
+    await new Promise(resolve => setTimeout(resolve, 6_000))
+    const second = await getJson(port, '/api/billing/usage-stats')
+    const doc = second.json as { total: { calls: number }; staleSnapshot?: boolean }
+    expect(doc.total.calls).toBe(2)
+    expect(doc.staleSnapshot).toBe(true)
+    await rm(snapshotDir, { recursive: true, force: true })
+  })
 })
 
 describe('plugin-registered adapter channels (issue #91)', () => {

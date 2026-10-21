@@ -166,6 +166,12 @@ export interface UsageBillingInjected {
 export interface UsageStats {
     /** 服务端聚合时间戳（毫秒）；旧快照可能缺失。 */
     updatedAt?: number;
+    /**
+     * 本次下发的是「上次算好的」文档（聚合超响应预算或失败时的回落）：
+     * 内存里最近一次完成的聚合，或落盘快照。面板据此提示数据滞后，
+     * 避免把旧值（如重命名前的会话标题）当成最新值读。
+     */
+    staleSnapshot?: boolean;
     /** 宿主进程时区（IANA 名 + UTC 偏移）：天按此切分，副标题据此标注；旧快照可能缺失。 */
     timezone?: {
         name: string;

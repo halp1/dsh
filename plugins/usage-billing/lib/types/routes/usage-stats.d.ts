@@ -37,6 +37,13 @@ export interface UsageStatsDeps {
     packageVersion: string;
     /** 等待预算（毫秒）：聚合在此预算内完成就回实时数据，超预算立即回最近快照。 */
     responseBudgetMs: number;
+    /**
+     * 最近一次**已完成**的聚合文档（只读，不触发新折叠）。
+     *
+     * 超预算时的第一回落：它比磁盘快照新（磁盘快照受落盘节流影响，最多落后数分钟；
+     * 内存文档只落后一个聚合周期）。从未完成过一次聚合时 undefined，继续回落磁盘快照。
+     */
+    lastDoc?: () => Record<string, unknown> | undefined;
 }
 /** 校验一份聚合文档；返回漂移原因（null = 形状正常）。纯只读，不改 doc。 */
 export declare function usageStatsShapeError(doc: unknown): string | null;

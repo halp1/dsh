@@ -1861,6 +1861,14 @@ function BillingDashboard({
           </div>
         </div>
 
+        {/* 数据滞后提示（聚合超预算/失败时的回落下发）：标题栏下、Tab 区之上——
+            所有页签都看得见，别让「上一次计算」的值被当成最新读（issue #103）。 */}
+        {stats.staleSnapshot === true && (
+          <div className={css.staleNotice} data-testid="billing-stale-snapshot">
+            {t('staleSnapshotNotice')}
+          </div>
+        )}
+
         {/* Tab 导航（v1.5 alpha.1.1 调整）：200px 左栏布局挤压右栏内容、退回顶部分段
            控件 + 徽章数据信号。data-testid 保留为 billing-tab-nav（兼容测试）。
            原 200px 左栏设计（.tabRail）保留在 CSS 里，待 v1.6 调研 modal 宽 ≥900

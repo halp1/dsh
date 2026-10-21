@@ -33,6 +33,8 @@ export async function loadUsageStats(): Promise<UsageStats | null> {
       // 模型×日期×站点三维（issue #16）：旧快照缺失；透传供按 origin 重估。
       ...(isObj(candidate.byDayModelsSite) ? { byDayModelsSite: candidate.byDayModelsSite } : {}),
       ...(candidate.updatedAt !== undefined ? { updatedAt: candidate.updatedAt } : {}),
+      // 回落下发（聚合超预算/失败）：面板据此提示「数据来自上次计算」。
+      ...(candidate.staleSnapshot === true ? { staleSnapshot: true } : {}),
       ...(typeof candidate.budget === 'number' ? { budget: candidate.budget } : {}),
       ...(typeof candidate.lowBalanceThreshold === 'number' ? { lowBalanceThreshold: candidate.lowBalanceThreshold } : {}),
       ...(Array.isArray(candidate.bySession) ? { bySession: candidate.bySession } : {}),
