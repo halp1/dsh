@@ -12,6 +12,7 @@
 
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -20,7 +21,19 @@ export const name = 'wakatime';
 export const inject = ['fs'];
 
 const VERSION = '0.1.0';
-const PLUGIN_TAG = `dsh dsh-plugin-wakatime/${VERSION}`;
+
+/** Version of the running dsh host, read from the CLI package that launched us. */
+function hostVersion() {
+  try {
+    const require = createRequire(process.argv[1] ?? import.meta.url);
+    return require('@deepseek-ai/dsh/package.json').version ?? 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/** WakaTime reads the editor name from the first `name/version` token. */
+export const PLUGIN_TAG = `Deepseek Harness/${hostVersion()} dsh-plugin-wakatime/${VERSION}`;
 
 /** Same file within this window is not re-sent unless it is a write. */
 export const HEARTBEAT_INTERVAL_MS = 2 * 60_000;

@@ -35,6 +35,13 @@ describe('buildArgs', () => {
   });
 });
 
+describe('plugin tag', () => {
+  it('names the editor Deepseek Harness', () => {
+    const args = buildArgs('/a.js', false, resolveConfig());
+    assert.match(args[args.indexOf('--plugin') + 1], /^Deepseek Harness\/\S+ dsh-plugin-wakatime\/\S+$/);
+  });
+});
+
 describe('isWrite', () => {
   it('classifies the fs tools', () => {
     assert.equal(isWrite({ name: 'read' }), false);
