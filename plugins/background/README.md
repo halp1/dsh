@@ -38,9 +38,10 @@ Type into the field and press **Add**:
 Paths are on the machine running `dsh web`, not the device you are browsing
 from. Supported images: png, jpg/jpeg, webp, gif, avif, svg.
 
-Click a tile to make it the background; **None** turns it off. Hover a tile to
-edit it (name, per-image opacity/blur/fit/position), remove it, or, while
-rotation is on, include or exclude it from the rotation.
+Click a tile to make it the background. **None** turns it off. Controls below
+each tile edit it, remove it, or include or exclude it from rotation.
+Removing an entry asks for confirmation because the library is shared across
+devices. It does not delete the source images.
 
 Rotation is driven by the clock, so every device shows the same image at the
 same time.
@@ -85,6 +86,9 @@ authentication as the rest of dsh:
   same color, so giving each one partial alpha would compound back to opaque.
 - Floating layers (menus, popovers, this settings panel) keep at least 0.9
   opacity so they stay legible.
+- Local images are fetched through the remote UI's authenticated channel and
+  displayed with blob URLs, including thumbnails and CSS backgrounds. Temporary
+  URLs are released when their image is replaced or removed.
 - The library is re-read on window focus and every 30 s.
 
 Devtools: `__dshBackground__.state`, `__dshBackground__.current`,
@@ -94,7 +98,7 @@ Devtools: `__dshBackground__.state`, `__dshBackground__.current`,
 
 ```bash
 pnpm install
-pnpm test     # node --test, no DOM
+pnpm test     # node:test via tsx, with jsdom for browser regressions
 pnpm build    # tsc -b && tsdown → lib/index.js + lib/client.js
 ```
 

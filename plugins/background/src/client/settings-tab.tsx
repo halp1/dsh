@@ -34,6 +34,7 @@ import {
   type Position,
   type RotationOrder,
 } from '../shared/state.ts'
+import { loadImageSource } from './image-source.ts'
 import { fileUrl } from './pool.ts'
 import type { ClientSnapshot, StateClient } from './state-client.ts'
 
@@ -156,54 +157,90 @@ function Tile(props: {
 }) {
   const { entry, snapshot } = props
   const [broken, setBroken] = useState(false)
-  const src = thumbnailUrl(entry, snapshot)
-  useEffect(() => { setBroken(false) }, [src])
+  const [src, setSrc] = useState<string | undefined>()
+  const [removing, setRemoving] = useState(false)
+  const thumbnail = useRef<HTMLDivElement>(null)
+  const candidate = thumbnailUrl(entry, snapshot)
+  useEffect(() => {
+    let active = true
+    let started = false
+    let dispose: (() => void) | undefined
+    let observer: IntersectionObserver | undefined
+    setBroken(false)
+    setSrc(undefined)
+    const load = () => {
+      if (!active || started || candidate === undefined) return
+      started = true
+      void loadImageSource(candidate).then((source) => {
+        if (!active) { source.dispose(); return }
+        dispose = () => source.dispose()
+        setSrc(source.url)
+      }).catch(() => { if (active) setBroken(true) })
+    }
+    if (candidate !== undefined && thumbnail.current !== null && typeof IntersectionObserver !== 'undefined') {
+      // Native img lazy-loading happens too late for a fetch-backed blob.
+      observer = new IntersectionObserver((entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return
+        observer?.disconnect()
+        load()
+      })
+      observer.observe(thumbnail.current)
+    } else {
+      load()
+    }
+    return () => { active = false; observer?.disconnect(); dispose?.() }
+  }, [candidate])
   const folder = entry.kind === 'folder' ? snapshot.info.folders[entry.id] : undefined
   const count = folder !== undefined && 'count' in folder ? folder.count : undefined
-  const failed = broken || src === undefined
+  const failed = broken || candidate === undefined
   const label = entryLabel(entry)
   return (
     <div
       className="dshbg-tile"
-      role="button"
-      tabIndex={0}
-      aria-pressed={props.active}
-      title={entry.source}
       data-active={props.active ? '' : undefined}
       data-excluded={props.rotating && !entry.inRotation ? '' : undefined}
-      onClick={props.onSelect}
-      onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); props.onSelect() } }}
     >
-      <div className="dshbg-thumb">
-        {failed
-          ? <IconWarningOutlineMedium className="dshbg-warn" size={20} />
-          : <img src={src} alt="" loading="lazy" onError={() => setBroken(true)} />}
-        {props.active && <span className="dshbg-check"><IconCheckOutlineMedium size={14} /></span>}
-        {entry.kind === 'folder' && (
-          <span className="dshbg-badge"><IconFolderCloseMedium size={12} />{count ?? '!'}</span>
-        )}
-        <span className="dshbg-actions" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
-          {props.rotating && (
-            <button
-              type="button"
-              className="dshbg-action"
-              data-on={entry.inRotation ? '' : undefined}
-              title={entry.inRotation ? 'In rotation (click to exclude)' : 'Excluded from rotation (click to include)'}
-              aria-label="Toggle rotation"
-              onClick={props.onToggleRotation}
-            >
-              <IconRefreshOutlineMedium size={14} />
-            </button>
+      <button type="button" className="dshbg-select" aria-pressed={props.active} title={entry.source} onClick={props.onSelect}>
+        <div className="dshbg-thumb" ref={thumbnail}>
+          {failed
+            ? <IconWarningOutlineMedium className="dshbg-warn" size={20} />
+            : src !== undefined && <img src={src} alt="" loading="lazy" onError={() => setBroken(true)} />}
+          {props.active && <span className="dshbg-check"><IconCheckOutlineMedium size={14} /></span>}
+          {entry.kind === 'folder' && (
+            <span className="dshbg-badge"><IconFolderCloseMedium size={12} />{count ?? '!'}</span>
           )}
-          <button type="button" className="dshbg-action" data-on={props.editing ? '' : undefined} title="Edit" aria-label="Edit" onClick={props.onEdit}>
-            <IconEditOutlineMedium size={14} />
+        </div>
+        <span className="dshbg-label">{label}</span>
+      </button>
+      <div className="dshbg-actions">
+        {props.rotating && (
+          <button
+            type="button"
+            className="dshbg-action"
+            data-on={entry.inRotation ? '' : undefined}
+            title={entry.inRotation ? 'In rotation (click to exclude)' : 'Excluded from rotation (click to include)'}
+            aria-label="Toggle rotation"
+            onClick={props.onToggleRotation}
+          >
+            <IconRefreshOutlineMedium size={14} />
           </button>
-          <button type="button" className="dshbg-action" title="Remove" aria-label="Remove" onClick={props.onRemove}>
-            <IconTrashOutlineMedium size={14} />
-          </button>
-        </span>
+        )}
+        <button type="button" className="dshbg-action" data-on={props.editing ? '' : undefined} title="Edit" aria-label="Edit" onClick={props.onEdit}>
+          <IconEditOutlineMedium size={14} />
+        </button>
+        <button type="button" className="dshbg-action" title="Remove" aria-label={`Remove ${label}`} aria-expanded={removing} onClick={() => setRemoving(!removing)}>
+          <IconTrashOutlineMedium size={14} />
+        </button>
       </div>
-      <span className="dshbg-label">{label}</span>
+      {removing && (
+        <div className="dshbg-remove">
+          <p className="dshbg-hint">Remove from all devices?</p>
+          <div className="dshbg-inline">
+            <Button type="button" size="sm" aria-label={`Confirm removal of ${label}`} onClick={props.onRemove}>Remove</Button>
+            <Button type="button" variant="ghost" size="sm" onClick={() => setRemoving(false)}>Cancel</Button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

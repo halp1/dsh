@@ -6,6 +6,7 @@
  * @module
  */
 import type { Appearance, Fit, Position } from '../shared/state.ts'
+import { loadImageSource, type ImageLoader, type ImageSource } from './image-source.ts'
 import type { PoolItem } from './pool.ts'
 import { TINT_TOKEN } from './tokens.ts'
 
@@ -55,16 +56,19 @@ const defaultPreload: Preloader = (url) => new Promise((resolve) => {
 export class Stage {
   private readonly doc: Document
   private readonly preload: Preloader
+  private readonly loadImage: ImageLoader
   private root: HTMLDivElement | undefined
   private layers: HTMLDivElement[] = []
+  private sources: (ImageSource | undefined)[] = []
   private front = 0
   private token = 0
   /** The item currently painted, if any. */
   current: PoolItem | undefined
 
-  constructor(doc: Document, preload: Preloader = defaultPreload) {
+  constructor(doc: Document, preload: Preloader = defaultPreload, loadImage: ImageLoader = loadImageSource) {
     this.doc = doc
     this.preload = preload
+    this.loadImage = loadImage
   }
 
   private mount(): HTMLDivElement[] {
@@ -96,13 +100,25 @@ export class Stage {
    */
   async show(item: PoolItem): Promise<boolean> {
     const token = ++this.token
-    const ok = await this.preload(item.url)
-    if (token !== this.token) return ok // superseded by a newer show/clear
-    if (!ok) return false
+    let source: ImageSource | undefined
+    try {
+      source = await this.loadImage(item.url)
+      const ok = await this.preload(source.url)
+      if (!ok || token !== this.token) {
+        source.dispose()
+        return false
+      }
+    } catch {
+      source?.dispose()
+      return false
+    }
     const layers = this.mount()
-    const back = layers[1 - this.front]!
+    const backIndex = 1 - this.front
+    const back = layers[backIndex]!
     const front = layers[this.front]!
-    back.style.backgroundImage = cssUrl(item.url)
+    this.sources[backIndex]?.dispose()
+    this.sources[backIndex] = source
+    back.style.backgroundImage = cssUrl(source.url)
     Object.assign(back.style, layerStyle(item.appearance))
     back.style.opacity = '1'
     front.style.opacity = '0'
@@ -127,6 +143,8 @@ export class Stage {
     this.root?.remove()
     this.root = undefined
     this.layers = []
+    for (const source of this.sources) source?.dispose()
+    this.sources = []
     this.current = undefined
   }
 }
