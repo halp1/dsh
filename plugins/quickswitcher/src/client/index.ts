@@ -112,12 +112,10 @@ export function apply(ctx: Context): void {
       return result
     },
     openSession: (sessionId) => { uiWorkspace.openSession(sessionId) },
-    openWorkspace: (workspaceId) => {
-      // uiWorkspace reports a refused creation through its own notice.
-      uiWorkspace.openWorkspace(workspaceId).catch((error: unknown) => {
-        console.warn('[quickswitcher] could not open workspace:', error)
-      })
-    },
+    // The sidebar's workspace pick: open the workspace's New Session (reusing
+    // its blank, keeping any unsent draft). uiWorkspace reports failures
+    // through its own notice.
+    openWorkspace: (workspaceId) => { uiWorkspace.startSession(workspaceId, { clearPreviousDraft: false }) },
   }
 
   slots.inject('shell.overlay', () => slots.register({

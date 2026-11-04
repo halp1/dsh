@@ -129,7 +129,8 @@ export interface WorkspacesLike {
 /** The `ctx.uiWorkspace` slice this plugin uses: the sidebar's own navigation. */
 export interface UiWorkspaceLike {
   openSession(sessionId: string): void
-  openWorkspace(workspaceId: string): Promise<void>
+  /** New Session in a workspace, the sidebar's workspace-pick action. */
+  startSession(workspaceId: string, options: { clearPreviousDraft: boolean }): void
 }
 
 /** The `ctx.slots` slice this plugin uses. */
