@@ -9,7 +9,7 @@
     ".": "./src/index.js",
     "./package.json": "./package.json"
   },
-  "files": ["src", "cordis.patch.yml", "README.md"],
+  "files": ["src", "assets", "cordis.patch.yml", "README.md"],
   "dsh": {
     "bundle": { "patch": "./cordis.patch.yml" },
     "compatibility": {

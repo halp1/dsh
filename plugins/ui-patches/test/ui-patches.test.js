@@ -1,17 +1,42 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { apply } from '../src/index.js';
+import { apply, FIRA_CODE_PATH } from '../src/index.js';
 
-function indexRows(config) {
+function load(config) {
   const table = [];
+  const routes = new Map();
   apply({
     on(event, listener) {
       assert.equal(event, 'webserver/index-inject');
       listener(table);
     },
+    effect(start) {
+      start();
+    },
+    webServer: {
+      register(route) {
+        routes.set(route.path, route);
+      },
+    },
   }, config);
-  return table;
+  return { table, routes };
+}
+
+const indexRows = (config) => load(config).table;
+
+async function request(route, method) {
+  const headers = {};
+  let body;
+  await new Promise((resolve) => {
+    const res = {
+      statusCode: 0,
+      setHeader: (key, value) => { headers[key] = value; },
+      end: (chunk) => { body = chunk; resolve(); },
+    };
+    route.handler({ method }, res);
+  });
+  return { headers, body };
 }
 
 test('pricing stays hidden on local, remote, and mini shells without hiding other dock controls', () => {
@@ -64,7 +89,30 @@ test('pricing stays hidden on local, remote, and mini shells without hiding othe
   }
 });
 
-test('the shared patch can be disabled and rejects an invalid switch', () => {
-  assert.deepEqual(indexRows({ hideComposerPricing: false }), []);
-  assert.throws(() => indexRows({ hideComposerPricing: 'false' }), TypeError);
+test('Fira Code is served by the host and only replaces the default code stack', async () => {
+  const { table, routes } = load();
+  const css = table.map((row) => row.text).join('');
+  assert.match(css, new RegExp(`url\\("${FIRA_CODE_PATH}"\\)`));
+  // The user's Settings > Code font override must keep precedence.
+  assert.match(css, /--dsh-font-family-code-default:\s*"Fira Code"/);
+  assert.doesNotMatch(css, /--(dsh|ds)-font-family-code:/);
+
+  const route = routes.get(FIRA_CODE_PATH);
+  const get = await request(route, 'GET');
+  assert.equal(get.headers['content-type'], 'font/woff2');
+  assert.equal(get.body.subarray(0, 4).toString('latin1'), 'wOF2');
+  assert.equal(get.headers['content-length'], get.body.length);
+  assert.equal((await request(route, 'HEAD')).body, undefined);
+  assert.equal((await request(route, 'POST')).headers.allow, 'GET, HEAD');
+});
+
+test('each patch can be disabled independently and rejects an invalid switch', () => {
+  const pricingOnly = load({ firaCode: false });
+  assert.equal(pricingOnly.routes.size, 0);
+  assert.doesNotMatch(pricingOnly.table[0].text, /Fira Code/);
+  assert.doesNotMatch(indexRows({ hideComposerPricing: false })[0].text, /billing-live-cost/);
+  assert.deepEqual(load({ hideComposerPricing: false, firaCode: false }), { table: [], routes: new Map() });
+  for (const config of [{ hideComposerPricing: 'false' }, { firaCode: 1 }]) {
+    assert.throws(() => indexRows(config), TypeError);
+  }
 });
