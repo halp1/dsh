@@ -3,7 +3,7 @@
  * @module
  */
 import type { ContentHit, SessionList, SessionRow, WorkspaceList, WorkspaceRow } from './host.ts'
-import { fuzzyMatch, mergeRanges, tokenize, type Range } from './match.ts'
+import { fuzzyMatch, mergeRanges, substringMatch, tokenize, type Range } from './match.ts'
 
 /** A session row. */
 export interface SessionItem {
@@ -214,10 +214,19 @@ export function buildSections(input: BuildInput): Section[] {
   const shownSessions = sessionHits.slice(0, SESSION_CAP).map(hit => hit.item)
 
   const workspaceHits: { item: WorkspaceItem, score: number, index: number }[] = []
+  // Workspaces match by name only, and only on unbroken text: "cs" lists
+  // workspaces whose name contains "cs", never ones whose path or scattered
+  // letters happen to fit.
   input.workspaces.items.forEach((workspace, index) => {
-    const hit = matchFields(tokens, workspace.title, displayPath(workspace.path))
-    if (hit === null) return
-    workspaceHits.push({ item: workspaceItem(workspace, hit.primaryRanges, hit.secondaryRanges), score: hit.score, index })
+    let score = 0
+    const ranges: Range[] = []
+    for (const token of tokens) {
+      const hit = substringMatch(token, workspace.title)
+      if (hit === null) return
+      score += hit.score
+      ranges.push(...hit.ranges)
+    }
+    workspaceHits.push({ item: workspaceItem(workspace, mergeRanges(ranges)), score, index })
   })
   // Ties keep the host's manual workspace order.
   workspaceHits.sort((a, b) => (a.score !== b.score ? b.score - a.score : a.index - b.index))

@@ -72,6 +72,24 @@ test('query: workspaces lead, every token must match title or workspace', () => 
   assert.deepEqual(query('qqq'), [])
 })
 
+test('workspaces match only an unbroken piece of their name, never the path or scattered letters', () => {
+  const base = fixture()
+  base.workspaces.items.push(
+    { workspaceId: 'cs', title: 'cs173', path: '/Users/me/school/cs173', sessionIds: [] },
+    { workspaceId: 'pics', title: 'Pics', path: '/Users/me/pics', sessionIds: [] },
+    { workspaceId: 'scatter', title: 'claude-sonnet', path: '/Users/me/cs/claude', sessionIds: [] },
+  )
+  const workspaces = q => buildSections({ ...base, query: q, recent: [] }).find(s => s.key === 'workspaces')
+  // Word-start first, then mid-word ("docs", "Pics") in sidebar order; scattered c..s and path-only hits never show.
+  assert.deepEqual(ids(workspaces('cs')), ['cs', 'w2', 'pics'])
+  assert.deepEqual(workspaces('CS1').items[0].titleRanges, [[0, 3]])
+  // "code" is only in paths.
+  assert.equal(workspaces('code'), undefined)
+  // Every token must be in the name.
+  assert.deepEqual(ids(workspaces('cs 173')), ['cs'])
+  assert.equal(workspaces('cs web'), undefined)
+})
+
 test('messages: only switchable sessions not already listed, in host order', () => {
   const sections = buildSections({
     ...fixture(),

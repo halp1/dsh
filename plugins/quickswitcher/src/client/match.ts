@@ -59,6 +59,18 @@ export function fuzzyMatch(query: string, text: string): Match | null {
   return scattered !== null && scattered.score > literal.score ? scattered : literal
 }
 
+/**
+ * Match only an unbroken, case-insensitive occurrence of the query.
+ * @param query - what the user typed; surrounding whitespace is ignored.
+ * @param text - candidate text.
+ * @returns the score and highlight range, or null when the text does not contain the query.
+ */
+export function substringMatch(query: string, text: string): Match | null {
+  const needle = query.trim().toLowerCase()
+  if (needle === '') return { score: 0, ranges: [] }
+  return literalMatch(needle, text, lowerKeepingLength(text))
+}
+
 /** Score one literal occurrence: the best one at a word start, else the first. */
 function literalMatch(needle: string, text: string, hay: string): Match | null {
   let first = -1
