@@ -42,6 +42,16 @@ export interface ContentSearch {
 const IDLE: SearchSnapshot = { query: '', status: 'idle', hits: [] }
 
 /**
+ * Whether a failure means the deployment has full-text search switched off
+ * (`session-query-sqlite` with `openAt: never`). The Session Controller folds
+ * the provider's `SESSION_QUERY_SEARCH_DISABLED` into a generic gateway error,
+ * so the provider's message is the only signal that survives.
+ */
+export function isDisabled(message: string): boolean {
+  return /SESSION_QUERY_SEARCH_DISABLED|search is disabled/i.test(message)
+}
+
+/**
  * Create a search controller.
  * @param options - the host call and timing.
  * @returns the controller.
@@ -56,6 +66,8 @@ export function createContentSearch(options: ContentSearchOptions): ContentSearc
   let timer: unknown
   let inflight: AbortController | undefined
   let disposed = false
+  /** The host reported content search switched off; stop asking. */
+  let unavailable = false
 
   const set = (next: SearchSnapshot): void => {
     snapshot = next
@@ -76,7 +88,10 @@ export function createContentSearch(options: ContentSearchOptions): ContentSearc
     try {
       const result = await options.search(query, controller.signal)
       if (result.ok) next = { query, status: 'done', hits: result.value.items }
-      else {
+      else if (isDisabled(result.error.message)) {
+        unavailable = true
+        next = IDLE
+      } else {
         options.onError?.(new Error(result.error.message))
         next = { query, status: 'error', hits: [] }
       }
@@ -92,7 +107,7 @@ export function createContentSearch(options: ContentSearchOptions): ContentSearc
 
   return {
     update(raw) {
-      if (disposed) return
+      if (disposed || unavailable) return
       const query = raw.trim()
       if (query === snapshot.query && snapshot.status !== 'idle') return
       stop()

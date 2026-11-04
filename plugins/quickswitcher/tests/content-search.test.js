@@ -71,6 +71,19 @@ test('short queries go idle without a request, failures land in error', async ()
   assert.equal(h.errors.length, 2)
 })
 
+test('a deployment with search switched off goes quiet: idle, no warning, no further requests', async () => {
+  const h = harness()
+  h.search.update('first')
+  h.flushTimers()
+  h.calls[0].resolve({ ok: false, error: { message: 'session search failed: SessionQueryError: session search is disabled: openAt "never"' } })
+  await h.tick()
+  assert.deepEqual(h.search.getSnapshot(), { query: '', status: 'idle', hits: [] })
+  assert.equal(h.errors.length, 0)
+  h.search.update('second')
+  assert.equal(h.timers.size, 0)
+  assert.equal(h.calls.length, 1)
+})
+
 test('dispose cancels the timer and the request in flight', async () => {
   const h = harness()
   h.search.update('one')

@@ -16,6 +16,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionsLike, ShortcutsLike, SlotsLike, UiWorkspaceLike, WorkspacesLike } from './host.ts'
 import { mainSessionId } from './host.ts'
+import { isDisabled } from './content-search.ts'
 import { createRecent, type RecentStorage } from './recent.ts'
 import { createSwitcherStore, type SwitcherStore } from './state.ts'
 import { injectStyles } from './styles.ts'
@@ -95,12 +96,21 @@ export function apply(ctx: Context): void {
     })
   }, 'quickswitcher: recent sessions')
 
+  // A deployment with full-text search off answers every query with the same
+  // failure; after the first one, the switcher stops asking until reload.
+  let searchDisabled = false
+
   const deps: SwitcherDeps = {
     store,
     sessions: sessions.list,
     workspaces: workspaces.list,
     recent: () => recent.list(),
-    search: (query, signal) => sessions.search(query, signal),
+    search: async (query, signal) => {
+      if (searchDisabled) return { ok: false, error: { message: 'session search is disabled' } }
+      const result = await sessions.search(query, signal)
+      if (!result.ok && isDisabled(result.error.message)) searchDisabled = true
+      return result
+    },
     openSession: (sessionId) => { uiWorkspace.openSession(sessionId) },
     openWorkspace: (workspaceId) => {
       // uiWorkspace reports a refused creation through its own notice.
