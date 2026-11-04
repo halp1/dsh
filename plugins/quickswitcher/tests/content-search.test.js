@@ -48,6 +48,18 @@ test('a newer query aborts the old request and its late answer is dropped', asyn
   await h.tick()
   assert.equal(h.search.getSnapshot().query, 'beta')
   assert.deepEqual(h.search.getSnapshot().hits.map(x => x.sessionId), ['b'])
+  // The host answers an aborted call with a failed result; that is not an error.
+  h.search.update('gamma')
+  h.flushTimers()
+  h.search.update('delta')
+  h.calls[2].resolve({ ok: false, error: { message: 'Remote invocation "session/search" was aborted' } })
+  await h.tick()
+  assert.equal(h.errors.length, 0)
+  h.flushTimers()
+  h.calls[3].resolve(hits('d'))
+  await h.tick()
+  assert.equal(h.search.getSnapshot().query, 'delta')
+  assert.deepEqual(h.search.getSnapshot().hits.map(x => x.sessionId), ['d'])
 })
 
 test('short queries go idle without a request, failures land in error', async () => {

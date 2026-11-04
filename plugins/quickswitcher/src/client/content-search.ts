@@ -87,6 +87,8 @@ export function createContentSearch(options: ContentSearchOptions): ContentSearc
     let next: SearchSnapshot
     try {
       const result = await options.search(query, controller.signal)
+      // The host reports a cancelled call as a failed result, not a throw.
+      if (controller.signal.aborted) return
       if (result.ok) next = { query, status: 'done', hits: result.value.items }
       else if (isDisabled(result.error.message)) {
         unavailable = true
