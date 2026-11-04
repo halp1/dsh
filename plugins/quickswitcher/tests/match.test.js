@@ -11,6 +11,9 @@ test('accepts in-order subsequences case-insensitively and rejects the rest', ()
     ['zz', 'Fix login bug', false],
     ['toolong', 'tool', false],
     ['', 'anything', true],
+    // Letters scattered through word middles are noise, not a match.
+    ['proof', 'Suppress OTP Notification', false],
+    ['proof', 'Replace proxy with Cloudflare', false],
   ]) {
     assert.equal(fuzzyMatch(query, text) !== null, ok, `${query} in ${text}`)
   }
@@ -30,6 +33,8 @@ test('prefers word-start occurrences without stranding later characters', () => 
   assert.deepEqual(fuzzyMatch('sw', 'dsh switcher')?.ranges, [[4, 6]])
   // Jumping to the later boundary "b" would leave no room for "c": stay put.
   assert.deepEqual(fuzzyMatch('abc', 'abxbc')?.ranges, [[0, 2], [4, 5]])
+  // A literal word-start occurrence wins over an earlier scattered alignment.
+  assert.deepEqual(fuzzyMatch('proof', 'Problem set part 3b proof')?.ranges, [[20, 25]])
   // Positions index the original text even when lowercasing changes length.
   assert.deepEqual(fuzzyMatch('x', '\u0130x')?.ranges, [[1, 2]])
 })

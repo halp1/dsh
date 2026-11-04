@@ -27,6 +27,8 @@ const BONUS_ACRONYM = 2
 const BONUS_CONSECUTIVE = 5
 const PENALTY_GAP = 0.25
 const PENALTY_GAP_MAX = 3
+/** Runs of matched characters allowed to start in the middle of a word. */
+const MAX_WEAK_RUNS = 1
 
 /** Whether position `index` of `text` begins a word. */
 function isBoundary(text: string, index: number): boolean {
@@ -49,7 +51,26 @@ export function fuzzyMatch(query: string, text: string): Match | null {
   if (needle === '') return { score: 0, ranges: [] }
   const hay = lowerKeepingLength(text)
   if (needle.length > hay.length) return null
+  // A literal occurrence, preferably at a word start, beats any alignment the
+  // greedy scan can find: "proof" in "part 3b proof" should light up "proof".
+  const literal = literalMatch(needle, text, hay)
+  const scattered = scatteredMatch(needle, text, hay)
+  if (literal === null) return scattered
+  return scattered !== null && scattered.score > literal.score ? scattered : literal
+}
 
+/** Score one literal occurrence: the best one at a word start, else the first. */
+function literalMatch(needle: string, text: string, hay: string): Match | null {
+  let first = -1
+  for (let at = hay.indexOf(needle); at !== -1; at = hay.indexOf(needle, at + 1)) {
+    if (first === -1) first = at
+    if (isBoundary(text, at)) return scorePositions(text, hay, Array.from(needle, (_, i) => at + i))
+  }
+  return first === -1 ? null : scorePositions(text, hay, Array.from(needle, (_, i) => first + i))
+}
+
+/** Greedy in-order alignment that prefers word starts. */
+function scatteredMatch(needle: string, text: string, hay: string): Match | null {
   // latest[q]: the last index where needle[q] can sit with the rest of the
   // query still fitting after it. Bounds every forward jump below.
   const latest = new Array<number>(needle.length)
@@ -85,7 +106,21 @@ export function fuzzyMatch(query: string, text: string): Match | null {
     positions.push(chosen)
     from = chosen + 1
   }
+  // Letters scattered through the middle of words read as noise ("proof" in
+  // "Suppress OTP Notification"). One mid-word run is allowed, which keeps
+  // abbreviations like "qs" for "quickswitcher" working.
+  let weakRuns = 0
+  for (let i = 0; i < positions.length; i += 1) {
+    const pos = positions[i] as number
+    const runStart = i === 0 || pos !== (positions[i - 1] as number) + 1
+    if (runStart && !isBoundary(text, pos)) weakRuns += 1
+  }
+  if (weakRuns > MAX_WEAK_RUNS) return null
+  return scorePositions(text, hay, positions)
+}
 
+/** Score an alignment and collect its highlight ranges. */
+function scorePositions(text: string, hay: string, positions: readonly number[]): Match {
   let score = 0
   const ranges: [number, number][] = []
   for (let i = 0; i < positions.length; i += 1) {
