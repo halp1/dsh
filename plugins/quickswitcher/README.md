@@ -5,9 +5,12 @@ DeepSeek Harness Web GUI to jump to a session or workspace.
 
 - With an empty query you get the sessions you opened most recently, then
   every workspace. Cmd+K then Enter takes you back to the previous session.
-- Typing fuzzy-matches session titles, the workspace a session belongs to,
-  and workspace names and paths. Space-separated words must all match, so
-  `web login` finds the login session in the webapp workspace.
+- Typing fuzzy-matches session titles and the workspace a session belongs
+  to. Space-separated words must all match, so `web login` finds the login
+  session in the webapp workspace.
+- Workspaces match only when their name contains what you typed as an
+  unbroken piece (`cs` finds `cs173` and `docs`, not `claude-sonnet`).
+  Paths are not searched.
 - After a short pause, a **Messages** section lists sessions whose messages
   contain the query. This uses the same host index as sidebar search, which
   the Web app ships switched off. To turn it on, add this to the profile's
