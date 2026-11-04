@@ -206,7 +206,7 @@ function Dialog({ store, sessions, workspaces, recent, search, openSession, open
             </div>
           )
         })}
-        {flat.length === 0 && !searching && query.trim() !== '' && (
+        {flat.length === 0 && query.trim() !== '' && (
           <div className="dshqs-empty" role="presentation">No matches</div>
         )}
       </div>
