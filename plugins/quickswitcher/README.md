@@ -9,7 +9,18 @@ DeepSeek Harness Web GUI to jump to a session or workspace.
   and workspace names and paths. Space-separated words must all match, so
   `web login` finds the login session in the webapp workspace.
 - After a short pause, a **Messages** section lists sessions whose messages
-  contain the query. This uses the same host index as sidebar search.
+  contain the query. This uses the same host index as sidebar search, which
+  the Web app ships switched off. To turn it on, add this to the profile's
+  `cordis.patch.yml`:
+
+  ```yaml
+  - id: session-query-sqlite
+    config:
+      openAt: first-search
+  ```
+
+  While it is off, the switcher stops asking after the first refusal and
+  shows no Messages section.
 
 | Key | Action |
 | --- | --- |
