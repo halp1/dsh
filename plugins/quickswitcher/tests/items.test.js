@@ -48,26 +48,28 @@ test('empty query: recently opened first, then by last change, excluding non-swi
   assert.equal(buildSections({ ...many, query: '', recent: [] })[0].items.length, RECENT_CAP)
 })
 
-test('query: every token must match title or workspace, title matches outrank workspace matches', () => {
+test('query: workspaces lead, every token must match title or workspace', () => {
   const base = fixture()
+  const query = (q, recent = []) => buildSections({ ...base, query: q, recent })
+  const section = (sections, key) => sections.find(s => s.key === key)
   // "login" hits s1 by title only: the archived "Archived login" stays out.
-  assert.deepEqual(ids(buildSections({ ...base, query: 'login', recent: [] })[0]), ['s1'])
-  // "web" matches s1 and s2 through their workspace, and the webapp workspace itself.
-  const web = buildSections({ ...base, query: 'web', recent: [] })
-  assert.deepEqual(web.map(s => s.key), ['sessions', 'workspaces'])
-  assert.deepEqual(ids(web[1]), ['w1'])
+  assert.deepEqual(ids(section(query('login'), 'sessions')), ['s1'])
+  // "web" matches the webapp workspace, listed first, then s1 and s2 through it.
+  const web = query('web')
+  assert.deepEqual(web.map(s => s.key), ['workspaces', 'sessions'])
+  assert.deepEqual(ids(section(web, 'workspaces')), ['w1'])
   // Equal scores fall back to recency of opening, then last change.
-  assert.deepEqual(ids(web[0]), ['s2', 's1'])
-  assert.deepEqual(ids(buildSections({ ...base, query: 'web', recent: ['s1'] })[0]), ['s1', 's2'])
+  assert.deepEqual(ids(section(web, 'sessions')), ['s2', 's1'])
+  assert.deepEqual(ids(section(query('web', ['s1']), 'sessions')), ['s1', 's2'])
   // Tokens AND together: "web parser" keeps only s2, with ranges on both fields.
-  const both = buildSections({ ...base, query: 'web parser', recent: [] })[0]
-  assert.deepEqual(ids(both), ['s2'])
-  assert.deepEqual(both.items[0].titleRanges, [[9, 15]])
-  assert.deepEqual(both.items[0].contextRanges, [[0, 3]])
+  const both = query('web parser')
+  assert.equal(section(both, 'workspaces'), undefined)
+  assert.deepEqual(ids(section(both, 'sessions')), ['s2'])
+  assert.deepEqual(section(both, 'sessions').items[0].titleRanges, [[9, 15]])
+  assert.deepEqual(section(both, 'sessions').items[0].contextRanges, [[0, 3]])
   // A workspace-only match still lists the session.
-  const notes = buildSections({ ...base, query: 'doc', recent: [] })
-  assert.deepEqual(ids(notes[0]), ['s3'])
-  assert.deepEqual(buildSections({ ...base, query: 'qqq', recent: [] }), [])
+  assert.deepEqual(ids(section(query('doc'), 'sessions')), ['s3'])
+  assert.deepEqual(query('qqq'), [])
 })
 
 test('messages: only switchable sessions not already listed, in host order', () => {

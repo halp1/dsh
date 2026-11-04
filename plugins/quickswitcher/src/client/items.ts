@@ -174,8 +174,8 @@ function workspaceItem(workspace: WorkspaceRow, titleRanges: readonly Range[] = 
  * Rank everything for one query.
  *
  * An empty query lists where you have been: recently opened sessions, topped
- * up by recently changed ones, then every workspace. A query lists title
- * matches, workspace matches, and (once the host answers) sessions whose
+ * up by recently changed ones, then every workspace. A query lists workspace
+ * matches, session matches, and (once the host answers) sessions whose
  * messages contain it.
  * @param input - snapshots, query, recency, and content hits.
  * @returns non-empty sections in display order.
@@ -222,8 +222,10 @@ export function buildSections(input: BuildInput): Section[] {
   // Ties keep the host's manual workspace order.
   workspaceHits.sort((a, b) => (a.score !== b.score ? b.score - a.score : a.index - b.index))
 
-  push(sections, 'sessions', 'Sessions', shownSessions)
+  // Workspaces lead: a workspace name is the more deliberate target, and its
+  // sessions would otherwise bury it ("cs1" lists every cs173 session).
   push(sections, 'workspaces', 'Workspaces', workspaceHits.slice(0, WORKSPACE_CAP).map(hit => hit.item))
+  push(sections, 'sessions', 'Sessions', shownSessions)
 
   const listed = new Set(shownSessions.map(item => item.sessionId))
   const messages: MessageItem[] = []
