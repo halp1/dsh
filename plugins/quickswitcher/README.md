@@ -28,8 +28,9 @@ DeepSeek Harness Web GUI to jump to a session or workspace.
 | Enter | Open the highlighted row |
 | Escape, or Cmd/Ctrl+K again | Close |
 
-Workspaces open the way a sidebar click does: the workspace's blank session,
-or a new one.
+Matching workspaces list first. Choosing one opens a New Session in it, the
+same as picking the workspace from the sidebar's add menu: its blank session
+is reused, with any unsent draft kept.
 
 ## Install
 
@@ -58,7 +59,7 @@ empty row that makes the host serve the client bundle.
   Subagent rows, blank placeholders, archived sessions, and the open session
   are left out. Content search calls `ctx.sessions.search` 250 ms after you
   stop typing and aborts superseded requests.
-- **Navigation.** `ctx.uiWorkspace.openSession` and `openWorkspace`, the
+- **Navigation.** `ctx.uiWorkspace.openSession` and `startSession`, the
   sidebar's own actions.
 - **Recency.** Every session that becomes the main view is recorded in
   `localStorage` under `dsh.quickswitcher.recent`, per device, capped at 50.
