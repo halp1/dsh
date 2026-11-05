@@ -130,6 +130,12 @@ still opens the dashboard, hover or focus still exposes the quick view, and the
 button keeps a descriptive accessible name and tooltip. Collapsed rail behavior
 is unchanged.
 
+### Opaque hover popup in fork.halp1.6
+
+The sidebar quick view now uses the solid theme surface, without transparent
+background mixing or backdrop blur. Its layout and hover/focus behavior remain
+unchanged.
+
 ## Pulling in upstream changes
 
 ```sh

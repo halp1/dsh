@@ -81,10 +81,8 @@
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--dsw-alias-border-l1) 80%, transparent);
   border-radius: 14px;
-  /* 玻璃质地：半透明底 + 背景模糊 + 顶部高光，与触发卡同一语言。 */
-  background: color-mix(in srgb, var(--dsw-alias-bg-layer-3) 72%, transparent);
-  backdrop-filter: blur(14px) saturate(1.3);
-  -webkit-backdrop-filter: blur(14px) saturate(1.3);
+  /* Opaque theme surface keeps underlying sidebar content from showing through. */
+  background: var(--dsw-alias-bg-layer-3);
   box-shadow: 0 12px 32px rgb(0 0 0 / 0.16), inset 0 1px 0 color-mix(in srgb, var(--dsw-alias-label-primary) 8%, transparent);
   opacity: 0;
   /* visibility 与 opacity 成对：即使外部样式（冲突插件的全局 !important）把
