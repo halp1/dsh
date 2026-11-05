@@ -11,10 +11,16 @@ export const OVERRIDE_SOURCE = 'dsh-plugin-background'
 const STYLE_ID = 'dsh-background-css'
 const ATTR = 'data-dsh-bg'
 
+// Scroll fades come in two kinds. Overlay spans paint a gradient toward the
+// (now transparent) surface color and are hidden outright. Mask fades are
+// classes such as `_fadeBottom` on the scroll container itself, toggled as
+// its content overflows. Hiding those would collapse the container, drop the
+// class, and show it again on the next frame, so only their mask is removed.
 const CSS = `
 html[${ATTR}], html[${ATTR}] body { background: transparent !important; }
 html[${ATTR}] #root { position: relative; z-index: 1; background: transparent !important; }
-html[${ATTR}] #root [class*="_fade"] { display: none !important; }
+html[${ATTR}] #root [class*="_fade "], html[${ATTR}] #root [class$="_fade"] { display: none !important; }
+html[${ATTR}] #root [class*="_fadeTop"], html[${ATTR}] #root [class*="_fadeBottom"] { mask-image: none !important; }
 `
 
 /** The slice of the theme runtime this module uses. */

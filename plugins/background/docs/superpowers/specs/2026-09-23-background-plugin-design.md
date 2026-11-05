@@ -75,7 +75,10 @@ Host packages live at
 - **Root DOM**: `<body><div id="root"></div></body>`; boot style hard-codes
   `body { background-color: #fff | #151517 }` (not a variable) so `body` and
   `#root` must be forced transparent by our CSS. Dark mode =
-  `body[data-ds-dark-theme]`. Chat scroll-fade masks match `[class*="_fade"]`.
+  `body[data-ds-dark-theme]`. Scroll fades are either overlay spans (class
+  ending `_fade`, hidden) or `_fadeTop`/`_fadeBottom` mask classes on the
+  scroll container itself (mask removed, never hidden, because hiding the
+  container drops the class and makes it flicker every frame).
 - **Authenticated HTTP routes** — node `ctx.inject(['connection'], ...)`,
   `ctx.get('connection').fetch.register({ path: '/api/...', methods, requestBody: 'buffered', fetch(req): Promise<Response> })`
   returns a disposer. Runs after the carrier's auth (signed browser cookie), so
