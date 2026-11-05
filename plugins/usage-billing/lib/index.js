@@ -1074,6 +1074,19 @@ const MODEL_CATALOG = [
 		tierSemantics: "latency"
 	},
 	{
+		key: "gemini-3.8-flash-tiered",
+		name: "Gemini 3.8 Flash Tiered",
+		provider: "Google",
+		colorVar: "dsw-static-blue-400",
+		price: {
+			currency: "USD",
+			input: .75,
+			cacheHit: .075,
+			output: 3.75
+		},
+		estimated: true
+	},
+	{
 		key: "grok",
 		name: "Grok 4.6",
 		provider: "xAI",
@@ -1168,6 +1181,19 @@ const MODEL_CATALOG = [
 			cacheHit: .5,
 			output: 25
 		}
+	},
+	{
+		key: "claude-opus-5-thinking-fast",
+		name: "Claude Opus 5 Thinking Fast",
+		provider: "Anthropic",
+		colorVar: "dsw-static-red-500",
+		price: {
+			currency: "USD",
+			input: 10,
+			cacheHit: 1,
+			output: 50
+		},
+		estimated: true
 	},
 	{
 		key: "claude-sonnet-5",
@@ -2621,7 +2647,7 @@ function createUsageAggregator(persistence, options = {}) {
 			id,
 			...cwd === void 0 ? {} : { cwd },
 			...stamp === null ? {} : { stamp },
-			foldVersion: 16,
+			foldVersion: 17,
 			fingerprint: foldFingerprint,
 			fold: serializeFold(fold)
 		};
@@ -2718,7 +2744,7 @@ function createUsageAggregator(persistence, options = {}) {
 			try {
 				const cwd = meta.cwd;
 				const ledgerRow = ledger.get(id);
-				if (ledgerRow !== void 0 && ledgerRow.stamp !== void 0 && stamp !== null && ledgerRow.stamp === stamp && (ledgerRow.foldVersion ?? 1) === 16 && ledgerRow.fingerprint === foldFingerprint) {
+				if (ledgerRow !== void 0 && ledgerRow.stamp !== void 0 && stamp !== null && ledgerRow.stamp === stamp && (ledgerRow.foldVersion ?? 1) === 17 && ledgerRow.fingerprint === foldFingerprint) {
 					const fold = deserializeFold(ledgerRow.fold);
 					folds.push({
 						id,
@@ -2800,7 +2826,7 @@ function createUsageAggregator(persistence, options = {}) {
 			for (const entry of ledger.values()) {
 				if (included.has(entry.id)) continue;
 				try {
-					const stale = (entry.foldVersion ?? 1) < 16 || entry.fingerprint !== foldFingerprint;
+					const stale = (entry.foldVersion ?? 1) < 17 || entry.fingerprint !== foldFingerprint;
 					folds.push({
 						id: entry.id,
 						...entry.cwd === void 0 ? {} : { cwd: entry.cwd },

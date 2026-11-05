@@ -682,7 +682,9 @@ export interface UsageLedgerDocument {
 // bump 全量重折。
 // 16: offline Claude 5.5 and GPT-6 pricing. Rebuild readable historical logs
 // whose usage was previously recorded with zero cost as an unknown model.
-export const FOLD_VERSION = 16
+// 17: estimate Gemini 3.8 Flash Tiered and Opus 5 Thinking Fast variants.
+// Reprice readable logs that the previous catalog still treated as unknown.
+export const FOLD_VERSION = 17
 
 /**
  * 一次性账本迁移：id 唯一，apply 在加载边界对原始文档执行，已应用过的跳过。

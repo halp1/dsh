@@ -98,6 +98,13 @@ describe('recent model pricing without live upstreams', () => {
     ['GPT-6.1 Sol', 'gpt-6.1-sol', 1.28],
     ['gpt-6-luna', 'gpt-6-luna', 0.068],
     ['deepseek-v4.1-flash-free', 'deepseek-v4.1-flash-free', 0],
+    ['gemini-3.8-flash-tiered', 'gemini-3.8-flash-tiered', 0.51],
+    ['antigravity/gemini-3.8-flash-tiered', 'gemini-3.8-flash-tiered', 0.51],
+    ['Gemini 3.8 Flash Tiered', 'gemini-3.8-flash-tiered', 0.51],
+    ['claude-opus-5', 'claude-opus-5', 3.4],
+    ['claude-opus-5-thinking-fast', 'claude-opus-5-thinking-fast', 6.8],
+    ['anthropic/claude-opus-5-thinking-fast', 'claude-opus-5-thinking-fast', 6.8],
+    ['Claude Opus 5 Thinking Fast', 'claude-opus-5-thinking-fast', 6.8],
   ])('prices cached usage for %s offline without merging generations', (id, key, usd) => {
     applyLivePricing({ source: 'builtin' })
     const fold = foldSession([
@@ -114,10 +121,14 @@ describe('recent model pricing without live upstreams', () => {
     expect(cnyToUsd(fold.byModel.get(key)?.cost ?? 0)).toBeCloseTo(usd, 10)
   })
 
-  it('rebuilds a readable pre-fix ledger row instead of retaining its zero cost', async () => {
-    const events = [header(1, 'claude-opus-5.5', 'metered-relay'), message(2, 2_000, USAGE)]
+  it.each([
+    ['claude-opus-5-5', 15],
+    ['gemini-3.8-flash-tiered', 16],
+    ['claude-opus-5-thinking-fast', 16],
+  ])('rebuilds a readable pre-fix ledger row for %s instead of retaining its zero cost', async (model, foldVersion) => {
+    const events = [header(1, model, 'metered-relay'), message(2, 2_000, USAGE)]
     const ledger = fakeLedgerStore([{
-      id: 's', stamp: 'unchanged', foldVersion: 15,
+      id: 's', stamp: 'unchanged', foldVersion,
       fingerprint: configFingerprint(new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {}, DEFAULT_SEARCH_CALL_ESTIMATE_CNY),
       fold: legacyFold(),
     }])
@@ -125,7 +136,7 @@ describe('recent model pricing without live upstreams', () => {
     persistence.stampOf = async () => 'unchanged'
     const stats = await createUsageAggregator(persistence, { ledger: ledger.store }).aggregate()
     expect(stats.total.cost).toBeGreaterThan(0)
-    expect(stats.byModel['claude-opus-5-5']?.calls).toBe(1)
+    expect(stats.byModel[model]?.calls).toBe(1)
     expect(stats.unpricedModels).toBeUndefined()
     expect(ledger.current().sessions[0]?.foldVersion).toBe(FOLD_VERSION)
   })

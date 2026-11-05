@@ -104,6 +104,23 @@ Router prices are not discounted a second time by built-in promotional rules.
 The ledger fold version is incremented to recalculate readable historical logs.
 Deleted or unreadable logs retain their previous rows with stale confidence.
 
+### Gateway variants in fork.halp1.4
+
+Two additional gateway IDs now have offline estimates and keep separate catalog
+keys instead of being silently merged into other generations or standard speed:
+
+- `gemini-3.8-flash-tiered`: USD 0.75 input, 0.075 cache read, 3.75 output per
+  million tokens, using the [variant reference](https://kineticrouter.com/models/gemini/gemini-3.8-flash-tiered).
+  These are introductory standard reference rates through December 31, 2026.
+  No time-of-day or assumed Flex discount is applied.
+- `claude-opus-5-thinking-fast`: USD 10 input, 1 cache read, 50 output per
+  million tokens, using [Opus 5 Fast pricing](https://platform.claude.com/docs/en/build-with-claude/fast-mode#pricing).
+  The fast premium is retained rather than using standard Opus 5 pricing.
+
+Both are marked estimated because the exact IDs are gateway-specific and actual
+relay billing can differ. User-configured prices still take precedence. The
+ledger version is bumped again to recalculate readable pre-fix sessions.
+
 ## Pulling in upstream changes
 
 ```sh

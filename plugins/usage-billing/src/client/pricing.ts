@@ -1013,7 +1013,19 @@ export const MODEL_CATALOG: readonly ModelEntry[] = [
     peakHours: GEMINI_PEAK_HOURS,
     tierSemantics: 'latency',
   },
-  // xAI — current Grok family (docs.x.ai 2026-08).
+  // Gateway variant reference checked 2026-11-04:
+  // https://kineticrouter.com/models/gemini/gemini-3.8-flash-tiered
+  // Uses Gemini 3.8 Flash introductory standard rates through 2026-12-31.
+  // Actual gateway charges can differ. Tiered does not imply Flex billing.
+  {
+    key: 'gemini-3.8-flash-tiered',
+    name: 'Gemini 3.8 Flash Tiered',
+    provider: 'Google',
+    colorVar: 'dsw-static-blue-400',
+    price: { currency: 'USD', input: 0.75, cacheHit: 0.075, output: 3.75 },
+    estimated: true,
+  },
+  // xAI: current Grok family (docs.x.ai 2026-08).
   {
     key: 'grok',
     name: 'Grok 4.6',
@@ -1071,6 +1083,17 @@ export const MODEL_CATALOG: readonly ModelEntry[] = [
     provider: 'Anthropic',
     colorVar: 'dsw-static-red-500',
     price: { currency: 'USD', input: 5, cacheHit: 0.5, output: 25 },
+  },
+  // Gateway-specific thinking/fast ID, estimated using the Opus 5 Fast rate.
+  // https://platform.claude.com/docs/en/build-with-claude/fast-mode#pricing
+  // Fast input/output is twice standard Opus 5, with a 10% cache-read rate.
+  {
+    key: 'claude-opus-5-thinking-fast',
+    name: 'Claude Opus 5 Thinking Fast',
+    provider: 'Anthropic',
+    colorVar: 'dsw-static-red-500',
+    price: { currency: 'USD', input: 10, cacheHit: 1, output: 50 },
+    estimated: true,
   },
   {
     key: 'claude-sonnet-5',
