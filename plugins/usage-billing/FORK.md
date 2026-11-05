@@ -88,6 +88,22 @@ resolving without edits.
 `private: true` is set so this fork can never be accidentally `npm publish`ed
 into upstream's namespace.
 
+### Pricing coverage in fork.halp1.3
+
+The offline catalog now includes Claude Opus, Sonnet, and Haiku 5.5, GPT-6 Sol,
+GPT-6.1 Sol, GPT-6 Luna, and the explicitly free DeepSeek V4.1 Flash route.
+Rates use the native provider entries in https://models.dev/api.json sampled on
+2026-11-04. Existing model ID normalization also recognizes dotted, dashed,
+case-varied, and organization-prefixed IDs without merging model generations.
+These are standard-context estimates, consistent with the existing catalog.
+Long-context surcharges and separate cache-write rates are not modeled.
+
+OpenRouter decimal strings and numeric prices are both accepted. Published
+cache-read rates, including zero, take precedence over the fallback estimate.
+Router prices are not discounted a second time by built-in promotional rules.
+The ledger fold version is incremented to recalculate readable historical logs.
+Deleted or unreadable logs retain their previous rows with stale confidence.
+
 ## Pulling in upstream changes
 
 ```sh

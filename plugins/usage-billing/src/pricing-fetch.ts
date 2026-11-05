@@ -106,6 +106,12 @@ const ROUTER_ID_HINTS: Readonly<Record<string, readonly string[]>> = {
   'gpt-5.6-sol': ['gpt-5.6-sol'],
   'gpt-5.6-terra': ['gpt-5.6-terra'],
   'gpt-5.6-luna': ['gpt-5.6-luna'],
+  'gpt-6-sol': ['openai/gpt-6-sol', 'gpt-6-sol'],
+  'gpt-6.1-sol': ['openai/gpt-6.1-sol', 'gpt-6.1-sol'],
+  'gpt-6-luna': ['openai/gpt-6-luna', 'gpt-6-luna'],
+  'claude-opus-5-5': ['anthropic/claude-opus-5.5', 'anthropic/claude-opus-5-5'],
+  'claude-sonnet-5-5': ['anthropic/claude-sonnet-5.5', 'anthropic/claude-sonnet-5-5'],
+  'claude-haiku-5-5': ['anthropic/claude-haiku-5.5', 'anthropic/claude-haiku-5-5'],
   'grok': ['grok-4'],
   'llama': ['llama-4'],
   'kimi': ['kimi-k2'],
@@ -117,6 +123,8 @@ interface RouterModel {
   id: string
   /** Input price per 1M tokens in USD. */
   input: number
+  /** Cache-read price per 1M tokens, when published. */
+  cacheHit?: number
   /** Output price per 1M tokens in USD. */
   output: number
 }
@@ -172,6 +180,13 @@ async function fetchRate(): Promise<number | undefined> {
   return undefined
 }
 
+/** OpenRouter publishes decimal strings in USD per token, including zero. */
+function routerPrice(value: unknown): number | undefined {
+  if (typeof value !== 'number' && (typeof value !== 'string' || value.trim() === '')) return undefined
+  const price = Number(value) * 1_000_000
+  return Number.isFinite(price) && price >= 0 ? price : undefined
+}
+
 /** OpenRouter model rows with usable USD unit prices, or undefined on failure. */
 async function fetchRouterModels(): Promise<readonly RouterModel[] | undefined> {
   const data = await fetchJson(ROUTER_URL)
@@ -186,10 +201,12 @@ async function fetchRouterModels(): Promise<readonly RouterModel[] | undefined> 
     if (item === null || typeof item !== 'object') continue
     const { id, pricing } = item as { id?: unknown; pricing?: unknown }
     if (typeof id !== 'string' || pricing === null || typeof pricing !== 'object') continue
-    const { prompt, completion } = pricing as { prompt?: unknown; completion?: unknown }
-    if (typeof prompt !== 'number' || typeof completion !== 'number') continue
-    if (!Number.isFinite(prompt) || !Number.isFinite(completion)) continue
-    models.push({ id, input: prompt * 1_000_000, output: completion * 1_000_000 })
+    const fields = pricing as { prompt?: unknown; completion?: unknown; input_cache_read?: unknown }
+    const input = routerPrice(fields.prompt)
+    const output = routerPrice(fields.completion)
+    if (input === undefined || output === undefined) continue
+    const cacheHit = routerPrice(fields.input_cache_read)
+    models.push({ id, input, output, ...(cacheHit !== undefined ? { cacheHit } : {}) })
   }
   return models
 }
@@ -210,7 +227,7 @@ function buildPrices(models: readonly RouterModel[]): Record<string, LivePrice> 
   for (const [key, hints] of Object.entries(ROUTER_ID_HINTS)) {
     const hit = matchRouterModel(hints, models)
     if (hit === undefined) continue
-    result[key] = { input: hit.input, cacheHit: hit.input * 0.1, output: hit.output }
+    result[key] = { input: hit.input, cacheHit: hit.cacheHit ?? hit.input * 0.1, output: hit.output }
   }
   return Object.keys(result).length > 0 ? result : undefined
 }

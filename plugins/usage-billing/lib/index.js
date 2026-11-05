@@ -314,8 +314,8 @@ function isBeijingWeekend(timeMs) {
 * compatible and publish RMB prices directly; overseas providers publish USD
 * and convert through the exchange rate at estimate time. Retired models
 * (GPT-4o family, Gemini 2.x, GLM-4.x-lite, older Qwen) are deliberately
-* absent, as are Anthropic Claude models (their native API is not
-* OpenAI-compatible, so the harness cannot drive them directly). DeepSeek
+* absent. Anthropic Claude models are supported through native and
+* compatible provider routes. DeepSeek
 * keys match the harness stats file so real usage prices from the catalog;
 * unknown keys fall back to `other`.
 *
@@ -344,6 +344,18 @@ const MODEL_CATALOG = [
 			}
 		},
 		peakHours: DEEPSEEK_PEAK_HOURS
+	},
+	{
+		key: "deepseek-v4.1-flash-free",
+		name: "DeepSeek V4.1 Flash Free",
+		provider: "DeepSeek",
+		colorVar: "dsw-static-blue-500",
+		price: {
+			currency: "USD",
+			input: 0,
+			cacheHit: 0,
+			output: 0
+		}
 	},
 	{
 		key: "flash-vision-exp",
@@ -988,6 +1000,42 @@ const MODEL_CATALOG = [
 		}
 	},
 	{
+		key: "gpt-6-sol",
+		name: "GPT-6 Sol",
+		provider: "OpenAI",
+		colorVar: "dsw-static-green-500",
+		price: {
+			currency: "USD",
+			input: 2,
+			cacheHit: .2,
+			output: 10
+		}
+	},
+	{
+		key: "gpt-6.1-sol",
+		name: "GPT-6.1 Sol",
+		provider: "OpenAI",
+		colorVar: "dsw-static-green-500",
+		price: {
+			currency: "USD",
+			input: 2,
+			cacheHit: .1,
+			output: 10
+		}
+	},
+	{
+		key: "gpt-6-luna",
+		name: "GPT-6 Luna",
+		provider: "OpenAI",
+		colorVar: "dsw-static-green-400",
+		price: {
+			currency: "USD",
+			input: .1,
+			cacheHit: .01,
+			output: .5
+		}
+	},
+	{
 		key: "gemini-pro",
 		name: "Gemini 3.1 Pro",
 		provider: "Google",
@@ -1131,6 +1179,42 @@ const MODEL_CATALOG = [
 			input: 2,
 			cacheHit: .2,
 			output: 10
+		}
+	},
+	{
+		key: "claude-opus-5-5",
+		name: "Claude Opus 5.5",
+		provider: "Anthropic",
+		colorVar: "dsw-static-red-500",
+		price: {
+			currency: "USD",
+			input: 4,
+			cacheHit: .2,
+			output: 20
+		}
+	},
+	{
+		key: "claude-sonnet-5-5",
+		name: "Claude Sonnet 5.5",
+		provider: "Anthropic",
+		colorVar: "dsw-static-red-400",
+		price: {
+			currency: "USD",
+			input: 2,
+			cacheHit: .1,
+			output: 10
+		}
+	},
+	{
+		key: "claude-haiku-5-5",
+		name: "Claude Haiku 5.5",
+		provider: "Anthropic",
+		colorVar: "dsw-static-red-300",
+		price: {
+			currency: "USD",
+			input: .1,
+			cacheHit: .01,
+			output: .5
 		}
 	},
 	{
@@ -1657,8 +1741,9 @@ function modelOf(key) {
 	})());
 	const live = livePriceOf(resolved);
 	if (live === void 0) return base;
+	const { promo: _promo, ...unpromoted } = base;
 	return {
-		...base,
+		...unpromoted,
 		price: {
 			currency: "USD",
 			input: live.input,
@@ -2536,7 +2621,7 @@ function createUsageAggregator(persistence, options = {}) {
 			id,
 			...cwd === void 0 ? {} : { cwd },
 			...stamp === null ? {} : { stamp },
-			foldVersion: 15,
+			foldVersion: 16,
 			fingerprint: foldFingerprint,
 			fold: serializeFold(fold)
 		};
@@ -2633,7 +2718,7 @@ function createUsageAggregator(persistence, options = {}) {
 			try {
 				const cwd = meta.cwd;
 				const ledgerRow = ledger.get(id);
-				if (ledgerRow !== void 0 && ledgerRow.stamp !== void 0 && stamp !== null && ledgerRow.stamp === stamp && (ledgerRow.foldVersion ?? 1) === 15 && ledgerRow.fingerprint === foldFingerprint) {
+				if (ledgerRow !== void 0 && ledgerRow.stamp !== void 0 && stamp !== null && ledgerRow.stamp === stamp && (ledgerRow.foldVersion ?? 1) === 16 && ledgerRow.fingerprint === foldFingerprint) {
 					const fold = deserializeFold(ledgerRow.fold);
 					folds.push({
 						id,
@@ -2715,7 +2800,7 @@ function createUsageAggregator(persistence, options = {}) {
 			for (const entry of ledger.values()) {
 				if (included.has(entry.id)) continue;
 				try {
-					const stale = (entry.foldVersion ?? 1) < 15 || entry.fingerprint !== foldFingerprint;
+					const stale = (entry.foldVersion ?? 1) < 16 || entry.fingerprint !== foldFingerprint;
 					folds.push({
 						id: entry.id,
 						...entry.cwd === void 0 ? {} : { cwd: entry.cwd },
@@ -4234,6 +4319,12 @@ const ROUTER_ID_HINTS = {
 	"gpt-5.6-sol": ["gpt-5.6-sol"],
 	"gpt-5.6-terra": ["gpt-5.6-terra"],
 	"gpt-5.6-luna": ["gpt-5.6-luna"],
+	"gpt-6-sol": ["openai/gpt-6-sol", "gpt-6-sol"],
+	"gpt-6.1-sol": ["openai/gpt-6.1-sol", "gpt-6.1-sol"],
+	"gpt-6-luna": ["openai/gpt-6-luna", "gpt-6-luna"],
+	"claude-opus-5-5": ["anthropic/claude-opus-5.5", "anthropic/claude-opus-5-5"],
+	"claude-sonnet-5-5": ["anthropic/claude-sonnet-5.5", "anthropic/claude-sonnet-5-5"],
+	"claude-haiku-5-5": ["anthropic/claude-haiku-5.5", "anthropic/claude-haiku-5-5"],
 	"grok": ["grok-4"],
 	"llama": ["llama-4"],
 	"kimi": ["kimi-k2"]
@@ -4288,6 +4379,12 @@ async function fetchRate() {
 		if (value !== void 0 && Number.isFinite(value) && value > 0) return value;
 	}
 }
+/** OpenRouter publishes decimal strings in USD per token, including zero. */
+function routerPrice(value) {
+	if (typeof value !== "number" && (typeof value !== "string" || value.trim() === "")) return void 0;
+	const price = Number(value) * 1e6;
+	return Number.isFinite(price) && price >= 0 ? price : void 0;
+}
 /** OpenRouter model rows with usable USD unit prices, or undefined on failure. */
 async function fetchRouterModels() {
 	const data = await fetchJson(ROUTER_URL);
@@ -4302,13 +4399,16 @@ async function fetchRouterModels() {
 		if (item === null || typeof item !== "object") continue;
 		const { id, pricing } = item;
 		if (typeof id !== "string" || pricing === null || typeof pricing !== "object") continue;
-		const { prompt, completion } = pricing;
-		if (typeof prompt !== "number" || typeof completion !== "number") continue;
-		if (!Number.isFinite(prompt) || !Number.isFinite(completion)) continue;
+		const fields = pricing;
+		const input = routerPrice(fields.prompt);
+		const output = routerPrice(fields.completion);
+		if (input === void 0 || output === void 0) continue;
+		const cacheHit = routerPrice(fields.input_cache_read);
 		models.push({
 			id,
-			input: prompt * 1e6,
-			output: completion * 1e6
+			input,
+			output,
+			...cacheHit !== void 0 ? { cacheHit } : {}
 		});
 	}
 	return models;
@@ -4329,7 +4429,7 @@ function buildPrices(models) {
 		if (hit === void 0) continue;
 		result[key] = {
 			input: hit.input,
-			cacheHit: hit.input * .1,
+			cacheHit: hit.cacheHit ?? hit.input * .1,
 			output: hit.output
 		};
 	}

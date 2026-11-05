@@ -21,6 +21,7 @@ import {
   AGGREGATE_TTL_MS, LEDGER_SAVE_INTERVAL_MS, SESSION_ROW_LIMIT, type UsagePersistence,
 } from '../src/aggregate.ts'
 import { isSubscriptionProviderId } from '../src/subscriptions.ts'
+import { applyLivePricing, cnyToUsd, modelOf, resolveCatalogKey } from '../src/client/pricing.ts'
 
 /** Minimal `request/header` event recording the active model and provider. */
 function header(seq: number, model: string, provider = 'deepseek-official'): SessionEvent {
@@ -84,6 +85,51 @@ function fakeLedgerStore(sessions: UsageLedgerSession[]) {
     current: (): UsageLedgerDocument => document,
   }
 }
+
+describe('recent model pricing without live upstreams', () => {
+  it.each([
+    ['claude-opus-5-5', 'claude-opus-5-5', 2.56],
+    ['claude-opus-5.5', 'claude-opus-5-5', 2.56],
+    ['anthropic/claude-sonnet-5-5', 'claude-sonnet-5-5', 1.28],
+    ['Claude Sonnet 5.5', 'claude-sonnet-5-5', 1.28],
+    ['claude-haiku-5-5', 'claude-haiku-5-5', 0.068],
+    ['gpt-6-sol', 'gpt-6-sol', 1.36],
+    ['openai/gpt-6.1-sol', 'gpt-6.1-sol', 1.28],
+    ['GPT-6.1 Sol', 'gpt-6.1-sol', 1.28],
+    ['gpt-6-luna', 'gpt-6-luna', 0.068],
+    ['deepseek-v4.1-flash-free', 'deepseek-v4.1-flash-free', 0],
+  ])('prices cached usage for %s offline without merging generations', (id, key, usd) => {
+    applyLivePricing({ source: 'builtin' })
+    const fold = foldSession([
+      header(1, id, 'metered-relay'),
+      message(2, Date.UTC(2026, 10, 4), {
+        inputTokens: 100_000, cacheReadTokens: 800_000, outputTokens: 100_000, cacheWriteTokens: 0,
+      }),
+    ], new Set())
+    expect(resolveCatalogKey(id)).toBe(key)
+    expect(modelOf(id).key).toBe(key)
+    expect(fold.unpricedModels.size).toBe(0)
+    expect([...fold.byModel.keys()]).toEqual([key])
+    expect(cnyToUsd(fold.total.cost)).toBeCloseTo(usd, 10)
+    expect(cnyToUsd(fold.byModel.get(key)?.cost ?? 0)).toBeCloseTo(usd, 10)
+  })
+
+  it('rebuilds a readable pre-fix ledger row instead of retaining its zero cost', async () => {
+    const events = [header(1, 'claude-opus-5.5', 'metered-relay'), message(2, 2_000, USAGE)]
+    const ledger = fakeLedgerStore([{
+      id: 's', stamp: 'unchanged', foldVersion: 15,
+      fingerprint: configFingerprint(new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {}, DEFAULT_SEARCH_CALL_ESTIMATE_CNY),
+      fold: legacyFold(),
+    }])
+    const persistence = fakePersistence({ s: events })
+    persistence.stampOf = async () => 'unchanged'
+    const stats = await createUsageAggregator(persistence, { ledger: ledger.store }).aggregate()
+    expect(stats.total.cost).toBeGreaterThan(0)
+    expect(stats.byModel['claude-opus-5-5']?.calls).toBe(1)
+    expect(stats.unpricedModels).toBeUndefined()
+    expect(ledger.current().sessions[0]?.foldVersion).toBe(FOLD_VERSION)
+  })
+})
 
 describe('web search estimate (#15)', () => {
   /** 最小 `web/deepseek-search-llm-request` 事件（provider 落盘的真实形状）。 */

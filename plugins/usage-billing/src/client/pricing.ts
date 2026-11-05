@@ -508,8 +508,8 @@ export interface ModelEntry {
  * compatible and publish RMB prices directly; overseas providers publish USD
  * and convert through the exchange rate at estimate time. Retired models
  * (GPT-4o family, Gemini 2.x, GLM-4.x-lite, older Qwen) are deliberately
- * absent, as are Anthropic Claude models (their native API is not
- * OpenAI-compatible, so the harness cannot drive them directly). DeepSeek
+ * absent. Anthropic Claude models are supported through native and
+ * compatible provider routes. DeepSeek
  * keys match the harness stats file so real usage prices from the catalog;
  * unknown keys fall back to `other`.
  *
@@ -541,6 +541,15 @@ export const MODEL_CATALOG: readonly ModelEntry[] = [
       offPeak: { input: 1, cacheHit: 0.02, output: 4 },
     },
     peakHours: DEEPSEEK_PEAK_HOURS,
+  },
+  // OpenCode's explicitly free route, confirmed in models.dev on 2026-11-04.
+  // Do not alias it to the paid Flash catalog key.
+  {
+    key: 'deepseek-v4.1-flash-free',
+    name: 'DeepSeek V4.1 Flash Free',
+    provider: 'DeepSeek',
+    colorVar: 'dsw-static-blue-500',
+    price: { currency: 'USD', input: 0, cacheHit: 0, output: 0 },
   },
   {
     key: 'flash-vision-exp',
@@ -946,7 +955,30 @@ export const MODEL_CATALOG: readonly ModelEntry[] = [
     colorVar: 'dsw-static-green-500',
     price: { currency: 'USD', input: 0.2, cacheHit: 0.02, output: 1.2 },
   },
-  // Google — Gemini 3.x (ai.google.dev/gemini-api/docs/pricing 2026-08).
+  // Standard-context USD rates from models.dev's openai catalog, 2026-11-04.
+  // Keep these offline so an upstream outage cannot zero out recent usage.
+  {
+    key: 'gpt-6-sol',
+    name: 'GPT-6 Sol',
+    provider: 'OpenAI',
+    colorVar: 'dsw-static-green-500',
+    price: { currency: 'USD', input: 2, cacheHit: 0.2, output: 10 },
+  },
+  {
+    key: 'gpt-6.1-sol',
+    name: 'GPT-6.1 Sol',
+    provider: 'OpenAI',
+    colorVar: 'dsw-static-green-500',
+    price: { currency: 'USD', input: 2, cacheHit: 0.1, output: 10 },
+  },
+  {
+    key: 'gpt-6-luna',
+    name: 'GPT-6 Luna',
+    provider: 'OpenAI',
+    colorVar: 'dsw-static-green-400',
+    price: { currency: 'USD', input: 0.1, cacheHit: 0.01, output: 0.5 },
+  },
+  // Google: Gemini 3.x (ai.google.dev/gemini-api/docs/pricing 2026-08).
   // Google does NOT bill by time of day: Standard is the real-time full
   // price, while the Flex tier prices spare-capacity traffic at exactly -50%
   // (1-15 min latency). The estimator treats Standard as the peak band and
@@ -1046,6 +1078,28 @@ export const MODEL_CATALOG: readonly ModelEntry[] = [
     provider: 'Anthropic',
     colorVar: 'dsw-static-red-400',
     price: { currency: 'USD', input: 2, cacheHit: 0.2, output: 10 },
+  },
+  // Standard-context USD rates from models.dev's anthropic catalog, 2026-11-04.
+  {
+    key: 'claude-opus-5-5',
+    name: 'Claude Opus 5.5',
+    provider: 'Anthropic',
+    colorVar: 'dsw-static-red-500',
+    price: { currency: 'USD', input: 4, cacheHit: 0.2, output: 20 },
+  },
+  {
+    key: 'claude-sonnet-5-5',
+    name: 'Claude Sonnet 5.5',
+    provider: 'Anthropic',
+    colorVar: 'dsw-static-red-400',
+    price: { currency: 'USD', input: 2, cacheHit: 0.1, output: 10 },
+  },
+  {
+    key: 'claude-haiku-5-5',
+    name: 'Claude Haiku 5.5',
+    provider: 'Anthropic',
+    colorVar: 'dsw-static-red-300',
+    price: { currency: 'USD', input: 0.1, cacheHit: 0.01, output: 0.5 },
   },
   {
     key: 'mistral-large-2512',
@@ -1505,7 +1559,9 @@ export function modelOf(key: string): ModelEntry {
   const live = livePriceOf(resolved)
   if (live === undefined) return base
   // 实时价是路由器的美元单价（平档、无时段区分）：整表替换并走汇率换算。
-  return { ...base, price: { currency: 'USD', input: live.input, cacheHit: live.cacheHit, output: live.output } }
+  // Router prices already include current promotions, so do not discount twice.
+  const { promo: _promo, ...unpromoted } = base
+  return { ...unpromoted, price: { currency: 'USD', input: live.input, cacheHit: live.cacheHit, output: live.output } }
 }
 
 /** models.dev 补充条目转为目录条目：USD 直价（走汇率换算），无峰谷分档。 */

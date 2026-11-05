@@ -1,7 +1,7 @@
 {
   "name": "@kenz1117/dsh-ui-usage-billing",
   "description": "Usage billing dashboard for DeepSeek Harness: sidebar cost metrics plus a full dashboard modal, priced from a current multi-provider catalog with real usage aggregated from session logs.",
-  "version": "1.2.6-fork.halp1.2",
+  "version": "1.2.6-fork.halp1.3",
   "keywords": [
     "deepseek-harness",
     "deepseek",
@@ -161,7 +161,10 @@
       "src/client/usage-billing-settings.ts: add persisted display-currency pref (localStorage + CustomEvent), default 'usd'",
       "src/client/UsageBilling.tsx: currency state loads/saves the pref; thread currency into UsageBillingTrigger so the chip is not hardcoded CNY",
       "src/client/live-cost.tsx: LiveCostBar + LiveCostChip follow the shared currency pref instead of hardcoded 'cny'",
-      "src/client/UsageBilling.module.css: amount never shrinks/clips; label yields first; container breakpoints 200/170 -> 230/190 for wider en labels"
+      "src/client/UsageBilling.module.css: amount never shrinks/clips; label yields first; container breakpoints 200/170 -> 230/190 for wider en labels",
+      "src/client/pricing.ts: offline Claude 5.5, GPT-6 Sol/Luna, and free Flash pricing with normalized model IDs",
+      "src/pricing-fetch.ts: accept OpenRouter decimal-string prices and explicit cache-read rates without double-applying promos",
+      "src/aggregate.ts: invalidate pre-fix ledger folds so readable historical sessions are repriced"
     ]
   },
   "private": true

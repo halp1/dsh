@@ -680,7 +680,9 @@ export interface UsageLedgerDocument {
 // （价目页注释 (2) 改写）——pro 目录价由 Flash 价改回 V4 Pro 峰谷刊例，路由分界常量与
 // 显示层覆盖一并移除。v14 及更早的行把 09-14 之后的 pro 按 Flash 价折算（低估数倍），
 // bump 全量重折。
-export const FOLD_VERSION = 15
+// 16: offline Claude 5.5 and GPT-6 pricing. Rebuild readable historical logs
+// whose usage was previously recorded with zero cost as an unknown model.
+export const FOLD_VERSION = 16
 
 /**
  * 一次性账本迁移：id 唯一，apply 在加载边界对原始文档执行，已应用过的跳过。
