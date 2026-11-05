@@ -12,75 +12,23 @@
  * file is served as a fallback, and a missing file answers `{ error }` so the
  * dashboard shows zeros, never fabricated samples.
  */
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Context } from '@deepseek-ai/cordis';
 import type { CredentialProvider } from '@deepseek-ai/dsh-credentials';
-import type { SettingsProvider } from '@deepseek-ai/dsh-settings';
 import { type UsageLedgerStore, type UsagePersistence } from './aggregate.ts';
-import type { CustomBalanceConfig, DeclaredEndpointConfig, SubscriptionPlanConfig } from './pricing-shared.ts';
+import type { UsageBillingConfig } from './config.ts';
 import { type IdentifiedSubscriptionPlan, type SubscriptionKeys } from './subscriptions.ts';
-/**
- * 回环防护守卫：仅接受回环 GET 请求（peer socket 地址 + Host 头同时校验）。
- * 不满足时返回 403 并结束响应；调用方在 handler 顶部调用，返回 false 即已拒绝。
- * @param req - 当前请求。
- * @param res - 当前响应。
- * @returns 是否放行；false = 已拒绝并结束响应。
- */
-export declare function guardLoopback(req: IncomingMessage, res: ServerResponse): boolean;
-/** Plugin configuration. */
-export interface UsageBillingConfig {
-    /** Absolute path to a `.dsh-usage-stats.json` fallback file. */
-    statsPath?: string;
-    /** 统计快照的持久化路径；默认 `~/.dsh/.dsh-usage-stats.json`。
-     *  测试注入临时目录以隔离真实家目录（聚合失败回退与快照落盘都走此路径）。 */
-    snapshotPath?: string;
-    /** 独立持久用量账本的绝对路径；默认 `~/.dsh/.dsh-usage-ledger.json`。
-     *  账本与会话日志解耦，因此永久删除会话不会抹掉已经观测到的用量。 */
-    ledgerPath?: string;
-    /** 余额差对账基准的持久化路径；默认 `~/.dsh/.dsh-usage-reconcile.json`。 */
-    reconcilePath?: string;
-    /** 订阅制（coding / token / agent plan）provider id 列表；默认 kimi-coding、xiaomi-token-plan-cn。 */
-    subscriptionProviders?: string[];
-    /** 订阅套餐额度适配器（kimi / zai / opencode-go）；默认全部内置。 */
-    subscriptionPlans?: readonly SubscriptionPlanConfig[];
-    /** 余额查询用的 DeepSeek 凭据引用（环境变量名）；默认 DEEPSEEK_API_KEY。 */
-    balanceApiKeyEnv?: string;
-    /** 月度预算（人民币元）；设置后随 usage-stats 下发，仪表盘显示预算进度条。 */
-    monthlyBudget?: number;
-    /** 余额不足告警阈值（人民币元）：余额低于此值时仪表盘每天提醒一次；
-        不设置则客户端按默认阈值（50 元）兜底。 */
-    lowBalanceThreshold?: number;
-    /** 自定义 Provider 余额查询（任意 HTTP 端点 + extract 规则，适配 NewApi/LiteLLM 等）。 */
-    customBalances?: readonly CustomBalanceConfig[];
-    /**
-     * 声明端点（declarative endpoints）：为内置表没有的供应商自声明余额/额度接口。
-     * 绑定到某条已配置 provider 的同源地址，`fields` / `windows` 写响应里的取值路径；
-     * 安全边界（origin 绑定、单斜杠 path、只 GET、跨源重定向失败、凭据取自 apiKeyEnv）
-     * 写死在 declarative.ts。缺省空。
-     */
-    declaredEndpoints?: readonly DeclaredEndpointConfig[];
-    /** `usage_stats` 工具注入的组合 base（默认 false：不注入）；与设置命名空间同字段，
-     *  作为用户设置（设置 Tab 开关）的组合兜底。该工具占用每次请求的上下文，coding 场景多在仪表盘查看。 */
-    enableUsageStatsTool?: boolean;
-    /**
-     * 联网搜索请求（`web/deepseek-search-llm-request`，日志只有请求、无用量事件）
-     * 的单次费用估算（人民币元）。这类调用直连官方 api.deepseek.com，开放平台照常
-     * 计费但本地日志无 usage，按次估值计入今日/本月费用；默认 0.02 元/次，设 0 关闭。
-     */
-    searchCallEstimateCny?: number;
-    /**
-     * 历史路由别名（旧 provider 路由名 → 当前路由名）：改过名/删除过的路由，其
-     * 历史用量原会落「未知路由」桶且站点/订阅/官方判定全部失效；配置别名后按
-     * 目标路由归位。例：`{ "deepseek-official": "tencent", "tencent-cloud": "tencent" }`。
-     */
-    routeAliases?: Record<string, string>;
-    /**
-     * 用户自定义模型别名（真实日志 model id → 计费目录键）：目录外的新模型无需
-     * 等发版，配置一条别名即完成识别与计价（值必须是 MODEL_CATALOG 的既有 key，
-     * 如 `{ "hy4-preview": "hunyuan" }`）。聚合折叠与客户端渲染共用同一映射。
-     */
-    modelKeyAliases?: Record<string, string>;
+export { guardLoopback, isLoopbackOrigin, isLoopbackHost, isLoopbackPeer, hostNameOf, normalizeTrustedHosts } from './guard.ts';
+/** 设置服务的读取面：两代宿主运行时都提供 describe（条目键为 profile entry id）。 */
+interface SettingsReader {
+    describe(options?: {
+        redactSecrets?: boolean;
+    }): readonly {
+        ns: string;
+        value: unknown;
+    }[];
 }
+export type { UsageBillingConfig } from './config.ts';
+export { Config } from './config.ts';
 /**
  * Create the atomic file-backed durable-ledger store. The previous complete file
  * is retained as `.bak`; a malformed/missing main file falls back to that backup.
@@ -94,12 +42,14 @@ export declare const inject: string[];
  * @param settings - the settings service (reads the llm-pi-ai namespace).
  * @returns the providers dict; empty when the namespace is unreadable.
  */
-/** 一个 llm-pi-ai provider 路由的读取视图：只取三块——apiKeyEnv（凭据引用）、
- *  baseURL（中转站零配置发现的来源）、displayName（站点显示名）。 */
+/** 一个 llm-pi-ai provider 路由的读取视图：apiKeyEnv（凭据引用）、baseURL（中转站
+ *  零配置发现）、displayName（站点显示名）、hasModels（新版宿主设置页保存的
+ *  models 列表——订阅识别的第二配置信号）。 */
 export interface PiAiProviderRoute {
     apiKeyEnv?: string;
     baseURL?: string;
     displayName?: string;
+    hasModels?: boolean;
 }
 /** 同步读取 provider 路由的 baseURL 视图（中转站零配置发现来源）。
  *  `settings.describe` 是同步调用，聚合器每次折叠取最新站点映射，无需缓存/过期。
@@ -108,17 +58,34 @@ export interface PiAiProviderRoute {
  * @param settings - the settings service (reads the llm-pi-ai namespace).
  * @returns `<route> → { baseURL? }`；命名空间不可读时返回空。
  */
-export declare function readPiAiProviderRoutes(settings: SettingsProvider): Readonly<Record<string, {
+export declare function readPiAiProviderRoutes(settings: SettingsReader): Readonly<Record<string, {
     baseURL?: string;
 }>>;
 /**
-  * 解析订阅适配器需要的 API Key：从 llm-pi-ai 设置的 `providers.<id>.apiKeyEnv`
- * 读引用（如 kimi-coding → KIMI_CODING_API_KEY），再经凭据 seam 解析成实际值。
- * 同时识别出用户配置了 key 的订阅套餐（供面板只显示已识别的）。
+ * 读取宿主 llm 注册表里「已注册 adapter」的 provider id（issue #91）。
+ *
+ * 必须经 `ctx.get('llm')`，**不能**用属性访问 `ctx.llm`：cordis 的服务代理要求
+ * 服务名出现在插件 `inject` 里，否则抛 `cannot get property "llm" without inject`
+ * ——1.4.31 把这个异常吞掉后退化成空集合，结果是「修复发版了但完全不生效」且无任何
+ * 可观察信号（issue #91 follow-up）。本函数把「读不到」与「读到了空集合」都显式
+ * 回报给调用方，让上层能告警而不是静默降级。
+ * @param get - 宿主上下文的 `get(name)` 访问器（cordis 的免 inject 读取口）。
+ * @returns `ids` = 已注册 provider id 集合（读不到时为空集）；
+ *  `reason` = 读取失败或结果不可用的原因；成功时缺省。
+ */
+export declare function readRegisteredProviderIds(get: ((name: string) => unknown) | undefined): {
+    ids: ReadonlySet<string>;
+    reason?: string;
+};
+/**
+ * 解析订阅适配器需要的 API Key：经典形态从 llm-pi-ai 设置的 `providers.<id>.apiKeyEnv`
+ * 读引用（如 kimi-coding → KIMI_CODING_API_KEY）；新版宿主设置页把 key 直接存成
+ * 凭据 refs（路由约定名 `<ROUTE>_API_KEY`，pi-ai 目录 ambient 名补充），显式引用
+ * 解析不到时按约定名找回。同时识别出已配置的订阅套餐（供面板只显示已识别的）。
  * @param settings - the settings service (reads the llm-pi-ai namespace).
  * @param credentials - the credentials service (resolves the env refs).
  */
-export declare function resolveSubscriptionKeys(settings: SettingsProvider, credentials: CredentialProvider): Promise<{
+export declare function resolveSubscriptionKeys(settings: SettingsReader, credentials: CredentialProvider): Promise<{
     keys: SubscriptionKeys;
     identified: IdentifiedSubscriptionPlan[];
 }>;

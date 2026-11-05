@@ -10,7 +10,8 @@
  * Google-style two-band billing is modeled per model: Gemini's Flex tier
  * prices spare-capacity traffic at -50%; DeepSeek splits peak
  * (weekdays 09:00-12:00 / 14:00-18:00 Beijing) at 2x the off-peak rate —
- * weekends (Sat/Sun, Beijing) are charged at the off-peak rate all day.
+ * weekends (Sat/Sun, Beijing) and Chinese statutory holidays are charged at
+ * the off-peak rate all day (see {@link CHINA_HOLIDAYS}).
  * The estimator mixes both bands by a configured peak share ({@link DEFAULT_PEAK_SHARE}).
  *
  * Time-limited launch promos ({@link PricePromo}) never mutate the catalog:
@@ -26,6 +27,8 @@ import type { LivePricing } from '../pricing-shared.ts';
  * live rate arrives the built-in value stays in force.
  */
 export declare const USD_TO_CNY = 6.79;
+/** 内置 EUR→CNY 汇率（实时汇率不可用时的兑底，与 USD_TO_CNY 同口径）。 */
+export declare const EUR_TO_CNY = 7.71;
 /**
  * 注入用户自定义模型别名（node 半区在插件启动时调用一次）。纯内存状态：
  * 聚合折叠与客户端渲染共用同一份（两侧一致性由同一注入点保证）。
@@ -137,6 +140,11 @@ export declare function getRateInfo(): {
     rate: number;
     live: boolean;
 };
+/** 欧元汇率与其是否为实时值（与 {@link getRateInfo} 同形）。 */
+export declare function getEurRateInfo(): {
+    rate: number;
+    live: boolean;
+};
 /** Default share of traffic assumed to fall in the peak band (0..1). */
 export declare const DEFAULT_PEAK_SHARE = 0.5;
 /**
@@ -165,7 +173,7 @@ export declare const FLASH_REPRICE_MS: number;
 /** 计费时段档位：高峰 / 空闲（官方 DeepSeek 刊例价：高峰 = 空闲 × 2）。 */
 export type PriceTierId = 'peak' | 'offPeak';
 /** 成本显示币种：人民币（国内模型直价）/ 美元（国外模型直价或换算显示）。 */
-export type CostCurrency = 'cny' | 'usd';
+export type CostCurrency = 'cny' | 'usd' | 'eur';
 /**
  * 工作日高峰时段判定（北京时间，UTC+8，无夏令时）：09:00–12:00、14:00–18:00。
  * 周末（周六/周日）北京全天为低谷，不调用本函数判定峰/平。
@@ -175,7 +183,9 @@ export declare function isPeakHour(beijingHour: number): boolean;
 /**
  * 由时刻（epoch 毫秒）推断计费时段；时刻未知/非法时按高峰计（保守：未知
  * 时刻不低估成本，与社区 dsh-usage-chart 的 tierAt 语义一致）。
- * 周末（北京时间周六/周日）全天不区分峰谷，统一按低谷价。
+ * 周末（北京时间周六/周日）与中国法定节假日全天不区分峰谷，统一按低谷价
+ * （官方 2026-09-19 口径：调休上班的周末、法定节假日全天均按空闲时段计费；
+ * 调休上班日全部落在周末，故由周末分支覆盖，无需单列）。
  * @param timeMs - Unix epoch 毫秒；null/undefined/NaN 视为未知。
  */
 export declare function tierAt(timeMs: number | null | undefined): PriceTierId;
@@ -184,9 +194,12 @@ export declare function tierAt(timeMs: number | null | undefined): PriceTierId;
  *
  * 下一切换点统一定义为档位真正变化的最近边界：自当前时刻起逐天扫描工作日的
  * 09:00 / 12:00 / 14:00 / 18:00，候选时刻的档位由 {@link tierAt} 判定——
- * 周末（周六/周日）北京全天低谷、没有边界，扫描自然跳过；工作日深夜跨周末
- * 时落到周一 09:00 而非周末伪边界（issue #33）。
- * 最坏情形（周五 18:00 后 → 周一 09:00）约 63h，7 天窗口必然覆盖。
+ * 周末（周六/周日）与法定节假日北京全天低谷、没有边界，扫描自然跳过；工作日
+ * 深夜跨周末时落到周一 09:00 而非周末伪边界（issue #33）。
+ * 最坏情形是「长假 + 相邻周末」：最长连休 8 天（2025-10-01 ~ 10-08 型）时，
+ * 假期前最后一个工作日深夜的下一切换可落在约 9.4 天之后——故扫描窗口取
+ * 10 天。原实现取 7 天（注释记「最坏 63h」），在连休下会扫不到真边界而落进
+ * 兜底伪边界。
  * @param nowMs - 当前时刻（epoch 毫秒）。
  * @returns 当前档位与到下一切换边界的毫秒数。
  */
@@ -201,6 +214,28 @@ export declare function tierCountdown(nowMs: number): {
  * @param leadMs - 提前量（毫秒）。
  */
 export declare function upcomingTierSwitch(nowMs: number, leadMs: number): {
+    entering: PriceTierId;
+    atMs: number;
+} | null;
+/** 计费通道的峰谷窗口：无窗口 / DeepSeek 按量分时 / 智谱 Coding Plan 积分分时。 */
+export type RateChannel = 'none' | 'deepseek-metered' | 'zhipu-coding-plan';
+/**
+ * 由会话当前模型与订阅状态推断峰谷窗口。DeepSeek 目录模型恒为按量分时；
+ * 智谱模型仅在持有 Z.ai Coding Plan（status ok）时适用积分分时——智谱按量价
+ * 全天统一，不涉及峰谷。其余模型（含未收录）返回 none：不显示档位、不提醒，
+ * 峰谷提示严格跟随当前对话实际使用的模型而非全局规则。
+ * @param modelKey - 当前会话最近一轮的计费目录键（归因模型 key）；无轮次时 undefined。
+ * @param hasZhipuPlan - 是否存在状态正常的 Z.ai Coding Plan 订阅。
+ * @returns 命中的峰谷窗口种类。
+ */
+export declare function rateChannelOf(modelKey: string | undefined, hasZhipuPlan: boolean): RateChannel;
+/** 按计费通道的峰谷倒计时：none 返回 null（调用方据此隐藏档位 UI 与切换预告）。 */
+export declare function channelCountdown(nowMs: number, channel: RateChannel): {
+    tier: PriceTierId;
+    nextSwitchInMs: number;
+} | null;
+/** 按计费通道的切换预告：语义同 upcomingTierSwitch，窗口取自通道；none 恒 null。 */
+export declare function channelUpcomingSwitch(nowMs: number, channel: RateChannel, leadMs: number): {
     entering: PriceTierId;
     atMs: number;
 } | null;
@@ -243,12 +278,12 @@ export interface ModelPrice extends PriceBand {
  * （主档与 offPeak）单价按 factor 折扣计价与显示，截止时刻起自动恢复刊例价。
  */
 export interface PricePromo {
-    /** 折扣系数（0.5 = 五折）；仅 (0,1) 区间有效，非法值视为无促销。 */
+    /** 折扣系数（0.5 = 五折，0 = 活动期免费）；仅 [0,1) 区间有效，非法值视为无促销。 */
     factor: number;
     /**
      * 分档折扣覆盖：厂商对不同档位给不同折扣时逐档指定（如 GPT-5.6 Sol 促销为
      * 缓存 0.8 / 输入 0.8 / 输出 2/3）。缺省档位沿用 {@link factor}；单档取值
-     * 仅 (0,1) 区间有效，非法值回落 factor。
+     * 仅 [0,1) 区间有效（0 = 该档活动期免费），非法值回落 factor。
      */
     factors?: Partial<Record<'input' | 'cacheHit' | 'cacheMiss' | 'output', number>>;
     /**
@@ -319,14 +354,17 @@ export interface ModelEntry {
      */
     retired?: boolean;
 }
-export declare const MODEL_CATALOG: readonly ModelEntry[];
 /**
- * 真实 provider model id → 计费目录键（`MODEL_CATALOG[].key`）的映射。未知 id
- * 原样保留并落回 `other`（未知模型不估算费用）。聚合层（aggregate.ts）在折叠时
- * 用同一张表把日志里的 model id 归并为目录键，客户端渲染（`modelOf`）也按它
- * 解析，两侧共用一份映射，避免同一模型两侧不一致导致「未收录」。
+ * 注入内置目录与别名表（两侧各调用一次：宿主 activate、客户端首个 pricing 响应）。
+ * 重复注入整体替换并重建归一化索引。
+ * @param catalog - 内置目录条目（BUILTIN_MODEL_CATALOG 全量）。
+ * @param aliases - 内置别名表（BUILTIN_MODEL_KEY_ALIASES 全量）。
  */
-export declare const MODEL_KEY_ALIASES: Readonly<Record<string, string>>;
+export declare function applyBuiltinCatalog(catalog: readonly ModelEntry[], aliases: Readonly<Record<string, string>>): void;
+/** 内置目录当前快照：未注入为空数组（client 首帧前渲染加载态）。 */
+export declare function modelCatalog(): readonly ModelEntry[];
+/** 内置别名表当前快照：未注入为空对象。 */
+export declare function modelKeyAliases(): Readonly<Record<string, string>>;
 /**
  * 模型 id 归一化：小写、去括号附注（如 `gpt5.6 luna(go)` 只看主体）、再去所有
  * 非字母数字分隔符（空格 / 横杠 / 点 / 下划线）。用于日志里的模型 id 与计费
@@ -344,8 +382,8 @@ export declare function modelOf(key: string): ModelEntry;
  */
 export declare function isPriced(key: string): boolean;
 /**
- * 促销在 nowMs 是否生效：factor 必须落在 (0,1) 区间，截止时刻及之后视为过期；
- * endsAtMs 缺省表示长期活动，在 factor 合法期间持续生效。
+ * 促销在 nowMs 是否生效：factor 必须落在 [0,1) 区间（0 = 活动期免费，issue #86），
+ * 截止时刻及之后视为过期；endsAtMs 缺省表示长期活动，在 factor 合法期间持续生效。
  * 导出供测试：纯函数。
  * @param promo - 待判定的促销窗口。
  * @param nowMs - 判定时刻（epoch ms）。
@@ -412,6 +450,14 @@ export declare function computeCostAt(entry: ModelEntry, buckets: TokenUsageBuck
  *  与计价链路的 `currentRate()` 同口径，避免实时汇率生效时 USD 显示与计价不一致。 */
 export declare function cnyToUsd(cny: number): number;
 /**
+ * 人民币金额换算到展示币种。目录以 CNY/USD 为原生币种，费用统一以
+ * 人民币累计，展示层再按所选币种换算——EUR 与 USD 同一口径，不改变存储与聚合。
+ * @param cny - 人民币金额。
+ * @param currency - 目标展示币种。
+ * @returns 换算后的金额（汇率不可用时原值返回）。
+ */
+export declare function convertFromCny(cny: number, currency: CostCurrency): number;
+/**
  * Format an amount with adaptive precision and the given currency symbol.
  * @param amount - the amount (CNY by default; pass `usd` for dollar display).
  * @param currency - display currency; default `cny`.
@@ -421,7 +467,7 @@ export declare function formatMoney(amount: number, currency?: CostCurrency): st
  * Format a per-1M-token price in its native currency (free when the rate is
  * zero): CNY for domestic models, USD for overseas ones.
  */
-export declare function formatUnitPrice(price: number, currency?: 'CNY' | 'USD'): string;
+export declare function formatUnitPrice(price: number, currency?: 'CNY' | 'USD' | 'EUR'): string;
 /**
  * 把一条「每百万 token」单价从原生币种换算到目标展示币种（按 USD→CNY 汇率）。
  * 汇率缺失/非法时回退原值，避免 0 汇率把价格算没。
@@ -432,6 +478,9 @@ export declare function formatUnitPrice(price: number, currency?: 'CNY' | 'USD')
  * @returns 换算到目标币种的单价；同币种或汇率不可用时原值。
  */
 export declare function convertUnitPrice(price: number, native: 'CNY' | 'USD', target: CostCurrency, rate: number): number;
+/** 本地时区日期戳 `YYYY-MM-DD`（与服务端 aggregate.ts 的 dayStamp 同口径）；
+ *  触发卡/热力图/Token 面板共用一个实现（此前三处各抄一份）。 */
+export declare function localDayStamp(time?: number): string;
 /** Format a large token count with B/M/K suffix. */
 export declare function formatTokens(value: number): string;
 /** Format a percentage. */

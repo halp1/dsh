@@ -1,3 +1,10 @@
+import { applyBuiltinCatalog } from '../src/client/pricing.ts'
+import { BUILTIN_MODEL_CATALOG, BUILTIN_MODEL_KEY_ALIASES } from '../src/builtin-catalog.ts'
+
+// 测试套件承担宿主注入角色：目录与别名表在模块加载时全量注入（宿主 activate
+// 同一入口），否则聚合/计价消费方读到空目录。
+applyBuiltinCatalog(BUILTIN_MODEL_CATALOG, BUILTIN_MODEL_KEY_ALIASES)
+
 // @vitest-environment jsdom
 /**
  * UsageBilling real-data smoke test: feeds the surface a realistic
@@ -10,7 +17,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ComponentProps } from 'react'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { bindSnapshotSelector } from './bind-snapshot-selector'
-import { UsageBilling, notifiedKeys } from '../src/client/UsageBilling.tsx'
+import { UsageBilling } from '../src/client/UsageBilling.tsx'
+import { notifiedKeys } from '../src/client/domain/notify.ts'
 import { createBillingBudgetStore } from '../src/client/budget-store.ts'
 import { zh } from '../src/client/locales.ts'
 
@@ -21,6 +29,7 @@ afterEach(() => {
 
 beforeEach(() => {
   localStorage.clear()
+  localStorage.setItem('dsh.ui-usage-billing.currency', 'cny')
   // 跨实例提醒认领的进程内 Set 是模块级状态：清掉前序用例的同键拦截（issue #44）。
   notifiedKeys.clear()
 })
@@ -105,6 +114,7 @@ describe('UsageBilling real-data surface', () => {
   })
 
   it('keeps the compact trigger number-only while retaining dashboard, metric switching, and hover access', async () => {
+    localStorage.setItem('dsh.ui-usage-billing.currency', 'usd')
     localStorage.setItem('dsh.ui-usage-billing.card', JSON.stringify({ metric: 'tokens' }))
     const usage = day(1, 700_000_000, 29_400_000, 0, 700_000_000, 6.79)
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify(
@@ -234,6 +244,41 @@ describe('UsageBilling real-data surface', () => {
     expect(primary.getAttribute('aria-expanded')).toBe('false')
   })
 
+  it('groups subagent sessions under their parent conversation (子智能体归并)', async () => {
+    // 子智能体是宿主的独立会话（parentId 指向父对话）：账单里默认收进父行，
+    // 父行徽标显示后代合计（服务端 subCost），展开可见逐个子会话；
+    // 父行不在切片内的孤儿子行回退为独立行，不丢数据。
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      const body = url.includes('/api/billing/pricing')
+        ? { source: 'builtin' }
+        : {
+          ...REAL_STATS,
+          bySession: [
+            { id: 'sess-root', title: '构建射击游戏', calls: 98, cost: 1.86, lastActive: Date.UTC(2026, 9, 18, 0, 54, 0), subCalls: 2, subCost: 1.78 },
+            { id: 'sess-sub-a', title: '你是关卡美术', calls: 35, cost: 0.92, lastActive: Date.UTC(2026, 9, 18, 0, 55, 0), parentId: 'sess-root' },
+            { id: 'sess-sub-b', title: '你是武器美术', calls: 35, cost: 0.86, lastActive: Date.UTC(2026, 9, 18, 0, 56, 0), parentId: 'sess-root' },
+            { id: 'sess-orphan', title: '孤儿子会话', calls: 5, cost: 0.2, lastActive: Date.UTC(2026, 9, 18, 1, 0, 0), parentId: 'sess-gone' },
+          ],
+        }
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+    }))
+    const { container } = render(<UsageBilling {...makeProps()} />)
+    fireEvent.click(container.querySelector('button')!)
+    fireEvent.click(await screen.findByTestId('billing-tab-providers'))
+    const table = await screen.findByTestId('billing-sessions-table')
+    // 父行带「含子智能体」徽标；子行收进父行默认不出现。
+    expect(table.textContent).toContain('含子智能体 ¥1.78')
+    expect(table.textContent).not.toContain('你是关卡美术')
+    // 展开父行：子智能体行出现（徽标 + 标题）。
+    fireEvent.click(screen.getByText('构建射击游戏').closest('tr')!)
+    expect(table.textContent).toContain('子智能体')
+    expect(table.textContent).toContain('你是关卡美术')
+    expect(table.textContent).toContain('你是武器美术')
+    // 父行已删的孤儿子行保持独立可见。
+    expect(table.textContent).toContain('孤儿子会话')
+  })
+
   it('notifies once per tier per day as spend crosses budget tiers', async () => {
     const notify = vi.fn()
     vi.stubGlobal('Notification', Object.assign(notify, {
@@ -332,6 +377,8 @@ describe('UsageBilling real-data surface', () => {
     const groups = await screen.findAllByTestId('billing-provider-group')
     const deepseek = groups.find(group => group.textContent?.includes('DeepSeek 官方'))
     expect(deepseek).toBeDefined()
+    // 厂商组默认收起（issue #77）：点击组头展开后模型用量表才渲染。
+    fireEvent.click(deepseek!.querySelector('[data-testid="billing-provider-group-head"]')!)
     const table = deepseek!.querySelector('[data-testid="billing-table-scroll"]')
     expect(table).not.toBeNull()
     await waitFor(() => { expect(table!.textContent).toContain('mi-mimo-2.5') })
@@ -428,12 +475,15 @@ describe('UsageBilling real-data surface', () => {
     // 月之暗面组：订阅卡片 + 套数徽标，无模型用量表（无该厂商模型）。
     const kimi = groups.find(group => group.textContent?.includes('月之暗面'))
     expect(kimi).toBeDefined()
+    // 厂商组默认收起（issue #77）：订阅卡片与模型表都收在组头之下，展开后断言。
+    fireEvent.click(kimi!.querySelector('[data-testid="billing-provider-group-head"]')!)
     expect(kimi!.querySelector('[data-testid="billing-subscription-card"]')).not.toBeNull()
     expect(kimi!.querySelector('[data-testid="billing-provider-sub-count"]')?.textContent).toContain('1')
     expect(kimi!.querySelector('[data-testid="billing-table-scroll"]')).toBeNull()
     // DeepSeek 组：模型用量表，无订阅卡片。
     const deepseek = groups.find(group => group.textContent?.includes('DeepSeek'))
     expect(deepseek).toBeDefined()
+    fireEvent.click(deepseek!.querySelector('[data-testid="billing-provider-group-head"]')!)
     expect(deepseek!.querySelector('[data-testid="billing-table-scroll"]')).not.toBeNull()
     expect(deepseek!.querySelector('[data-testid="billing-subscription-card"]')).toBeNull()
   })
@@ -468,13 +518,77 @@ describe('UsageBilling real-data surface', () => {
     fireEvent.click(container.querySelector('button')!)
     fireEvent.click(await screen.findByTestId('billing-tab-providers'))
     const groups = await screen.findAllByTestId('billing-provider-group')
-    const xiaomi = groups.find(group => group.textContent?.includes('mi-mimo-2.5'))
+    // 组头按模型名匹配改路由名：厂商组默认收起（issue #77）后模型行不在组内文本中。
+    const xiaomi = groups.find(group => group.textContent?.includes('xiaomi-token-plan-cn'))
     expect(xiaomi).toBeDefined()
-    // 同一直连通道组：既有模型用量表（非订阅模型显示费用），又有订阅卡片。
+    // 直连组头：「直连」徽章 + 拆出的路由名（direct:xiaomi-token-plan-cn 无前缀直呼）。
+    expect(xiaomi!.querySelector('[data-testid="billing-kind-badge"]')?.textContent).toBe('直连')
+    // 厂商组默认收起（issue #77）：展开后断言模型用量表与订阅卡片同组共存。
+    fireEvent.click(xiaomi!.querySelector('[data-testid="billing-provider-group-head"]')!)
     expect(xiaomi!.querySelector('[data-testid="billing-table-scroll"]')).not.toBeNull()
     expect(xiaomi!.querySelector('[data-testid="billing-subscription-card"]')).not.toBeNull()
-    // 非订阅模型显示实际费用（0.40 元），不误标「订阅包含」。
+    // 非订阅模型显示实际费用（0.40 元），不挂「订阅」标签（订阅包含胶囊只出现在订阅通道行）。
     expect(xiaomi!.querySelector('[data-testid="billing-table-scroll"]')!.textContent).toContain('¥0.40')
-    expect(xiaomi!.querySelector('[data-testid="billing-table-scroll"]')!.textContent).not.toContain('订阅包含')
+    expect(xiaomi!.querySelector('[data-testid="billing-table-scroll"] [data-testid="billing-plan-badge"]')).toBeNull()
+  })
+})
+
+describe('UsageBilling budget-pressure trigger feedback', () => {
+  /** 当月今日费用快照：触发卡预算百分比 = 该费用 / 预算金额（今日即本月合计）。 */
+  const statsOf = (todayCost: number) => ({
+    budget: 10,
+    total: day(3, 3_000_000, 1_000_000, 1_000_000, 1_000_000, todayCost),
+    byModel: {},
+    byDay: { [todayStamp()]: day(3, 3_000_000, 1_000_000, 1_000_000, 1_000_000, todayCost) },
+    byDayModels: {},
+  })
+
+  /** 预算 store 预置开关与金额后挂载：其余 props 与主 describe 相同。 */
+  function renderWithBudget(enabled: boolean, amount: number, todayCost: number) {
+    const budgetStore = createBillingBudgetStore().create()
+    budgetStore.actions.setEnabled(enabled)
+    budgetStore.actions.setAmount(amount)
+    const props = {
+      ...makeProps(),
+      useStore: bindSnapshotSelector(budgetStore),
+      actions: budgetStore.actions,
+    } as unknown as ComponentProps<typeof UsageBilling>
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      const body = url.includes('/api/billing/pricing') ? { source: 'builtin' } : statsOf(todayCost)
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+    }))
+    return render(<UsageBilling {...props} />)
+  }
+
+  it('marks the trigger card with the warn pulse and hot icon at ≥80% of the budget', async () => {
+    const { container } = renderWithBudget(true, 10, 9)
+    // 触发卡常驻侧栏：无需打开面板，等 stats 到位后临界类出现（90% → warn 档）。
+    await waitFor(() => {
+      expect(screen.getByTestId('billing-trigger').className).toMatch(/triggerBudgetPulse/)
+    })
+    expect(screen.getByTestId('billing-trigger').className).not.toMatch(/triggerBudgetOver/)
+    // 指针/进度弧容器转红（CSS currentColor 级联）。
+    expect(screen.queryByTestId('billing-trigger-icon')).toBeNull()
+    expect(container).toBeTruthy()
+  })
+
+  it('escalates to the accelerated pulse at ≥100% of the budget', async () => {
+    renderWithBudget(true, 10, 11)
+    await waitFor(() => {
+      expect(screen.getByTestId('billing-trigger').className).toMatch(/triggerBudgetOver/)
+    })
+    expect(screen.getByTestId('billing-trigger').className).toMatch(/triggerBudgetPulse/)
+    expect(screen.queryByTestId('billing-trigger-icon')).toBeNull()
+  })
+
+  it('stays calm with the budget disabled even when the spend is over the amount', async () => {
+    renderWithBudget(false, 10, 11)
+    // 等一轮 stats 到位（monthCost 已超预算金额）后仍无任何临界类。
+    await waitFor(() => {
+      expect(screen.getByTestId('billing-trigger').textContent).not.toBe('¥0')
+    })
+    expect(screen.getByTestId('billing-trigger').className).not.toMatch(/triggerBudgetPulse/)
+    expect(screen.queryByTestId('billing-trigger-icon')).toBeNull()
   })
 })

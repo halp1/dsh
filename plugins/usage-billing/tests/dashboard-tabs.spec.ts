@@ -1,16 +1,18 @@
 /**
- * Dashboard tab definitions: the four sections render in a fixed order and
+ * Dashboard tab definitions: the sections render in a fixed order and
  * every label key has zh/en copy. Decor anchors land in their tabs — covered
  * by the anchor test in usage-billing-realdata.client.spec.tsx.
  */
 
 import { describe, expect, it } from 'vitest'
-import { DASHBOARD_TABS } from '../src/client/UsageBilling.tsx'
+import { DASHBOARD_TABS } from '../src/client/domain/types.ts'
 import { en, zh } from '../src/client/locales.ts'
 
 describe('DASHBOARD_TABS', () => {
-  it('defines the six sections in display order', () => {
-    expect(DASHBOARD_TABS.map(tab => tab.id)).toEqual(['overview', 'providers', 'token', 'trends', 'pricing', 'settings'])
+  it('defines the sections in display order', () => {
+    expect(DASHBOARD_TABS.map(tab => tab.id)).toEqual([
+      'overview', 'queue', 'providers', 'token', 'trends', 'agents', 'pricing', 'settings',
+    ])
   })
 
   it('has zh and en copy for every tab label', () => {

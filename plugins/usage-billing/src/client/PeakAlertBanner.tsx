@@ -15,16 +15,17 @@ import css from './UsageBilling.module.css'
 export interface PeakAlertBannerProps {
   hit: PeakAlertHit
   config: PeakAlertConfig
-  t: (key: UsageBillingKey) => string
+  t: (key: UsageBillingKey, params?: Record<string, unknown>) => string
   onDismiss: () => void
 }
 
 /** 渲染一个切档前提醒状态条。 */
 export function PeakAlertBanner({ hit, config, t, onDismiss }: PeakAlertBannerProps): React.ReactNode {
-  // 每秒刷新剩余分钟；越过切换点后自动卸载。
+  // 每 30 秒刷新剩余分钟（审计 S6）：展示粒度是 Math.round 分钟，秒级 tick 只产生
+  // 无效重渲染；越过切换点后自动卸载，30s 内的 dismiss 延迟对提醒无实际影响。
   const [nowMs, setNowMs] = useState(() => Date.now())
   useEffect(() => {
-    const timer = setInterval(() => setNowMs(Date.now()), 1000)
+    const timer = setInterval(() => setNowMs(Date.now()), 30_000)
     return () => clearInterval(timer)
   }, [])
 
@@ -38,7 +39,11 @@ export function PeakAlertBanner({ hit, config, t, onDismiss }: PeakAlertBannerPr
   const minutes = Math.max(1, Math.round((hit.atMs - nowMs) / 60_000))
   const entering = hit.entering
   const tag = entering === 'peak' ? t('tierPeak') : t('tierOff')
-  const desc = entering === 'peak' ? t('peakAlertDescPeak') : t('peakAlertDescOff')
+  // 文案按通道区分口径：DeepSeek 按量分时讲单价，智谱 Coding Plan 讲积分抵扣比例。
+  const descKey = hit.channel === 'zhipu-coding-plan'
+    ? (entering === 'peak' ? 'peakAlertDescPeakZhipu' : 'peakAlertDescOffZhipu')
+    : (entering === 'peak' ? 'peakAlertDescPeak' : 'peakAlertDescOff')
+  const desc = t(descKey)
   const isPeak = entering === 'peak'
 
   return (
@@ -62,6 +67,11 @@ export function PeakAlertBanner({ hit, config, t, onDismiss }: PeakAlertBannerPr
       </div>
       <div className={clsx(css.peakCount, isPeak ? css.peakCountPrimary : css.peakCountSuccess)}>{minutes}min</div>
       <p className={css.peakDesc}>{desc}</p>
+      {hit.queueCount !== undefined && hit.queueCount > 0 && (
+        <p className={css.peakDesc} data-testid="billing-peak-queue-note">
+          {t(entering === 'peak' ? 'peakAlertQueuePeak' : 'peakAlertQueueOff', { count: hit.queueCount })}
+        </p>
+      )}
     </div>
   )
 }

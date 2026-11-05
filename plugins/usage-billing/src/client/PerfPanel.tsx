@@ -279,6 +279,44 @@ export function PerfPanel({
 
   return (
     <div data-testid="billing-perf-panel">
+      {/* v1.5 Hero：4 列核心指标（总样本 / 平均 TTFT / 平均 TPS / 平均延迟）——
+          每个指标带 4px 进度条显示相对基线（vs 全局最大值）。一眼识别面板全局状态。 */}
+      {rows.length > 0 && (() => {
+        /* 全局基线：用于进度条相对宽度的分母 */
+        const maxTtft = Math.max(...rows.map(r => r.ttftAvg), 1)
+        const maxTps = Math.max(...rows.filter(r => r.tpsAvg !== undefined).map(r => r.tpsAvg ?? 0), 1)
+        const maxLat = Math.max(...rows.map(r => r.latencyAvg), 1)
+        const totalSamples = rows.reduce((sum, r) => sum + r.samples, 0)
+        const avgTtft = rows.length > 0
+          ? rows.reduce((sum, r) => sum + r.ttftAvg, 0) / rows.length
+          : 0
+        const tpsVals = rows.map(r => r.tpsAvg).filter((v): v is number => v !== undefined)
+        const avgTps = tpsVals.length > 0 ? tpsVals.reduce((s, v) => s + v, 0) / tpsVals.length : 0
+        const avgLat = rows.length > 0
+          ? rows.reduce((sum, r) => sum + r.latencyAvg, 0) / rows.length
+          : 0
+        const heroCells = [
+          { lbl: t('perfSamples'), val: totalSamples.toLocaleString(), unit: '', pct: 65, color: 'var(--ds-blue)' },
+          { lbl: t('perfTtft'), val: fmtMsShort(avgTtft), unit: '', pct: (avgTtft / maxTtft) * 100, color: 'var(--ds-green)' },
+          { lbl: t('perfTps'), val: tpsVals.length > 0 ? fmtTps(avgTps) : '—', unit: '', pct: (avgTps / maxTps) * 100, color: 'var(--ds-blue)' },
+          { lbl: t('perfLatency'), val: fmtMsShort(avgLat), unit: '', pct: (avgLat / maxLat) * 100, color: 'var(--ds-amber)' },
+        ]
+        return (
+          <div className={css.perfHero} data-testid="billing-perf-hero">
+            {heroCells.map((c, i) => (
+              <div key={i} className={css.perfHeroCell}>
+                <div className={css.perfHeroLbl}>{c.lbl}</div>
+                <div className={css.perfHeroVal}>
+                  {c.val}{c.unit !== '' && <span className={css.perfHeroUnit}>{c.unit}</span>}
+                </div>
+                <div className={css.perfHeroBar}>
+                  <i style={{ width: `${Math.min(100, c.pct)}%`, background: c.color }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        )
+      })()}
       {/* 按模型性能表：样本数、TTFT 均值/P50/P90、生成速度、总延迟、估算样本。 */}
       <div className={css.tableScroll} data-testid="billing-perf-table">
         <table className={css.modelTable}>
@@ -322,6 +360,30 @@ export function PerfPanel({
           </tbody>
         </table>
       </div>
+
+      {/* v1.5 横向对比列表：每行 = 一个模型 + P50 进度条 + P50 / TPS 数值。
+          一眼排名——最快的模型进度条最长，颜色按 P50 区间（绿/琥珀/红）分级。 */}
+      {rows.length > 0 && (() => {
+        const maxTtftP50 = Math.max(...rows.map(r => r.ttftP50), 1)
+        const tierColor = (ms: number): string => ms < 0.8 ? 'var(--ds-green)' : ms < 2.0 ? 'var(--ds-amber)' : 'var(--ds-red)'
+        return (
+          <div className={css.perfCompareList} data-testid="billing-perf-compare">
+            {rows.map(r => (
+              <div key={r.key} className={css.perfCompareRow}>
+                <div className={css.perfCompareName}>
+                  <span className={css.perfCompareDot} style={{ background: r.color }} />
+                  <span>{r.name}</span>
+                </div>
+                <div className={css.perfCompareBar}>
+                  <i style={{ width: `${(r.ttftP50 / maxTtftP50) * 100}%`, background: tierColor(r.ttftP50) }} />
+                </div>
+                <div className={css.perfCompareNum}>{fmtMsShort(r.ttftP50)}</div>
+                <div className={css.perfCompareNum}>{r.tpsAvg === undefined ? '—' : fmtTps(r.tpsAvg)}</div>
+              </div>
+            ))}
+          </div>
+        )
+      })()}
 
       {/* 按小时×模型对比曲线：指标 tab + 模型 chips + hover 十字线/tooltip。 */}
       {hourLayout !== null && (

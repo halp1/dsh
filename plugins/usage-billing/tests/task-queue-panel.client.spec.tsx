@@ -1,0 +1,205 @@
+// @vitest-environment jsdom
+/** Queue panel: explicit opt-in on new hosts and read-only fallback on old hosts. */
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { TaskQueuePanel } from '../src/client/TaskQueuePanel.tsx'
+import { zh } from '../src/client/locales.ts'
+import type { TaskQueueSnapshot } from '../src/task-queue-shared.ts'
+
+const t = (key: string): string => (zh as Record<string, string>)[key] ?? key
+const navigateToSession = vi.fn(() => 'opened' as const)
+
+const BASE: TaskQueueSnapshot = {
+  supported: true,
+  tier: 'offPeak',
+  nextSwitchInMs: 30_000,
+  tasks: [],
+  workspaces: [{ path: '/tmp/work', title: 'Work' }],
+  models: [{ provider: 'deepseek-official', providerName: 'DeepSeek', id: 'deepseek-flash', name: 'DeepSeek Chat' }],
+}
+
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+  vi.clearAllMocks()
+})
+
+beforeEach(() => {
+  localStorage.clear()
+})
+
+function jsonResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+}
+
+function jsonFile(text: string, name: string): File {
+  const file = new File([text], name, { type: 'application/json' })
+  // jsdom's File has no Blob.text(); the browser path under test does.
+  Object.defineProperty(file, 'text', { value: async () => text })
+  return file
+}
+
+describe('TaskQueuePanel', () => {
+  it('shows a read-only explanation when the host lacks Session control', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ ...BASE, supported: false })))
+    render(<TaskQueuePanel t={t} language="zh" navigateToSession={navigateToSession} />)
+
+    expect(await screen.findByTestId('queue-unsupported')).toBeTruthy()
+    expect(screen.getByText(t('queueUnsupportedBody'))).toBeTruthy()
+    expect(screen.queryByRole('textbox')).toBeNull()
+    expect(screen.queryByRole('button', { name: t('queueEnqueue') })).toBeNull()
+  })
+
+  it('submits only the explicitly entered Prompt and renders the returned task', async () => {
+    const requests: { url: string; body?: unknown }[] = []
+    const queued: TaskQueueSnapshot = {
+      ...BASE,
+      tier: 'peak',
+      tasks: [{
+        id: 'task-1', prompt: 'Summarize the repository', cwd: '/tmp/work',
+        provider: 'deepseek-official', model: 'deepseek-flash', status: 'queued', createdAt: 1,
+      }],
+    }
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as unknown
+        requests.push({ url, body })
+        return jsonResponse({ ok: true, snapshot: queued })
+      }
+      requests.push({ url })
+      return jsonResponse(BASE)
+    }))
+    render(<TaskQueuePanel t={t} language="zh" navigateToSession={navigateToSession} />)
+
+    const textarea = await screen.findByRole('textbox')
+    fireEvent.change(textarea, { target: { value: 'Summarize the repository' } })
+    const button = screen.getByRole('button', { name: t('queueEnqueue') })
+    await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(button)
+
+    expect(await screen.findByTestId('queue-task-task-1')).toBeTruthy()
+    const mutation = requests.find(request => request.body !== undefined)
+    expect(mutation?.url).toBe('/api/billing/task-queue')
+    expect(mutation?.body).toEqual({
+      action: 'enqueue', prompt: 'Summarize the repository', cwd: '/tmp/work',
+      provider: 'deepseek-official', model: 'deepseek-flash',
+    })
+    expect((textarea as HTMLTextAreaElement).value).toBe('')
+  })
+
+  it('imports a JSON batch with current workspace and model defaults', async () => {
+    const requests: unknown[] = []
+    const imported: TaskQueueSnapshot = {
+      ...BASE,
+      tasks: [
+        { id: 'task-1', prompt: 'First', cwd: '/tmp/work', provider: 'deepseek-official', model: 'deepseek-flash', status: 'queued', createdAt: 1 },
+        { id: 'task-2', prompt: 'Second', cwd: '/tmp/work', provider: 'deepseek-official', model: 'deepseek-flash', status: 'queued', createdAt: 1 },
+      ],
+    }
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        requests.push(JSON.parse(String(init.body)))
+        return jsonResponse({ ok: true, snapshot: imported })
+      }
+      return jsonResponse(BASE)
+    }))
+    render(<TaskQueuePanel t={t} language="zh" navigateToSession={navigateToSession} />)
+    const input = await screen.findByTestId('queue-import-file')
+    await waitFor(() => expect((input as HTMLInputElement).disabled).toBe(false))
+    const file = jsonFile(JSON.stringify(['First', { prompt: 'Second' }]), 'tasks.json')
+    fireEvent.change(input, { target: { files: [file] } })
+
+    expect(await screen.findByTestId('queue-task-task-2')).toBeTruthy()
+    expect(requests).toEqual([{
+      action: 'enqueueMany',
+      tasks: [
+        { prompt: 'First', cwd: '/tmp/work', provider: 'deepseek-official', model: 'deepseek-flash' },
+        { prompt: 'Second', cwd: '/tmp/work', provider: 'deepseek-official', model: 'deepseek-flash' },
+      ],
+    }])
+  })
+
+  it('rejects malformed imports without issuing a mutation', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(BASE))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<TaskQueuePanel t={t} language="zh" navigateToSession={navigateToSession} />)
+    const input = await screen.findByTestId('queue-import-file')
+    await waitFor(() => expect((input as HTMLInputElement).disabled).toBe(false))
+    fireEvent.change(input, { target: { files: [jsonFile('[]', 'empty.json')] } })
+
+    expect((await screen.findByRole('alert')).textContent).toContain(t('queueImportFormat'))
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps an error visible past a reload and auto-dismisses it at 8s (audit B1/O4)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const fetchMock = vi.fn(async () => jsonResponse(BASE))
+      vi.stubGlobal('fetch', fetchMock)
+      render(<TaskQueuePanel t={t} language="zh" navigateToSession={navigateToSession} />)
+      const input = await screen.findByTestId('queue-import-file')
+      await waitFor(() => expect((input as HTMLInputElement).disabled).toBe(false))
+      fireEvent.change(input, { target: { files: [jsonFile('[]', 'empty.json')] } })
+      expect((await screen.findByRole('alert')).textContent).toContain(t('queueImportFormat'))
+
+      // O4：reload 成功（5s 轮询照跑）不再静默清除 error，读时间留足到 8s。
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_500) })
+      expect(screen.getByRole('alert')).toBeTruthy()
+      await act(async () => { await vi.advanceTimersByTimeAsync(3_000) })
+      expect(screen.queryByRole('alert')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('auto-dismisses the import status notice at 4s (audit B1)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+    try {
+      const imported: TaskQueueSnapshot = {
+        ...BASE,
+        tasks: [{ id: 'task-1', prompt: 'First', cwd: '/tmp/work', provider: 'deepseek-official', model: 'deepseek-flash', status: 'queued', createdAt: 1 }],
+      }
+      vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === 'POST') return jsonResponse({ ok: true, snapshot: imported })
+        return jsonResponse(BASE)
+      }))
+      render(<TaskQueuePanel t={t} language="zh" navigateToSession={navigateToSession} />)
+      const input = await screen.findByTestId('queue-import-file')
+      await waitFor(() => expect((input as HTMLInputElement).disabled).toBe(false))
+      fireEvent.change(input, { target: { files: [jsonFile(JSON.stringify(['First']), 'tasks.json')] } })
+      expect((await screen.findByRole('status')).textContent).toContain(t('queueImported', { count: 1 }).slice(0, 6))
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_000) })
+      expect(screen.queryByRole('status')).not.toBeNull()
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_500) })
+      expect(screen.queryByRole('status')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('pauses polling while the page is hidden and resumes on return (audit B2)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const fetchMock = vi.fn(async () => jsonResponse(BASE))
+      vi.stubGlobal('fetch', fetchMock)
+      render(<TaskQueuePanel t={t} language="zh" navigateToSession={navigateToSession} />)
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(1))
+      // jsdom 的 document.hidden 是原型 getter，用实例自有属性遮蔽后派发事件。
+      Object.defineProperty(document, 'hidden', { configurable: true, value: true })
+      act(() => { document.dispatchEvent(new Event('visibilitychange')) })
+      const seen = fetchMock.mock.calls.length
+      await act(async () => { await vi.advanceTimersByTimeAsync(12_000) })
+      expect(fetchMock.mock.calls.length).toBe(seen)
+
+      Object.defineProperty(document, 'hidden', { configurable: true, value: false })
+      act(() => { document.dispatchEvent(new Event('visibilitychange')) })
+      await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(seen))
+    } finally {
+      delete (document as { hidden?: unknown }).hidden
+      vi.useRealTimers()
+    }
+  })
+})

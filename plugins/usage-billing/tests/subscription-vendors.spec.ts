@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { SUBSCRIPTION_VENDORS_FOR_TEST } from '../src/client/UsageBilling.tsx'
+import { SUBSCRIPTION_VENDORS_FOR_TEST } from '../src/client/domain/subscription-vendors.ts'
 
 describe('SUBSCRIPTION_VENDORS', () => {
   it('maps every MiniMax subscription id to the MiniMax vendor', () => {

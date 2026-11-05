@@ -18,6 +18,10 @@ export interface BudgetPrefsState {
     lastBalanceAlertDay: string;
     /** 最近一次峰谷切换提醒的切换点时刻（毫秒）：同一切换点只提醒一次。 */
     lastTierSwitchAt: number;
+    /** 按模型月度预算（模型目录键 → 人民币元/月；U-3）。缺键 = 该模型不限。 */
+    modelBudgets: Record<string, number>;
+    /** 按模型预算提醒的最后通知日期戳（`${model}:${tier}` → YYYY-MM-DD）：每模型每档每天最多一次。 */
+    modelTierAlertDays: Record<string, string>;
 }
 /** 预算偏好的完整写面（组件只能经这些 action 写入）；type 别名以兼容 ActionsDecl 的索引签名约束。 */
 export type BudgetPrefsActions = {
@@ -26,7 +30,13 @@ export type BudgetPrefsActions = {
     markTierAlerted: (d: BudgetPrefsState, tiers: readonly number[], day: string) => void;
     markBalanceAlerted: (d: BudgetPrefsState, day: string) => void;
     markTierSwitchAlerted: (d: BudgetPrefsState, at: number) => void;
+    setModelBudget: (d: BudgetPrefsState, key: string, value: number) => void;
+    markModelTierAlerted: (d: BudgetPrefsState, marks: readonly string[], day: string) => void;
 };
+/** 读取兜底：v1.5.x 老持久化状态缺 `modelBudgets` 键（模块级常量，引用稳定不触发重渲染）。 */
+export declare const EMPTY_MODEL_BUDGETS: Readonly<Record<string, number>>;
+/** 读取兜底：v1.5.x 老持久化状态缺 `modelTierAlertDays` 键（同上）。 */
+export declare const EMPTY_MODEL_TIER_ALERT_DAYS: Readonly<Record<string, string>>;
 /**
  * Declare the budget-preferences store handle.
  * @returns the store handle for the register call's store seat.

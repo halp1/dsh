@@ -15,5 +15,7 @@ export default defineConfig({
         ],
       },
     },
+    // API contract specs 走 @playwright/test（`pnpm test:e2e`），vitest 不跑。
+    exclude: ['**/node_modules/**', '**/dist/**', 'tests/api-contract/**'],
   },
 })

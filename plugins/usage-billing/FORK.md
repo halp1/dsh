@@ -136,19 +136,40 @@ The sidebar quick view now uses the solid theme surface, without transparent
 background mixing or backdrop blur. Its layout and hover/focus behavior remain
 unchanged.
 
+## Upstream stable merge in 1.8.2-fork.halp1.1
+
+Merged upstream v1.8.2 (4023b6c), including the expanded catalog, lazy repricing,
+startup/polling improvements, credential-reference support, subagent attribution,
+monthly forecasts, native settings, and off-peak queue features.
+
+The fork retains USD by default, reads old JSON-encoded currency choices, keeps
+the number-only small sidebar button and opaque hover popup, and preserves the
+three extra gateway/free model entries. The new day/week/month selector works,
+with month retained as the fallback for old preferences without a span field.
+The OpenRouter decimal-string and cache-read fixes remain in place.
+
+The app enables catalog estimates for historical unknown routes, preserving the
+fork's old totals without classifying those routes as official. Unknown-route
+amounts are labeled estimated. The aggregator's strict upstream policy remains
+available to other callers. The policy is part of the ledger fingerprint and
+fold version 24 rebuilds readable pre-merge sessions.
+
+Inherited Pages publication and automatic issue creation only run in the
+canonical upstream repository. This fork remains private and cannot npm publish.
+
 ## Pulling in upstream changes
 
 ```sh
 git fetch upstream
-git merge upstream/main          # or: git merge v1.2.7
+git merge --no-ff <verified-upstream-release>
 pnpm install --no-frozen-lockfile
 pnpm run build                   # lib/*.js is tracked — rebuild before committing
-git commit -am 'merge upstream'
+git commit -am 'chore: merge upstream stable release'
 ```
 
 Bump the `-fork.halp1.N` counter in `package.json` after a merge, then reinstall
-in the profile (see below). If the merge ever conflicts, it will be on that single
-`useState` line — keep `'usd'`.
+in the profile (see below). Resolve refactors against upstream while retaining
+the divergences recorded in package.json and this document.
 
 ## Build artifacts are committed
 

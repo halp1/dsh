@@ -18,6 +18,12 @@ export interface SessionExportRow {
     id: string;
     title?: string;
     cwd?: string;
+    /** 直接父会话 id（仅子智能体会话携带）；顶层会话缺失。 */
+    parentId?: string;
+    /** 后代子会话费用合计（人民币元）；无后代时缺失。 */
+    subCost?: number;
+    /** 后代子会话调用数；无后代时缺失。 */
+    subCalls?: number;
     calls: number;
     cost: number;
     lastActive: number;
@@ -26,7 +32,7 @@ export interface SessionExportRow {
 export declare function dayRowsCsv(byDay: Record<string, DayExportRow>): string;
 /** 按站点（中转站/直连/未知路由）CSV：站点,类别,调用,费用(元)。 */
 export declare function siteRowsCsv(bySite: Record<string, DayExportRow>): string;
-/** 按会话 CSV：会话 id,标题,项目,调用,费用(元),最后活跃(ISO)。 */
+/** 按会话 CSV：会话 id,标题,项目,调用,费用(元),最后活跃(ISO),父会话,子会话调用,子会话费用(元)。 */
 export declare function sessionRowsCsv(rows: readonly SessionExportRow[]): string;
 /** 导出文件名：带日期范围（usage-2026-08-01_2026-08-22.csv）；无日期时只带前缀。 */
 export declare function exportFileName(prefix: string, ext: 'csv' | 'json', dates: readonly string[]): string;

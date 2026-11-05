@@ -6,18 +6,23 @@
 
 import { describe, expect, it, afterEach } from 'vitest'
 import {
-  applyLiveCatalogModels, applyLivePricing, applyPromo, canonModelId, catalogEntries, cnyToUsd, computeCost,
+  applyBuiltinCatalog, applyLiveCatalogModels, applyLivePricing, applyPromo, canonModelId, catalogEntries, cnyToUsd, computeCost,
   computeCostAt, convertUnitPrice, formatMoney, formatPercent, formatTokens, formatUnitPrice,
   applyUserModelAliases,
-  getRateInfo, isPeakHour, isPromoActive, modelOf, MODEL_CATALOG, resolveCatalogKey, tierAt, tierCountdown,
+  getRateInfo, isPeakHour, isPromoActive, modelOf, resolveCatalogKey, tierAt, tierCountdown,
 } from '../src/client/pricing.ts'
-import { PROVIDER_ALIASES } from '../src/client/UsageBilling.tsx'
+import { BUILTIN_MODEL_CATALOG, BUILTIN_MODEL_KEY_ALIASES } from '../src/builtin-catalog.ts'
+import { PROVIDER_ALIASES } from '../src/client/domain/provider-aliases.ts'
+
+// 目录与别名表改为宿主注入后，测试套件自身承担宿主角色：全量注入一次，
+// 与宿主 activate 的注入点同一入口（applyBuiltinCatalog）。
+applyBuiltinCatalog(BUILTIN_MODEL_CATALOG, BUILTIN_MODEL_KEY_ALIASES)
 
 describe('provider alias completeness', () => {
   it('maps every catalog provider display name to aliases (Custom exempt)', () => {
     // 一致性守卫：健康绿灯按 display name → 别名 → 实际 provider id 匹配。
     // 任何 catalog 厂商漏配别名都会让该厂商的模型行圆点永远落回灰色未连接。
-    const displayNames = [...new Set(MODEL_CATALOG.map(entry => entry.provider))]
+    const displayNames = [...new Set(BUILTIN_MODEL_CATALOG.map(entry => entry.provider))]
     for (const name of displayNames) {
       if (name === 'Custom') continue
       const aliases = PROVIDER_ALIASES[name]
@@ -70,6 +75,17 @@ describe('modelOf', () => {
     expect(resolveCatalogKey('MINIMAX-M2')).toBe('minimax')
     expect(modelOf('MiniMax-M3')).toMatchObject({ key: 'minimax', name: 'MiniMax-M3', provider: 'MiniMax' })
     expect(modelOf('MiniMax-M3').uncatalogued).toBeUndefined()
+  })
+
+  it('prices MiniMax-M3.1-Flash at its own launch rate, preview stays at its event-time rate (issue #97)', () => {
+    // 正式版独立刊例价（元/百万 token）：输入 1.00 / 缓存读取 0.10 / 输出 4.00——
+    // 不再沿用 #86 时代「随 M3 计费」的 2.1/0.42/8.4。
+    expect(resolveCatalogKey('MiniMax-M3.1-Flash')).toBe('minimax-m3.1-flash')
+    expect(resolveCatalogKey('minimax-m3-1-flash')).toBe('minimax-m3.1-flash')
+    expect(modelOf('MiniMax-M3.1-Flash').price).toMatchObject({ currency: 'CNY', input: 1, cacheHit: 0.1, output: 4 })
+    // 计费红线：Preview 存续期内的调用按当时生效的 M3 规则计费，不追溯改写；
+    // 转发后残留旧 id 调用的高估偏差被有意接受（新调用日志 id 已是正式版）。
+    expect(modelOf('MiniMax-M3.1-Flash-Preview').price).toMatchObject({ currency: 'CNY', input: 2.1, cacheHit: 0.42, output: 8.4 })
   })
 })
 
@@ -167,12 +183,22 @@ describe('live pricing overrides', () => {
   })
 
   it('overrides a matched model price with the live USD table', () => {
-    applyLivePricing({ source: 'live', prices: { flash: { input: 2, cacheHit: 0.2, output: 8 } } })
-    const row = modelOf('flash')
+    // 平档模型（无峰谷分档）才整表替换：路由器单价本身无时段区分，语义一致。
+    applyLivePricing({ source: 'live', prices: { kimi: { input: 2, cacheHit: 0.2, output: 8 } } })
+    const row = modelOf('kimi')
     expect(row.price.currency).toBe('USD')
     const cost = computeCost(row, { input: MILLION, cacheHit: 0, cacheMiss: MILLION, output: MILLION }, 1)
     // 美元单价 × 内置汇率 6.79（未给 rate 时）。
     expect(cost).toBeCloseTo((1_000_000 * 2 + 1_000_000 * 8) / MILLION * 6.79, 10)
+  })
+
+  it('keeps the official peak/off-peak bands when a live price matches a tiered model', () => {
+    // 分档条目（flash 峰 = 谷 × 2）不套实时平档：整表替换会把官方峰谷口径抹平，
+    // 高峰时段的事件会被少算一半。实时价只对平档条目生效。
+    applyLivePricing({ source: 'live', prices: { flash: { input: 2, cacheHit: 0.2, output: 8 } } })
+    const row = modelOf('flash')
+    expect(row.price.currency).toBe('CNY')
+    expect(row.price.offPeak).toBeDefined()
   })
 
   it('keeps the built-in catalog when no live data applies', () => {
@@ -195,7 +221,8 @@ describe('live pricing overrides', () => {
 
 describe('display formatters', () => {
   it('labels a zero unit price as free', () => {
-    expect(formatUnitPrice(0)).toBe('免费')
+    // 0 价由调用方用 t('free') 兜住（UsageBilling.tsx），此处只做纯格式化。
+    expect(formatUnitPrice(0)).toBe('¥0.00')
   })
 
   it('formats prices in their native currency', () => {
@@ -299,6 +326,17 @@ describe('computeCostAt (P0-1)', () => {
       .toBe(computeCostAt(modelOf('flash'), buckets, postAt(13)))
   })
 
+  it('mixes latency-tier models (Gemini Standard/Flex) by share, not by Beijing windows', () => {
+    // 延迟档语义与时刻无关：北京高峰与低谷时刻的费用必须一致，且等于 50/50 混合
+    // （此前错误套用 DeepSeek 的北京峰谷窗口，高峰时段 Gemini 被计成 2 倍价）。
+    const entry = modelOf('gemini-pro')
+    expect(entry.tierSemantics).toBe('latency')
+    const atPeak = computeCostAt(entry, buckets, postAt(10))
+    const atOff = computeCostAt(entry, buckets, postAt(13))
+    expect(atPeak).toBeCloseTo(atOff, 10)
+    expect(atPeak).toBeCloseTo(computeCost(entry, buckets, 0.5, postAt(10)), 10)
+  })
+
   it('prices V4 Pro at its own peak list rate', () => {
     // 官方公告（价目页注释 (2)）取消 09-14 路由计划，pro 长期按 V4 Pro 刊例：
     // 高峰缓存命中 ¥0.3、未命中 ¥9、输出 ¥27（每 1M）。
@@ -351,15 +389,15 @@ describe('computeCostAt (P0-1)', () => {
   })
 
   it('recognizes Kimi K2.8 Preview id variants as one catalog entry', () => {
-    // 会员侧预览模型（开放平台未上架），日志里的 id 形态因通道而异；按 K2.7 Code
-    // 同价估算并标 estimated，费率表据此提示而非误当正式定价。
+    // 会员侧预览模型，日志里的 id 形态因通道而异；2026-09 起 TokenHub 已上架
+    // 按量条目（6.5 / 1.7 / 27），费率表按官方价展示，不再标 estimated。
     for (const id of ['kimi-k2.8-preview', 'kimi-k2.8', 'kimi-k2-8-preview', 'k2.8-preview', 'k2.8']) {
       expect(resolveCatalogKey(id)).toBe('kimi-k2.8-preview')
     }
     const entry = modelOf('k2.8')
     expect(entry.name).toBe('Kimi K2.8 Preview')
-    expect(entry.estimated).toBe(true)
-    expect(entry.price).toMatchObject({ input: 6.5, cacheHit: 1.3, output: 27 })
+    expect(entry.estimated).toBeUndefined()
+    expect(entry.price).toMatchObject({ input: 6.5, cacheHit: 1.7, output: 27 })
   })
 
   it('recognizes GPT-6 Astra and prices it at the official USD standard rates', () => {
@@ -388,6 +426,49 @@ describe('computeCostAt (P0-1)', () => {
   it('resolves the expired V4.1 Flash beta id to the flash catalog key', () => {
     // 内测端点（09-10 过期）的存量用量按 flash 时间线正确归并计费（issue #40 反馈）。
     expect(modelOf('deepseek-v4.1-flash-expires-on-0910').key).toBe('flash')
+  })
+
+  it('prices the relay-visible Grok / GPT / Claude ids that were previously uncatalogued', () => {
+    // 中转站（如 4Router）把上游模型按裸 id 暴露在会话日志里。这些 id 此前既不在
+    // 目录也无别名 → isPriced 为假、费用记 0，输入框费用条因 sessionCost 为 0 不显示金额。
+    // 两条别名：Grok 4.6 的目录键是既有 `grok`；Anthropic 日期快照 id 归一为无日期键。
+    expect(resolveCatalogKey('grok-4.6')).toBe('grok')
+    expect(resolveCatalogKey('grok-4-6')).toBe('grok')
+    expect(resolveCatalogKey('claude-haiku-4-5-20251001')).toBe('claude-haiku-4-5')
+    // 新增目录条目：官方刊例价标准档（与 GPT-6 Astra 同口径，长上下文加价不单列）。
+    const expected: Array<[string, string, { input: number; cacheHit: number; output: number }]> = [
+      ['gpt-5.5', 'GPT-5.5', { input: 5, cacheHit: 0.5, output: 30 }],
+      ['gpt-6.1-sol', 'GPT-6.1 Sol', { input: 2, cacheHit: 0.1, output: 10 }],
+      ['grok-4.5', 'Grok 4.5', { input: 2, cacheHit: 0.3, output: 6 }],
+      ['claude-opus-4-7', 'Claude Opus 4.7', { input: 5, cacheHit: 0.5, output: 25 }],
+      ['claude-opus-4-8', 'Claude Opus 4.8', { input: 5, cacheHit: 0.5, output: 25 }],
+      ['claude-fable-5', 'Claude Fable 5', { input: 10, cacheHit: 1, output: 50 }],
+    ]
+    for (const [id, name, price] of expected) {
+      expect(resolveCatalogKey(id)).toBe(id)
+      const entry = modelOf(id)
+      expect(entry.name).toBe(name)
+      expect(entry.estimated).toBeUndefined()
+      expect(entry.price).toMatchObject({ currency: 'USD', ...price })
+    }
+  })
+
+  it('prices the OpenAI image model ids exposed by the relay imaging channel', () => {
+    // 绘图模型（gpt-image 系列）经中转站的绘图通道暴露，models.dev 无同 id 的一手收录，
+    // 故按经营业者给出的实付人民币单价收录。两个型号同价：输入 ¥14 / 缓存读 ¥5.6 / 输出 ¥84。
+    const expected: Array<[string, string]> = [
+      ['gpt-image-2', 'GPT Image 2'],
+      ['gpt-image-2.5-sunburst', 'GPT Image 2.5 Sunburst'],
+    ]
+    for (const [id, name] of expected) {
+      expect(resolveCatalogKey(id)).toBe(id)
+      const entry = modelOf(id)
+      expect(entry.name).toBe(name)
+      expect(entry.estimated).toBeUndefined()
+      expect(entry.price).toMatchObject({ currency: 'CNY', input: 14, cacheHit: 5.6, output: 84 })
+    }
+    // 点/横杠变体归一。
+    expect(resolveCatalogKey('gpt-image-2-5-sunburst')).toBe('gpt-image-2.5-sunburst')
   })
 
   it('keeps user prices authoritative across the reprice boundary', () => {
@@ -636,6 +717,87 @@ describe('time-limited promo (GLM-5.3-Flash)', () => {
   })
 })
 
+describe('free-window promo factor=0 (U2 Flash, issue #86)', () => {
+  const MILLION = 1_000_000
+  const buckets = { input: MILLION, cacheHit: MILLION, cacheMiss: MILLION, output: MILLION }
+  const entry = modelOf('u2-flash')
+  // 判定时刻从 promo 元数据推导，不依赖真实时钟：免费期过后测试依旧稳定。
+  const endsAtMs = entry.promo?.endsAtMs ?? 0
+
+  it('ships list price plus the free-window metadata', () => {
+    // 目录保存刊例价（1 / 0.2 / 2），免费期是 promo 元数据，不把目录价写成 0。
+    expect(entry.price).toMatchObject({ currency: 'CNY', input: 1, cacheHit: 0.2, output: 2 })
+    expect(entry.promo?.factor).toBe(0)
+    expect(endsAtMs).toBe(Date.UTC(2026, 9, 31, 16, 0, 0))
+  })
+
+  it('prices in-window events at zero and restores list price after expiry', () => {
+    // factor=0 是合法促销（活动期免费）：窗口内全档 0 元，到期自动恢复刊例价。
+    expect(isPromoActive(entry.promo!, endsAtMs - 1000)).toBe(true)
+    expect(computeCostAt(entry, buckets, endsAtMs - 1000)).toBe(0)
+    expect(computeCostAt(entry, buckets, endsAtMs)).toBeCloseTo(1 + 0.2 + 2, 10)
+  })
+
+  it('falls back to factor for out-of-range per-band overrides', () => {
+    // 分档覆盖超出 [0,1)（如 1.5）回落 factor：仍按半价，绝不按 1.5 倍加价。
+    const perBand = { ...modelOf('flash'), promo: { factor: 0.5, factors: { input: 1.5 }, endsAtMs } }
+    const priced = applyPromo(perBand, endsAtMs - 1000)
+    expect(priced.price.input).toBeCloseTo(1, 10) // 回落 factor：¥2 → ¥1
+    expect(priced.price.output).toBeCloseTo(4, 10) // V4 Flash 输出 ¥8 → ¥4
+  })
+
+  it('honours a per-band free override alongside a discounted factor', () => {
+    // 反向：factor 0.5 + 单档 0 → 该档免费、其余半价（[0,1) 窗口对分档生效）。
+    const mixed = { ...modelOf('flash'), promo: { factor: 0.5, factors: { output: 0 }, endsAtMs } }
+    const priced = applyPromo(mixed, endsAtMs - 1000)
+    expect(priced.price.input).toBeCloseTo(1, 10)
+    expect(priced.price.output).toBe(0)
+  })
+})
+
+describe('catalog additions for issue #86 (U2 family, M3.1 Flash Preview)', () => {
+  it('resolves official ids and separator variants to the new keys', () => {
+    expect(resolveCatalogKey('u2-flash')).toBe('u2-flash')
+    expect(resolveCatalogKey('u2')).toBe('u2')
+    expect(resolveCatalogKey('u2-med')).toBe('u2-med')
+    // 官方大小写形态与横杠变体都落到 M3.1 键。
+    expect(resolveCatalogKey('MiniMax-M3.1-Flash-Preview')).toBe('minimax-m3.1-flash-preview')
+    expect(resolveCatalogKey('minimax-m3-1-flash-preview')).toBe('minimax-m3.1-flash-preview')
+  })
+
+  it('carries the reported user-side CNY prices', () => {
+    expect(modelOf('u2').price).toMatchObject({ currency: 'CNY', input: 1, cacheHit: 0.2, output: 2 })
+    expect(modelOf('u2-med').price).toMatchObject({ currency: 'CNY', input: 8, cacheHit: 2, output: 28 })
+    // Preview 条目按其存续期生效的 M3 口径保留（issue #97 未推翻历史计价，只新增
+    // 正式版条目；正式版断言在 modelOf 组）。
+    expect(modelOf('minimax-m3.1-flash-preview').price).toMatchObject({ currency: 'CNY', input: 2.1, cacheHit: 0.42, output: 8.4 })
+  })
+})
+
+describe('catalog additions for 2026-10 sweep (Haiku 5.5, Mythos 5.1)', () => {
+  it('adds Claude Haiku 5.5 with standard-tier pricing (2026-10-07 release)', () => {
+    // 官方 id 与点号变体归一；≤100K 标准档，长上下文加价不单列。
+    expect(resolveCatalogKey('claude-haiku-5.5')).toBe('claude-haiku-5-5')
+    expect(resolveCatalogKey('claude-haiku-5-5')).toBe('claude-haiku-5-5')
+    expect(modelOf('claude-haiku-5-5').price).toMatchObject({ currency: 'USD', input: 0.1, cacheHit: 0.01, output: 0.5 })
+  })
+
+  it('folds Mythos 5.1 into the same-price Fable 5.1 key', () => {
+    // fable 条目注释「同期同价发布的 Mythos 5.1 不单列」——别名归一补上，
+    // 日志里的 mythos 用量不再落「未收录」。
+    expect(resolveCatalogKey('claude-mythos-5-1')).toBe('claude-fable-5-1')
+    expect(resolveCatalogKey('claude-mythos-5.1')).toBe('claude-fable-5-1')
+  })
+
+  it('homes relay vendor-prefixed deepseek ids to the official keys (issue #91)', () => {
+    // CommandCode 等 OpenRouter 式中转不改写上游 id、只加 `deepseek/` 命名空间
+    // 前缀——canon 去分隔符后无法命中既有键，需显式别名归一。
+    expect(resolveCatalogKey('deepseek/deepseek-v4.1-flash')).toBe('flash')
+    expect(resolveCatalogKey('deepseek/deepseek-flash')).toBe('flash')
+    expect(resolveCatalogKey('deepseek/deepseek-v4-pro')).toBe('pro')
+  })
+})
+
 describe('Qwen3.8 Max list price with extra pricing rows', () => {
   const entry = modelOf('qwen3.8-max')
 
@@ -668,18 +830,17 @@ describe('Qwen3.8 Flash list price with extra pricing rows', () => {
   const entry = modelOf('qwen3.8-flash')
 
   it('uses the official CNY list price', () => {
-    // 人民币刊例：输入 1 / 缓存命中 0.1 / 输出 3。
+    // 人民币刊例（官方价目页 2026-09-08 更新）：输入 0.8 / 缓存命中 0.1 / 输出 2.7。
     expect(entry.key).toBe('qwen-3.8-flash')
-    expect(entry.price).toMatchObject({ currency: 'CNY', input: 1, cacheHit: 0.1, output: 3 })
+    expect(entry.price).toMatchObject({ currency: 'CNY', input: 0.8, cacheHit: 0.1, output: 2.7 })
   })
 
   it('carries batch and explicit-cache rows as display-only reference prices', () => {
     const rows = entry.extraRows ?? []
-    // 四个附加维度齐全：显式缓存创建/命中 + Batch File + Batch Chat。
-    expect(rows.map(row => row.label)).toEqual(['显式缓存创建', '显式缓存命中', 'Batch File', 'Batch Chat'])
-    // Batch File 长期半价档：输入 0.5 / 输出 1.5；Batch Chat 与标准价一致。
-    expect(rows.find(row => row.label === 'Batch File')).toMatchObject({ input: 0.5, output: 1.5 })
-    expect(rows.find(row => row.label === 'Batch Chat')).toMatchObject({ input: 1, output: 3 })
+    // 官方能力表标注「批量推理 不支持」：只保留显式缓存创建/命中两行。
+    expect(rows.map(row => row.label)).toEqual(['显式缓存创建', '显式缓存命中'])
+    expect(rows.find(row => row.label === '显式缓存创建')).toMatchObject({ input: 1.25 })
+    expect(rows.find(row => row.label === '显式缓存命中')).toMatchObject({ input: 0.1 })
     expect(entry.promo).toBeUndefined()
   })
 })
@@ -746,10 +907,111 @@ describe('applyUserModelAliases (config seam)', () => {
   })
 
   it('lets user aliases bind uncatalogued ids to catalog keys', () => {
-    applyUserModelAliases({ 'hy4-preview': 'hunyuan' })
-    expect(resolveCatalogKey('hy4-preview')).toBe('hunyuan')
+    // hy4-preview 已内置收录（hunyuan-hy4-preview），这里改用虚构占位 id 验证机制。
+    applyUserModelAliases({ 'totally-new-model-y': 'hunyuan' })
+    expect(resolveCatalogKey('totally-new-model-y')).toBe('hunyuan')
     // 清除后回退原样（未收录）。
     applyUserModelAliases(undefined)
-    expect(resolveCatalogKey('hy4-preview')).toBe('hy4-preview')
+    expect(resolveCatalogKey('totally-new-model-y')).toBe('totally-new-model-y')
+  })
+
+  it('hy4-preview 内置归一到独立目录键，不依赖用户别名', () => {
+    expect(resolveCatalogKey('hy4-preview')).toBe('hunyuan-hy4-preview')
+    expect(resolveCatalogKey('hy4')).toBe('hunyuan-hy4-preview')
+    expect(modelOf('glm-5.3-flashx')?.key).toBe('glm-5.3-flashx')
+    expect(modelOf('glm-5.3-flashx')?.price).toEqual({ currency: 'CNY', input: 2, cacheHit: 0.57, output: 7 })
+  })
+})
+
+describe('unseeded client catalog degradation', () => {
+  afterEach(() => {
+    // 用例结束还原全量注入，避免模块级状态泄漏给后续 describe。
+    applyBuiltinCatalog(BUILTIN_MODEL_CATALOG, BUILTIN_MODEL_KEY_ALIASES)
+  })
+
+  it('modelOf falls back to the zero-price other entry when the catalog is unseeded', () => {
+    // 客户端在首个 pricing 响应前目录为空：未知模型不炸、不计费（零价兜底），
+    // 已知键也查不到内置条目（走零价 other），费率表渲染空列表而非抛错。
+    applyBuiltinCatalog([], {})
+    const entry = modelOf('glm-5.3-flashx')
+    expect(entry.key).toBe('other')
+    expect(entry.price.input).toBe(0)
+    expect(entry.price.output).toBe(0)
+    // 内置条目不出现（探活注入的 liveCatalogModels 条目仍会列出，属预期）。
+    expect(catalogEntries().some(e => e.key === 'glm-5.3-flashx')).toBe(false)
+  })
+
+  it('re-seeding rebuilds the canon index so normalized lookups work again', () => {
+    // 注入后重建归一化索引：归一化 id（大小写/分隔符差异）重新可解析。
+    applyBuiltinCatalog(BUILTIN_MODEL_CATALOG, BUILTIN_MODEL_KEY_ALIASES)
+    expect(resolveCatalogKey('DeepSeek_V4-Flash')).toBe('flash')
+    expect(modelOf('glm-5.3-flashx')?.price.input).toBe(2)
+  })
+})
+
+describe('catalog expansion 2026-10-23 (first-party vendors)', () => {
+  it('keeps catalog keys unique and free of normalized-key collisions', () => {
+    // 归一化索引是「首个命中即用」：两个键归一后同形会让其中一个永远解析不到，
+    // 扩容后必须守住这条不变量。
+    const keys = BUILTIN_MODEL_CATALOG.map(entry => entry.key)
+    expect(new Set(keys).size).toBe(keys.length)
+    const canonSeen = new Map<string, string>()
+    for (const key of keys) {
+      const canon = canonModelId(key)
+      const prev = canonSeen.get(canon)
+      expect(prev, `normalized collision: ${prev} vs ${key}`).toBeUndefined()
+      canonSeen.set(canon, key)
+    }
+  })
+
+  it('points every alias at an existing catalog key', () => {
+    for (const [alias, target] of Object.entries(BUILTIN_MODEL_KEY_ALIASES)) {
+      expect(BUILTIN_MODEL_CATALOG.some(entry => entry.key === target), `alias ${alias} → ${target}`).toBe(true)
+    }
+  })
+
+  it('prices every catalog entry with positive input and output rates', () => {
+    for (const entry of BUILTIN_MODEL_CATALOG) {
+      // 'other' 是未知模型的零价兜底（不产生费用），不参与正价断言。
+      if (entry.key === 'other' || entry.key === 'deepseek-v4.1-flash-free') continue
+      expect(entry.price.input, entry.key).toBeGreaterThan(0)
+      expect(entry.price.output, entry.key).toBeGreaterThan(0)
+      expect(entry.price.cacheHit, entry.key).toBeGreaterThanOrEqual(0)
+    }
+  })
+
+  it('resolves the newly covered official ids', () => {
+    // 一批此前落「未收录」的官方 id：补录后应各自命中对应目录键。
+    expect(resolveCatalogKey('kimi-k2.7-code')).toBe('kimi')
+    expect(resolveCatalogKey('doubao-seed-2.0-pro')).toBe('doubao')
+    expect(resolveCatalogKey('doubao-seed-1.6')).toBe('doubao-1.6')
+    expect(resolveCatalogKey('gemini-3.6-flash')).toBe('gemini-flash')
+    expect(resolveCatalogKey('gemini-pro-latest')).toBe('gemini-pro')
+    expect(resolveCatalogKey('qwen3.5-plus')).toBe('qwen-plus')
+    expect(resolveCatalogKey('zai-glm-5-3')).toBe('glm-5.3')
+    expect(resolveCatalogKey('MiniMax-M2.1')).toBe('minimax-m2.1')
+    expect(resolveCatalogKey('kimi-k2.5')).toBe('kimi-k2.5')
+    expect(resolveCatalogKey('gpt-5.4-mini')).toBe('gpt-5.4-mini')
+    expect(resolveCatalogKey('muse-spark-1.3')).toBe('muse-spark-1.3')
+    expect(resolveCatalogKey('mimo-v2.5-pro-ultraspeed')).toBe('mimo-v2.5-pro-ultraspeed')
+  })
+
+  it('surfaces the newly covered models in the rate table rows', () => {
+    // 费率表面板的数据源是 catalogEntries()：补录条目必须真的出现在面板行里，
+    // 而不只是躺在目录里（面板过滤 retired 条目）。
+    const rows = catalogEntries()
+    const byKey = new Map(rows.map(row => [row.key, row]))
+    expect(byKey.get('gpt-5.4')?.price).toMatchObject({ currency: 'USD', input: 2.5, output: 15 })
+    expect(byKey.get('kimi-k2.5')?.price).toMatchObject({ currency: 'CNY', input: 4.07 })
+    expect(byKey.get('muse-spark-1.3')?.provider).toBe('Meta')
+  })
+
+  it('carries the new entries at the catalog prices', () => {
+    // 抽样：海外取 models.dev 原生 USD，国内取官方 CN 价（-cn 目录）或折算值。
+    expect(modelOf('gpt-5.4').price).toMatchObject({ currency: 'USD', input: 2.5, cacheHit: 0.25, output: 15 })
+    expect(modelOf('claude-opus-4-5').price).toMatchObject({ currency: 'USD', input: 5, cacheHit: 0.5, output: 25 })
+    expect(modelOf('glm-4.5').price).toMatchObject({ currency: 'CNY', input: 4.07, cacheHit: 0.75, output: 14.94 })
+    expect(modelOf('kimi-k2.5').price).toMatchObject({ currency: 'CNY', input: 4.07, cacheHit: 0, output: 20.37 })
+    expect(modelOf('minimax-m2.1').price).toMatchObject({ currency: 'CNY', input: 2.13, cacheHit: 0.21, output: 8.52 })
   })
 })

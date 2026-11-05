@@ -1,12 +1,14 @@
 /**
  * usage-stats 工具开关的共享设置契约（node 与 client 两端共用）。
  *
- * 宿主把已注册的设置命名空间服务给浏览器；node 半区在 apply 阶段读一次该值决定
- * 是否向模型注入 `usage_stats` 工具（工具注入是启动期决策，改开关后重载应用生效），
- * client 半区在「设置」Tab 渲染开关并写入同一命名空间。缺省的默认行为是关闭——
- * 避免该工具默认占用模型每次请求的上下文（coding 场景通常在仪表盘看用量）。
+ * 旧宿主（≤0.1.6）把该开关存设置命名空间；宿主 0.1.7+ 起注册面移除，改存插件
+ * 条目 config 的 volatile 字段（Config schema 投影），写回经 settings.update，
+ * 提交后引用原位更新、`usage_stats` 工具即时注册/注销（无需重载应用）。
+ * client 半区在「设置」Tab 渲染开关并经 /api/billing/usage-tool 写入，node 半区
+ * 按宿主世代选择通道。缺省的默认行为是关闭——避免该工具默认占用模型每次请求
+ * 的上下文（coding 场景通常在仪表盘看用量）。
  */
-import type { UserPriceEntry } from './pricing.ts';
+import type { CostCurrency, UserPriceEntry } from './pricing.ts';
 /** 设置命名空间 id（小写 kebab-case）。 */
 export declare const BILLING_SETTINGS_NAMESPACE = "ui-usage-billing";
 /** 该命名空间下用户可编辑的字段名。 */
@@ -30,7 +32,7 @@ export interface FloatWindowPrefs {
     /** `subscription` 模式下可切换展示的订阅通道 provider id 列表（每次显示一张）。 */
     targets: string[];
 }
-/** 默认浮窗偏好：综合模式、无指定目标（向后兼容现有综合速览卡）。 */
+/** 默认浮窗偏好：综合模式、无指定目标。 */
 export declare const DEFAULT_FLOAT_WINDOW_PREFS: FloatWindowPrefs;
 /** localStorage key（与 budget store 的 `dsh.ui-usage-billing.*` 命名空间一致）。 */
 export declare const FLOAT_WINDOW_STORAGE_KEY = "dsh.ui-usage-billing.float";
@@ -41,22 +43,56 @@ export declare function loadFloatWindowPrefs(): FloatWindowPrefs;
 export declare function saveFloatWindowPrefs(prefs: FloatWindowPrefs): void;
 /** 左下角计费卡的主指标视角。 */
 export type BillingCardMetric = 'money' | 'tokens';
+/** 计费卡主数字的统计范围（单值卡面，issue #47 反馈）。 */
+export type BillingCardSpan = 'day' | 'week' | 'month';
+/** 侧栏入口显示模式：完整卡片 / 紧凑图标 / 完全隐藏（issue #108）。 */
+export type BillingCardMode = 'full' | 'compact' | 'hidden';
 /**
- * 计费卡显示偏好：卡面主行/副行与迷你柱的计价视角。
+ * 计费卡显示偏好：侧栏入口模式 + 卡面主数字与迷你柱的计价视角 + 主数字统计范围。
  * 纯 client 偏好，存 localStorage（不依赖 node 半区接口/设置 schema）。
  */
 export interface BillingCardPrefs {
+    /** 侧栏入口模式（默认完整卡片；老偏好缺字段时保持原体验）。 */
+    mode: BillingCardMode;
     /** 主指标：花费金额（CNY/USD 按币种）/ Token 消耗。 */
     metric: BillingCardMetric;
+    /** 主数字统计范围：今日 / 本周 / 本月（默认今日）。 */
+    span: BillingCardSpan;
+    /** 是否显示「今日环比」涨跌徽章（默认显示；issue #93：部分用户觉得红色横条太醒目）。 */
+    showDelta: boolean;
 }
-/** 默认计费卡偏好：花费金额（向后兼容现有金额视图）。 */
+/** 默认计费卡偏好：完整卡片 + 花费金额 + 今日口径 + 显示环比徽章。 */
 export declare const DEFAULT_BILLING_CARD_PREFS: BillingCardPrefs;
 /** localStorage key（与 budget store 的 `dsh.ui-usage-billing.*` 命名空间一致）。 */
 export declare const BILLING_CARD_STORAGE_KEY = "dsh.ui-usage-billing.card";
+/** 同文档跨 React 树同步：仪表盘设置与宿主原生设置页共用这份偏好。 */
+export declare const BILLING_CARD_PREF_EVENT = "dsh.ui-usage-billing.card-changed";
 /** 读取计费卡偏好（含损坏/缺失回退到默认）。仅在浏览器半区调用。 */
 export declare function loadBillingCardPrefs(): BillingCardPrefs;
 /** 写入计费卡偏好。失败静默（展示偏好非关键）。 */
 export declare function saveBillingCardPrefs(prefs: BillingCardPrefs): void;
+/** 订阅同文档 CustomEvent 与其他标签页的 storage 写入；仅在浏览器半区调用。 */
+export declare function subscribeBillingCardPrefs(listener: () => void): () => void;
+/** 防锁死：宿主没有任何恢复入口时，完全隐藏一律降级为紧凑图标。 */
+export declare function resolveBillingCardMode(mode: BillingCardMode, recoveryEntryAvailable: boolean): BillingCardMode;
+/** 概览 Hero + KPI 全局统计范围（预设或自定义起止日期），与组件内 AvgCostRange 同构。 */
+export type KpiRangePref = 'today' | '7d' | 'week' | 'month' | 'all' | 'custom';
+/** 自定义日期范围：本地日历日，起止均包含；不伪装成分钟级切片。 */
+export interface KpiCustomRange {
+    start: string;
+    end: string;
+}
+/** localStorage key（与其他 `dsh.ui-usage-billing.*` 偏好同命名空间）。 */
+export declare const KPI_RANGE_STORAGE_KEY = "dsh.ui-usage-billing.kpi-range";
+export declare const KPI_CUSTOM_RANGE_STORAGE_KEY = "dsh.ui-usage-billing.kpi-custom-range";
+/** 读取 KPI 全局范围偏好（损坏/越界回退「累计」）。仅在浏览器半区调用。 */
+export declare function loadKpiRange(): KpiRangePref;
+/** 写入 KPI 全局范围偏好。失败静默（展示偏好非关键）。 */
+export declare function saveKpiRange(range: KpiRangePref): void;
+/** 自定义范围缺省为昨天；损坏、非法日期或起止倒置一律回退，避免意外全量。 */
+export declare function loadKpiCustomRange(): KpiCustomRange;
+/** 自定义起止日期与范围种类分开保存，切走再切回仍保留上次选择。 */
+export declare function saveKpiCustomRange(range: KpiCustomRange): void;
 /**
  * 中转站列表（中转站分布 / 中转站额度）的展示偏好（issue #17）。
  * 纯 client 偏好，存 localStorage（不依赖 node 半区接口/设置 schema）。
@@ -82,10 +118,10 @@ export declare function saveSiteListPrefs(prefs: SiteListPrefs): void;
 export interface LiveCostBarPrefs {
     /** 是否显示输入框下方的即时代费条胶囊（默认 true：保持历史行为）。 */
     show: boolean;
-    /** 胶囊位置：below = 输入框下方（默认）；above = 输入框上方；toolbar = 工具行模型选择前的内联 chip。 */
+    /** 胶囊位置：toolbar = 输入框内部工具行内联 chip（默认，issue #47）；below = 输入框下方（宿主 composer.dock 座位）；above = 输入框上方（宿主 input.dock 座位，issue #101）。 */
     position: 'below' | 'above' | 'toolbar';
 }
-/** 默认即时代费条偏好：显示在输入框下方（升级用户零感知）。 */
+/** 默认即时代费条偏好：显示在输入框内部（工具行内联 chip，issue #47 反馈「上方/下方」都打断输入视线）。 */
 export declare const DEFAULT_LIVE_COST_BAR_PREFS: LiveCostBarPrefs;
 /** localStorage key（与其他 `dsh.ui-usage-billing.*` 偏好同命名空间）。 */
 export declare const LIVE_COST_BAR_STORAGE_KEY = "dsh.ui-usage-billing.livecost";
@@ -95,18 +131,73 @@ export declare const LIVE_COST_BAR_PREF_EVENT = "dsh.ui-usage-billing.livecost-p
 export declare function loadLiveCostBarPrefs(): LiveCostBarPrefs;
 /** 写入即时代费条偏好。失败静默（展示偏好非关键）。 */
 export declare function saveLiveCostBarPrefs(prefs: LiveCostBarPrefs): void;
-/** 展示币种：与 client/pricing.ts 的 `CostCurrency` 同形（避免运行时依赖，故就地声明）。 */
-export type DisplayCurrency = 'cny' | 'usd';
-/** FORK PATCH (halp1): 默认展示币种 = USD。 */
-export declare const DEFAULT_DISPLAY_CURRENCY: DisplayCurrency;
-/** localStorage key（与其他 `dsh.ui-usage-billing.*` 偏好同命名空间）。 */
+/**
+ * 显示币种（¥ / ≈$）。纯 client 偏好，存 localStorage；仪表盘、侧边栏卡片与
+ * 输入框胶囊分属不同 React 树，跨树同步走 localStorage + `CURRENCY_PREF_EVENT`
+ * CustomEvent（同文档即时生效，跨标签页靠 storage 事件）——与即时代费条偏好同一套做法。
+ */
 export declare const CURRENCY_STORAGE_KEY = "dsh.ui-usage-billing.currency";
-/** 币种切换后派发的 CustomEvent 名（chip / ticker / dashboard 跨树即时同步）。 */
+/** 币种切换后派发的 CustomEvent 名（另一棵树监听它即时重读）。 */
 export declare const CURRENCY_PREF_EVENT = "dsh.ui-usage-billing.currency-pref";
-/** 读取展示币种（含损坏/缺失回退到默认）。仅在浏览器半区调用。 */
-export declare function loadDisplayCurrency(): DisplayCurrency;
-/** 写入展示币种并广播（同文档即时生效）。失败静默（展示偏好非关键）。 */
-export declare function saveDisplayCurrency(currency: DisplayCurrency): void;
+/** 默认币种：人民币（保持历史行为）。 */
+export declare const DEFAULT_CURRENCY: CostCurrency;
+/** 读取显示币种（损坏/缺失/非法值一律回退默认）。仅在浏览器半区调用。 */
+export declare function loadCurrency(): CostCurrency;
+/** 写入显示币种。失败静默（展示偏好非关键）。 */
+export declare function saveCurrency(currency: CostCurrency): void;
+/**
+ * 被固定的模型（峰谷指示点）：费率表里点击圆点固定，固定后在输入框旁常驻显示。
+ * 与币种偏好同一套做法：localStorage + CustomEvent，因为胶囊与弹窗分属两棵 React 树。
+ */
+export declare const PINNED_MODELS_STORAGE_KEY = "dsh.ui-usage-billing.pinned";
+/** 固定列表变更后派发的 CustomEvent 名。 */
+export declare const PINNED_MODELS_EVENT = "dsh.ui-usage-billing.pinned-pref";
+/** 读取固定模型列表（损坏/非数组/非字符串项一律丢弃）。 */
+export declare function loadPinnedModels(): string[];
+/** 写入固定模型列表。失败静默（展示偏好非关键）。 */
+export declare function savePinnedModels(keys: readonly string[]): void;
+/**
+ * 厂商（提供商）组的展开集合与「仅看今日」过滤（issue #77）。
+ * 纯 client 偏好，存 localStorage（不依赖 node 半区接口/设置 schema）。
+ */
+/** localStorage key：当前展开的厂商组名列表（默认收起，仅记录用户展开过的组）。 */
+export declare const PROVIDER_EXPANDED_STORAGE_KEY = "dsh.ui-usage-billing.provider-expanded";
+/**
+ * 读取展开的厂商组 id 列表（审计 S2）。
+ * 持久化内容是带前缀的稳定 id（`ch:` / `sub:` / `bal:`）；v1.4.14 前存的是
+ * 本地化显示名（无冒号前缀），切语言即失效——这里直接丢弃旧格式，用户重新
+ * 展开一次即可，不做不可逆的名称猜测迁移。
+ */
+export declare function loadProviderExpanded(): string[];
+/** 写入展开的厂商组名列表。失败静默（展示偏好非关键）。 */
+export declare function saveProviderExpanded(names: readonly string[]): void;
+/** localStorage key：「仅看今日」开关（默认关）。 */
+export declare const PROVIDERS_TODAY_STORAGE_KEY = "dsh.ui-usage-billing.providers-today";
+/** 读取「仅看今日」开关。 */
+export declare function loadProvidersTodayOnly(): boolean;
+/** 写入「仅看今日」开关。失败静默（展示偏好非关键）。 */
+export declare function saveProvidersTodayOnly(enabled: boolean): void;
+/** 界面语言（与币种解耦后独立持久化）。 */
+export type BillingLanguage = 'zh' | 'en';
+/** localStorage key（与其他 `dsh.ui-usage-billing.*` 偏好同命名空间）。 */
+export declare const LANGUAGE_STORAGE_KEY = "dsh.ui-usage-billing.language";
+/** 语言切换后派发的 CustomEvent 名（另一棵树监听它即时重读）。 */
+export declare const LANGUAGE_PREF_EVENT = "dsh.ui-usage-billing.language-pref";
+/**
+ * 读取界面语言。**迁移关键**：历史版本的语言是从币种推导的（选 $ 就是英文），
+ * 因此当尚无语言偏好时，**从已存的币种播种一次**并写回；升级后没有任何人
+ * 的界面语言会静默改变，且播种只发生一次。
+ * @returns 界面语言。
+ */
+export declare function loadLanguage(): BillingLanguage;
+/** 写入界面语言。失败静默（展示偏好非关键）。 */
+export declare function saveLanguage(language: BillingLanguage): void;
+/**
+ * 切换某个模型的固定状态。
+ * @param key - 目录键。
+ * @returns 切换后的列表（已写入）。
+ */
+export declare function togglePinnedModel(key: string): string[];
 /** 用户自定义单价（与 client/pricing.ts 的 `UserPriceEntry` 同形；type import，无运行时依赖）。 */
 export type StoredUserPrice = UserPriceEntry;
 /** 自定义价表：模型（+可选来源）→ 单价，条目列表（支持同名模型绑定不同中转站 origin）。 */
@@ -141,4 +232,68 @@ export declare const PERF_VIEW_STORAGE_KEY = "dsh.ui-usage-billing.perf";
 export declare function loadPerfViewPrefs(): PerfViewPrefs;
 /** 写入性能视图偏好。失败静默（展示偏好非关键）。 */
 export declare function savePerfViewPrefs(prefs: PerfViewPrefs): void;
+/**
+ * 显示密度档位（v1.5 新增）。紧凑档减小行高/字号/内边距，舒适档加大；
+ * 默认档保持历史感官。client 端写到 `documentElement.dataset.density`，
+ * CSS `[data-density="..."]` 选择器派生 `--ds-density-*` 变量。
+ */
+export type DensityPref = 'compact' | 'default' | 'comfortable';
+/** localStorage key（与其他 `dsh.ui-usage-billing.*` 偏好同命名空间）。 */
+export declare const DENSITY_STORAGE_KEY = "dsh.ui-usage-billing.density";
+/** 密度变更后派发的 CustomEvent 名（其他订阅侧监听它即时重读）。 */
+export declare const DENSITY_PREF_EVENT = "dsh.ui-usage-billing.density-pref";
+/** 默认密度：保持历史感官（老用户感官零变化）。 */
+export declare const DEFAULT_DENSITY: DensityPref;
+/** 读取密度偏好（损坏/越界回退默认）。仅在浏览器半区调用。 */
+export declare function loadDensity(): DensityPref;
+/** 写入密度偏好并同步派发事件（同文档即时生效，跨标签页靠 storage 事件）。
+ *  失败静默（展示偏好非关键）。 */
+export declare function saveDensity(density: DensityPref): void;
+/**
+ * 动效强度档位（v1.5 新增）。`off` 冻结全部 transition+animation，
+ * `subtle` 抑制 240ms 以上的入场/计数动画但保留 160ms 微交互，
+ * `rich` 即默认（全开）。写到 `documentElement.dataset.motion`。
+ */
+export type MotionPref = 'off' | 'subtle' | 'rich';
+/** localStorage key（与其他 `dsh.ui-usage-billing.*` 偏好同命名空间）。 */
+export declare const MOTION_STORAGE_KEY = "dsh.ui-usage-billing.motion";
+/** 动效变更后派发的 CustomEvent 名。 */
+export declare const MOTION_PREF_EVENT = "dsh.ui-usage-billing.motion-pref";
+/** 默认动效：全开（保持历史感官）。 */
+export declare const DEFAULT_MOTION: MotionPref;
+/** 读取动效偏好（损坏/越界回退默认）。仅在浏览器半区调用。 */
+export declare function loadMotion(): MotionPref;
+/** 写入动效偏好并同步派发事件。失败静默。 */
+export declare function saveMotion(motion: MotionPref): void;
+/** Composer shortcut preferences; both actions are opt-in and default off. */
+export interface QuickQueuePrefs {
+    /** Show the draft enqueue controls beside the composer. */
+    enabled: boolean;
+    /** Clear only the exact enqueued draft revision after a successful mutation. */
+    clearAfterEnqueue: boolean;
+    /**
+     * Show the off-peak queue entry beside the composer at all (issue #114).
+     *
+     * Off hides the persistent switch *and* the enqueue controls; the queue page
+     * stays usable. Default true keeps the entry visible for everyone who never
+     * touched the setting.
+     */
+    showEntry: boolean;
+}
+export declare const DEFAULT_QUICK_QUEUE_PREFS: QuickQueuePrefs;
+export declare const QUICK_QUEUE_STORAGE_KEY = "dsh.ui-usage-billing.quick-queue";
+export declare const QUICK_QUEUE_PREF_EVENT = "dsh.ui-usage-billing.quick-queue-pref";
+/** Read composer queue preferences, failing closed on missing or malformed values. */
+export declare function loadQuickQueuePrefs(): QuickQueuePrefs;
+/**
+ * Persist a composer queue preference patch and broadcast to the independent
+ * left/right composer React trees.
+ *
+ * The patch merges over a fresh read instead of overwriting the stored object:
+ * the composer switch and the settings page live in separate React trees, so a
+ * write built from a stale snapshot would silently roll back the other tree's
+ * field (issue #114 — settings page writes `showEntry`, composer writes
+ * `enabled`).
+ */
+export declare function saveQuickQueuePrefs(patch: Partial<QuickQueuePrefs>): void;
 //# sourceMappingURL=usage-billing-settings.d.ts.map

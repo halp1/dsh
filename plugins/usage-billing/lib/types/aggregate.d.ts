@@ -10,11 +10,16 @@
  * zero while their tokens still count. Pure functions only: the persistence
  * handle is injected, so the fold is unit-testable without a host.
  */
-import { SessionLogOffset } from '@deepseek-ai/dsh-session/types';
-import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session/types';
+import type { SessionEvent, SessionHeader, SessionId, SessionLogOffset as SessionLogOffsetT } from '@deepseek-ai/dsh-session/types';
 import type { TokenUsage } from '@deepseek-ai/dsh-llm';
-import { MODEL_KEY_ALIASES, resolveCatalogKey } from './client/pricing.ts';
-export { MODEL_KEY_ALIASES, resolveCatalogKey };
+import { resolveCatalogKey } from './client/pricing.ts';
+import { BUILTIN_MODEL_KEY_ALIASES } from './builtin-catalog.ts';
+/** 会话日志偏移：宿主 0.1.2-alpha.4 前的 dsh-session/types 不导出 SessionLogOffset
+ * 值，具名导入让这些宿主装载即崩（v1.4.19~v1.4.22 实测，alpha.3 真机复现）；
+ * namespace 导入不做具名导出校验，缺导出时退化为恒等——偏移类型是
+ * BrandedNumber，值域与 number 同构，老宿主的 readFrom 原样收数字。 */
+export declare const sessionLogOffsetOf: (value: number) => SessionLogOffsetT;
+export { BUILTIN_MODEL_KEY_ALIASES, resolveCatalogKey };
 /**
  * 走订阅套餐（coding / token plan / opencode 订阅）的 provider id：这些通道的
  * 调用按套餐计费，不再按 token 计费，因此即使模型 id 与计费表撞名也一律豁免。
@@ -29,6 +34,27 @@ export declare const DEFAULT_SUBSCRIPTION_PROVIDERS: readonly string[];
  * 调用与费用分桶展示；部署可由配置覆盖（见 {@link AggregateOptions}）。
  */
 export declare function isOfficialProvider(provider: string): boolean;
+/**
+ * 已知的「第三方插件注册 adapter」通道名单：这些 provider 由别的插件经
+ * `ctx.llm.registerAdapter` 注册，**不经 llm-pi-ai 路由表**，因此
+ * {@link siteRefOf} 的路由查询必然 miss。与订阅豁免（issue #37 的 grok
+ * build）同构：显式列出、不做「猜通道」的通用发现——猜错会把来源不明的
+ * 路由也归位成可计价通道，违背 issue #82「支出主体无法核实不计价」的初衷。
+ *
+ * 收录语义：这些通道的支出主体是可核实的（WorkBuddy = 腾讯 WorkBuddy
+ * 桌面 App 账号），计费用模型官方目录价折算 Token 成本，与积分制解耦。
+ * 它们**不是** DeepSeek 官方渠道——{@link isOfficialProvider} 与
+ * {@link officialChannelOf} 都不会因本名单把调用算进官方口径。
+ */
+export declare const KNOWN_ADAPTER_PROVIDERS: ReadonlySet<string>;
+/**
+ * 一个 provider 是否命中已知 adapter 通道名单。判定与 {@link isOfficialProvider}
+ * 同姿态：trim + 大小写不敏感——dsh-workbuddy-connect 注册的是小写 id
+ *（`workbuddy` / `workbuddy-ai`），宿主不强制 route 小写，按大小写归一化可避免
+ * 日志里出现大小写变体时静默落回 unknown 桶。路由表命中仍优先于本名单
+ *（见 {@link siteRefOf}），用户自配的大小写变体走配置路径。
+ */
+export declare function isKnownAdapterProvider(provider: string): boolean;
 /** DeepSeek 官方直连端点的归一化 origin（`siteOriginOf` 口径）：有 baseURL 的路由只有它算官方。 */
 export declare const OFFICIAL_DEEPSEEK_ORIGIN = "https://api.deepseek.com";
 /**
@@ -73,8 +99,10 @@ export declare function siteOriginOf(baseURL: string): string;
  *   网关）按 `direct` 归位——unknown 一刀切会把官方直连的费用堆进「未知路由」组、
  *   且不算官方渠道（回归修复）；订阅豁免命中的通道（显式 `subscriptionProviders`
  *   配置或判定函数）同样按 `direct` 归位——订阅管理类插件注册的通道不经路由表，
- *   unknown 桶既掩盖归属又按 token 误计费（issue #37 的 grok build）；其余配置外
- *   名称保留 unknown（无法核实通道）。
+ *   unknown 桶既掩盖归属又按 token 误计费（issue #37 的 grok build）；已知的第三方
+ *   插件注册 adapter 通道（{@link KNOWN_ADAPTER_PROVIDERS}，如 workbuddy）同样按
+ *   `direct` 归位——支出主体可核实、按模型官方目录价计 Token 成本，unknown 桶会让
+ *   费用恒为 0；其余配置外名称保留 unknown（无法核实通道）。
  * @param provider - 会话日志里的 provider 路由名（request/header 的 `config.provider`）。
  * @param routes - 当前 provider 路由视图（来自 llm-pi-ai providers）。
  * @param opts - `subscription`：该调用是否已被订阅豁免判定命中。
@@ -84,10 +112,35 @@ export declare function siteRefOf(provider: string, routes: Readonly<Record<stri
 }): SiteRef;
 /** 站点桶的稳定 key：`site:<origin>` 与 `direct:<provider>` 分开，`unknown` 单一桶。 */
 export declare function siteBucketKey(ref: SiteRef): string;
+/**
+ * 站点桶按范围求和（usage_stats 工具的 bySite/relay 口径）：bySite 全量累计；
+ * relay 只计中转站桶（`site:<origin>` 键）——`direct:*` 与 `unknown` 不计入，
+ * 否则 relay 总额与 all 相同，中转站费用被高估。
+ */
+export declare function sumSiteBuckets(bySite: Readonly<Record<string, {
+    cost: number;
+    calls: number;
+    input: number;
+    output: number;
+}>>, range: 'bySite' | 'relay'): {
+    cost: number;
+    calls: number;
+    input: number;
+    output: number;
+};
 /** Aggregation tuning options. */
 export interface AggregateOptions {
+    /** Fork: retain catalog-cost estimates for historical providers no longer configured. */
+    estimateUnknownRoutes?: boolean;
     /** 订阅制 provider id 列表；缺省按订阅卡同款 id 判定（`isSubscriptionProviderId`）。 */
     subscriptionProviders?: readonly string[];
+    /**
+     * 订阅判定集合（**引用语义**，优先于 subscriptionProviders）：聚合器直接持有
+     * 传入的 Set 实例，调用方可在运行期原地增删——同一路由 id 按量/套餐两用的
+     * 厂商（MiniMax：`sk-cp-` 前缀 key 才是 Coding Plan）只能按 key 动态判定；
+     * 集合内容变化经 configFingerprint（按内容序列化）自动触发历史行全量重折。
+     */
+    subscriptionMatcher?: ReadonlySet<string>;
     /** 官方渠道 provider id 列表；缺省按 {@link officialChannelOf} 判定（通道 origin 优先）。 */
     officialProviderIds?: readonly string[];
     /**
@@ -96,21 +149,45 @@ export interface AggregateOptions {
      * 官方判定都用别名后的路由名）。
      */
     routeAliases?: Readonly<Record<string, string>>;
+    /** 折叠时模型 id → 目录键的用户自定义别名（与 pricing 模块注入的同源）：仅用于
+     *  折叠指纹——别名改动必须让历史行失效重折，否则 byModel 新旧 key 并存（issue #91 P2）。 */
+    modelKeyAliases?: Readonly<Record<string, string>>;
     /** 每会话折叠缓存的上限（默认 {@link DEFAULT_MAX_CACHE_SESSIONS}）；
      *  超限时按最近使用先后淘汰最久未用的会话，防长期运行内存膨胀。 */
     maxCacheSessions?: number;
     /** 中转站归组来源：返回当前 provider 路由视图（llm-pi-ai providers 的 baseURL）。
      *  每次聚合时调用取最新值；缺省时全部路由按「未知路由」处理（无配置发现）。 */
     resolveRoutes?: () => Readonly<Record<string, ProviderRouteView>>;
+    /** 已注册 adapter 的 provider 集合（宿主 llm 注册表，llm-pi-ai 之外的插件路由，
+     *  issue #91）：每次聚合时调用取最新值。这些通道宿主只会把请求发给已注册的
+     *  adapter，身份可核实——合成无 baseURL 的路由视图归位 `direct:<provider>` 按
+     *  官方目录价计费，不再落「未知路由」记 0；缺省时保持 unknown 口径。 */
+    resolveRegisteredProviders?: () => ReadonlySet<string>;
     /** 工作区标题解析：给定会话 cwd 返回项目显示标题；undefined = 回退到 cwd 末级目录名
      *  （host 的 workspaceRegistry 为可选依赖，缺失时不注入，行为保持不变）。 */
     resolveWorkspaceTitle?: (cwd: string) => string | undefined;
+    /**
+     * 会话标题兜底解析：给定会话头（宿主持久层列表元数据）返回宿主侧的会话标题。
+     *
+     * 只在**日志读不动**的会话上用（宿主拒绝该格式/代际，插件折叠失败）：此时插件
+     * 只能吃账本里的旧行，标题会永远停在重命名前的值——宿主自己的投影缓存仍可能
+     * 记得这个标题（格式代际边缘的既定能力），用它兜底可让标题跟随工作区
+     * （issue #103）。读得动的会话一律以日志为准，本回调不参与。
+     */
+    resolveSessionTitle?: (header: SessionHeader) => string | undefined;
     /** 独立的持久用量账本。启用后，已经成功折叠过的会话即使随后从
      *  sessionPersistence 中永久删除，也会继续计入累计用量。 */
     ledger?: UsageLedgerStore;
     /** 联网搜索请求（`web/deepseek-search-llm-request`，无用量事件）的单次费用
      *  估算（人民币元）；默认 {@link DEFAULT_SEARCH_CALL_ESTIMATE_CNY}，设 0 关闭。 */
     searchCallEstimateCny?: number;
+    /**
+     * 启动冷phase时长（毫秒，自聚合器创建起算，issue #105）：期间 aggregate()
+     * 只出账本轻文档——不 list 会话、不读任何日志，文档带 `staleSnapshot: true`，
+     * UI 一加载的轮询不再把「全量折叠」拉进启动关键路径。到点后首个请求（或预热
+     * 定时器）照常完整折叠。0 / 缺省 = 不设闸（旧行为：随到随折）。
+     */
+    deferFoldMs?: number;
 }
 /** 每会话折叠缓存默认上限：超过则按 LRU 淘汰（P1-6 峰值内存治理）。 */
 export declare const DEFAULT_MAX_CACHE_SESSIONS = 400;
@@ -154,8 +231,13 @@ export declare function emptyUsage(): ModelUsage;
  * @param subscription - whether the call went through a subscription plan; such calls never cost money.
  * @param timeMs - the call's wall-clock time (epoch ms); drives peak/off-peak pricing.
  * @param official - whether the call went through the official DeepSeek channel (vs a third-party relay).
+ * @param pricedCost - 调用方预算好的本次费用（同一条消息折叠进多个桶时计价结果相同，
+ *   逐桶重算会让最热路径付出 N 倍常数）；提供时跳过内部的计价闸门与计算，
+ *   调用方保证其已按 `!subscription && isPriced(key)` 判定。
+ * @param unverifiedChannel - 本次调用是否来自未知通道（配置外 provider）。未知通道的
+ *   支出主体无法核实，费用一律记 0（token 照常统计，issue #82）。
  */
-export declare function foldUsage(acc: ModelUsage, usage: TokenUsage, key: string, subscription: boolean, timeMs: number, official?: boolean): void;
+export declare function foldUsage(acc: ModelUsage, usage: TokenUsage, key: string, subscription: boolean, timeMs: number, official?: boolean, pricedCost?: number, unverifiedChannel?: boolean): void;
 /**
  * 联网搜索辅助请求的单次费用估算默认值（人民币元）。DeepSeek 官方对搜索请求
  * （web_search 服务端工具注入上下文）照常计费，实测每次约 0.01~0.03 元，取中值；
@@ -190,8 +272,8 @@ export declare function workspaceNameOf(cwd: string | undefined): string;
 /** readFrom 返回的后缀切片：与宿主 0.1.2 的 SessionEventSuffix 同构，本地结构声明。 */
 export interface UsageEventSuffix {
     readonly meta: SessionHeader;
-    readonly inheritedEventCount: SessionLogOffset;
-    readonly fromSeq: SessionLogOffset;
+    readonly inheritedEventCount: SessionLogOffsetT;
+    readonly fromSeq: SessionLogOffsetT;
     readonly events: readonly SessionEvent[];
 }
 /**
@@ -205,7 +287,7 @@ export interface UsageEventSuffix {
  */
 export interface UsagePersistence {
     list(): Promise<readonly SessionHeader[]>;
-    readFrom(id: SessionId, fromSeq: SessionLogOffset): Promise<UsageEventSuffix>;
+    readFrom(id: SessionId, fromSeq: SessionLogOffsetT): Promise<UsageEventSuffix>;
     locate?(meta: SessionHeader): {
         path: string;
     } | undefined;
@@ -273,6 +355,18 @@ export interface UsageStatsDocument {
     perf?: PerfStats;
     /** 只存在于账本、且缺 foldVersion 的旧会话数；无旧行时省略。 */
     staleLedgerSessions?: number;
+    /** 本轮未完整计入的会话数（新失败 + 负缓存命中，跨轮次稳定；有账本旧行的按存档计入最近可用点）；无失败时省略。 */
+    unreadableSessions?: number;
+    /** 未统计中因会话格式拒读（SessionFormatUnsupportedError）的子集；无格式拒读时省略。 */
+    unreadableFormatSessions?: number;
+    /** 未统计中无任何账本存档、完全未计入的子集（区别于有存档按最近可用点计入的）；无存档缺失时省略。 */
+    unreadableNoLedgerSessions?: number;
+    /**
+     * 冷phase轻文档标记（issue #105）：本档全部出自账本存档、未读任何会话日志
+     * （启动后 replayDelayMs 内的请求）。客户端复用既有「数据滞后」横幅呈现
+     * （issue #103 加的 staleSnapshot 通道，此前无生产方），零新增客户端体积。
+     */
+    staleSnapshot?: boolean;
 }
 /** 按角色费用归因：user / tool 为输入成本的启发式摊分，assistant 为输出成本实测。 */
 export interface RoleCost {
@@ -326,6 +420,17 @@ export interface SessionUsageRow {
     title?: string;
     /** 会话创建时的工作目录（项目路径）；未知时缺失。 */
     cwd?: string;
+    /**
+     * 直接父会话 id（仅子智能体会话携带）：宿主 header 的 `origin: "subagent"`
+     * 会话经 parentSession 指向委派它的对话。fork/resume 的种子血缘
+     * （isSeeded）不满足子智能体门，不带本字段。旧宿主 header 无标记，
+     * 按顶层会话处理。
+     */
+    parentId?: string;
+    /** 全部后代子会话的费用合计（人民币元，多级委派整链递归）；无后代或后代全免费时缺失。 */
+    subCost?: number;
+    /** 全部后代子会话的调用数；无后代时缺失。 */
+    subCalls?: number;
     calls: number;
     cost: number;
     /** 最后一个事件的时间戳（毫秒）。 */
@@ -333,6 +438,20 @@ export interface SessionUsageRow {
     /** 数据来自旧算法折叠的持久账本行（日志已删/不可读，无法重算）；UI 据此标注置信度。 */
     stale?: boolean;
 }
+/**
+ * 从会话 header 提取子智能体归并标记（直接父会话 id）：`origin: "subagent"`
+ * （宿主的产品分类）或 `delegationDepth > 0`（持久化委派深度）任一命中即视为
+ * 子会话。子会话但 header 无 parentSession（异常数据）返回 undefined——无法
+ * 归位就按顶层会话处理，保守不标。导出供测试。
+ */
+export declare function subParentOf(meta: SessionHeader): string | undefined;
+/**
+ * 给会话行补后代合计（subCost/subCalls）：按 parentId 建子索引，对每行递归
+ * 汇总全部后代子会话（多级委派整链计入根对话）。纯展示层归因——不改任何
+ * 总额桶（子会话费用本就在 total/byDay/byModel 里，行级只是拆出来给人看）。
+ * 环引用（异常数据）按 visited 跳过，不死循环。原地修改传入行。导出供测试。
+ */
+export declare function foldSubagentFamilies(rows: SessionUsageRow[]): void;
 /** 每轮费用明细行：仪表盘「每轮费用」图的数据源。 */
 export interface TurnUsageRow {
     /** 会话 id（字符串形式）：不同会话的轮次号相互独立，展示时需区分。 */
@@ -392,6 +511,36 @@ export interface PerfSample {
     /** 无独立 request/header，以 step/start 起算（工具续写步骤）。 */
     estimated: boolean;
 }
+/**
+ * 会话级性能摘要（per model）：账本持久化形态——替代逐样本持久化，体积
+ * O(模型数) 而非 O(样本数)。计数/求和/极值精确合并；分位数（P50/P90）
+ * 在跨会话合并时按样本数加权（展示级近似）。进程内折叠的会话仍保留
+ * 完整样本（doc 生成走精确插值），仅账本恢复行以摘要参与聚合。
+ */
+export interface PerfModelDigest {
+    /** 样本数。 */
+    samples: number;
+    ttftSum: number;
+    ttftMax: number;
+    ttftSpikes: number;
+    ttftP50: number;
+    ttftP90: number;
+    /** 有可测生成速度的样本数。 */
+    tpsCount: number;
+    tpsSum: number;
+    /** 有可测总延迟的样本数。 */
+    latencyCount: number;
+    latencySum: number;
+    /** 以 step/start 估算的样本数。 */
+    estimated: number;
+}
+/** 会话级 小时×模型 性能摘要（只用均值，合并无损）。 */
+export interface PerfHourDigest {
+    samples: number;
+    ttftSum: number;
+    tpsCount: number;
+    tpsSum: number;
+}
 /** One persisted session's folded usage plus drill-down metadata. */
 export interface SessionFold {
     total: ModelUsage;
@@ -410,10 +559,19 @@ export interface SessionFold {
     unpricedModels: Set<string>;
     /** 每个模型 key 在本会话内走订阅通道的调用数（合并时跨会话累加判定 plan）。 */
     planCalls: Map<string, number>;
+    /** 三维格（日期×模型×站点）各自的订阅调用数，键 = {@link planSiteKey}：
+     *  provider 视图的行 plan 按本格判定，不再借模型全局口径（混通道模型会把
+     *  本格全订阅的行判成无标记）。 */
+    planSiteCalls: Map<string, number>;
     /** 每轮费用明细（按轮次号升序，不含 sessionId）；sessionId 在合并时补齐。 */
     turns: SessionTurnRow[];
-    /** 性能样本（有可测 TTFT 的调用，按事件次序折叠）。 */
+    /** 性能样本（有可测 TTFT 的调用，按事件次序折叠）；仅进程内折叠产生，
+     *  账本恢复行恒为空（其性能在 {@link SessionFold.perfDigest} 里）。 */
     perf: PerfSample[];
+    /** 账本恢复行的模型级性能摘要；进程内折叠恒为空（序列化时从样本构建）。 */
+    perfDigest: Map<string, PerfModelDigest>;
+    /** 账本恢复行的小时×模型性能摘要；进程内折叠恒为空。 */
+    perfHourDigest: Map<string, Map<string, PerfHourDigest>>;
     /** 角色归因中间量：消息文本长度（user/tool）与输入/输出成本实测拆分。 */
     roles: RoleFold;
     /** 日志里最新的 session/title 文本（无标题事件时 undefined）。 */
@@ -446,8 +604,14 @@ export interface SerializedSessionFold {
     bySite: Record<string, ModelUsage>;
     unpricedModels: string[];
     planCalls: Record<string, number>;
+    /** 三维格订阅计数；旧账本行缺失（合并按空处理，格级 plan 保守不置位）。 */
+    planSiteCalls?: Record<string, number>;
     turns: SessionTurnRow[];
-    perf: PerfSample[];
+    /** v16 起以摘要持久化性能（体积 O(模型数) 而非 O(样本数)）；旧行的
+     *  `perf` 逐样本数组由加载边界迁移转换为摘要。 */
+    perfDigest: Record<string, PerfModelDigest>;
+    /** 小时×模型摘要（键 = {@link hourStamp}）；同上由迁移补齐。 */
+    perfHourDigest: Record<string, Record<string, PerfHourDigest>>;
     roles: RoleFold;
     lastActive: number;
 }
@@ -455,6 +619,12 @@ export interface SerializedSessionFold {
 export interface UsageLedgerSession {
     id: string;
     cwd?: string;
+    /**
+     * 子智能体归并标记（直接父会话 id）：仅宿主 header 带 `origin: "subagent"`
+     * 的会话行携带。日志已删、只剩账本行时仍能归位到父对话；缺失 = 顶层会话
+     * （含 fork/resume 血缘）。可选字段，旧账本行缺失按顶层处理，无需迁移。
+     */
+    subOf?: string;
     /** Stable log stamp (mtime + size) when the persistence backend exposes it. */
     stamp?: string;
     /**
@@ -467,6 +637,12 @@ export interface UsageLedgerSession {
      * 更早写入的行（配置不参与复用判定）；与当前指纹不一致的行不复用、全量重折。
      */
     fingerprint?: string;
+    /**
+     * 该行最近一次折叠落盘的时刻（epoch 毫秒）。多实例共享同一账本文件时，
+     * save 侧按它做行级合并（后折覆盖先折），防止整份覆盖式落盘丢掉另一实例
+     * 刚写入的行；缺失 = 合并语义引入前的旧行，视为最旧。
+     */
+    foldedAt?: number;
     fold: SerializedSessionFold;
 }
 /** On-disk durable usage ledger. Versioned independently from the dashboard document. */
@@ -476,7 +652,33 @@ export interface UsageLedgerDocument {
     sessions: UsageLedgerSession[];
     /** 已应用的一次性配置迁移 id 列表（随文档落盘；缺省 = 尚未跑过任何迁移）。 */
     appliedMigrations?: string[];
+    /**
+     * 拒读会话负缓存（issue #105）：读失败（含格式拒读）会话的失败时 stamp。落盘
+     * 后重启不再重读——宿主对读不动的日志要解压解析到拒绝点才抛错，单条数百 ms、
+     * 老用户上百条时是每次启动的固定大头（负缓存此前只在内存，重启即失）。stamp
+     * 变化（日志被改写/追加）后照常失效重试；会话消失由 seen 清理兜底。
+     */
+    refused?: UsageLedgerRefusal[];
 }
+/** 账本里的一条拒读记录：会话 id + 失败时的失效键 + 是否格式拒读（计数细分用）。 */
+export interface UsageLedgerRefusal {
+    id: string;
+    stamp: string;
+    format: boolean;
+}
+/**
+ * 多实例账本合并（自审计延期项：save 路径 last-writer-wins 丢写）：同一
+ * DSH_HOME 下多个宿主实例各自持有内存账本，整份覆盖式落盘会让后写者抹掉
+ * 先写者刚保存的行。本进程要落的文档与磁盘现存文档按会话 id 行级合并：
+ * 双方都有的行按「谁更新谁胜」，仅磁盘有的行（他实例写入、本进程内存没有）
+ * 原样保留——账本行从不按 seen 剪除（见 aggregateOnce 尾部注释），合并不会
+ * 复活已删会话。合并只发生在落盘边界：跨实例的即时可见性仍靠重启重载，
+ * 此处保证的是磁盘上不丢数据（最终一致）。
+ * @param document - 本进程刚聚合出的完整账本文档。
+ * @param existing - 磁盘上现存（他实例可能写入过）的账本文档。
+ * @returns 合并后的文档（sessions 行序：incoming 在前、existing 独有行按原序追加）。
+ */
+export declare function mergeUsageLedgerDocuments(document: UsageLedgerDocument, existing: UsageLedgerDocument): UsageLedgerDocument;
 /**
  * 折叠算法版本：归账语义变化时递增。v1 = 按 request/header 归账（稀疏 header 把
  * 两次 header 之间的用量串到上一个模型，订阅模型首当其冲，issue #14）；v2 =
@@ -491,7 +693,10 @@ export interface UsageLedgerDocument {
  * 会话费用只剩最近一段，issue #29）。
  * 持久账本行据此区分新旧算法：日志已删/不可读而只能沿用旧行时，UI 标注置信度提示。
  */
-export declare const FOLD_VERSION = 17;
+export declare const FOLD_VERSION = 24;
+/** 账本里拒读记录的条数上限：防异常环境（大量损坏日志）把账本撑爆；
+ *  超限按 Map 插入序保留前 N 条（最早发现的先留，stamp 失效的自然被清理让位）。 */
+export declare const LEDGER_REFUSED_CAP = 500;
 /**
  * 一次性账本迁移：id 唯一，apply 在加载边界对原始文档执行，已应用过的跳过。
  * 未来账本/schema 字段变更（重命名、拆桶、语义调整）时，在此追加一条迁移并
@@ -505,7 +710,9 @@ export interface LedgerMigration {
 }
 /**
  * 账本迁移注册表。首条迁移给 1.0.6 及更早的行回填 foldVersion = 1（它们全部出自
- * header 归因算法）；此后新写入的行总带当前 {@link FOLD_VERSION}。
+ * header 归因算法）；perf 摘要化迁移把 v15 及更早行的逐样本 `perf` 数组转换为
+ * `perfDigest`/`perfHourDigest` 摘要（日志已删的行不再被重折，迁移是它们唯一的
+ * 收缩机会）；此后新写入的行总带当前 {@link FOLD_VERSION} 与摘要形态。
  */
 export declare const LEDGER_MIGRATIONS: readonly LedgerMigration[];
 /**
@@ -548,7 +755,7 @@ export declare function foldSession(events: readonly {
     time: number;
     data: unknown;
     seq?: number;
-}[], subscriptionProviders: SubscriptionMatcher, officialProviderIds?: ReadonlySet<string>, routes?: Readonly<Record<string, ProviderRouteView>>, searchCallEstimateCny?: number, seedLength?: number, routeAliases?: Readonly<Record<string, string>>): SessionFold;
+}[], subscriptionProviders: SubscriptionMatcher, officialProviderIds?: ReadonlySet<string>, routes?: Readonly<Record<string, ProviderRouteView>>, searchCallEstimateCny?: number, seedLength?: number, routeAliases?: Readonly<Record<string, string>>, estimateUnknownRoutes?: boolean): SessionFold;
 /**
  * 增量聚合器：按会话缓存折叠结果，用日志文件的 mtime+size 作失效键——
  * 日志没动的会话直接复用，只有写过的会话重新折叠；整份文档另有短 TTL
@@ -560,9 +767,34 @@ export interface UsageAggregator {
     /** Aggregate current usage, reusing cached per-session folds when their logs are untouched.
      *  并发调用共享同一次进行中的折叠（in-flight 去重），不会多倍全量重读。 */
     aggregate(): Promise<UsageStatsDocument>;
+    /**
+     * 按会话 id 取该会话的完整累计用量。doc 的 `byTurn` 封顶（最近 200 轮），
+     * 用户回到旧会话续聊时其轮次已被挤出，从 doc 反推会低估——这里直接读该
+     * 会话的缓存/账本折叠，是该会话的精确值（含联网搜索估算，口径与 total 一致）。
+     * @param sessionId - 会话 id（String(SessionId) 形态，与账本键同口径）。
+     * @returns 会话累计；日志与账本均无该会话时 undefined（调用方自行兜底）。
+     */
+    sessionUsageOf(sessionId: string): Promise<SessionUsageSummary | undefined>;
+    /**
+     * 最近一次**已完成**的聚合文档（不触发新的折叠）。
+     *
+     * 供路由的 stale-while-revalidate 兜底用：当本轮折叠超过响应预算（宿主单进程
+     * 事件循环被重活折叠占住）时，落盘快照最多落后一个节流窗口（分钟级），而这里
+     * 的内存文档只落后一个聚合周期——两者都是「上次算好的」，但内存那份更新。
+     * 从未完成过一次聚合时返回 undefined（调用方回落到磁盘快照）。
+     * @returns 最近一次完成的聚合文档；尚无完成聚合时 undefined。
+     */
+    lastDocOf(): UsageStatsDocument | undefined;
     /** 立刻落盘未保存的账本改动（无视节流），供插件卸载时调用；
      *  进行中的聚合先等完再存，折叠失败仍保存已成功部分。 */
     flush(): Promise<void>;
+}
+/** 单会话累计用量（{@link UsageAggregator.sessionUsageOf} 的返回）。 */
+export interface SessionUsageSummary {
+    calls: number;
+    cost: number;
+    input: number;
+    output: number;
 }
 /**
  * 聚合配置指纹：影响折叠语义的全部配置（订阅豁免、官方名单、路由别名、搜索估值）
@@ -570,7 +802,7 @@ export interface UsageAggregator {
  * 订阅豁免），历史账本行立即失效并全量重折，配置变更即时生效（issue #37）。
  * 判定函数无法序列化，统一记为 `fn`（任何函数形态互视为同一指纹）。
  */
-export declare function configFingerprint(subscriptionMatcher: SubscriptionMatcher, officialProviderIds: ReadonlySet<string> | undefined, routeAliases: Readonly<Record<string, string>>, searchEstimate: number): string;
+export declare function configFingerprint(subscriptionMatcher: SubscriptionMatcher, officialProviderIds: ReadonlySet<string> | undefined, routeAliases: Readonly<Record<string, string>>, searchEstimate: number, modelKeyAliases?: Readonly<Record<string, string>>, registeredProviders?: ReadonlySet<string>, routeOrigins?: Readonly<Record<string, string>>): string;
 /**
  * Create the incremental usage aggregator.
  * @param persistence - the session persistence service.

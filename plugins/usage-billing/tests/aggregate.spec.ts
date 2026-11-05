@@ -1,3 +1,10 @@
+import { applyBuiltinCatalog, applyLivePricing } from '../src/client/pricing.ts'
+import { BUILTIN_MODEL_CATALOG, BUILTIN_MODEL_KEY_ALIASES } from '../src/builtin-catalog.ts'
+
+// 测试套件承担宿主注入角色：目录与别名表在模块加载时全量注入（宿主 activate
+// 同一入口），否则聚合/计价消费方读到空目录。
+applyBuiltinCatalog(BUILTIN_MODEL_CATALOG, BUILTIN_MODEL_KEY_ALIASES)
+
 /**
  * Aggregation unit tests: log folding attributes each call to the
  * `message.source` of its own `assistant/message` (sparse `request/header` is
@@ -11,23 +18,31 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { SessionHeader, SessionId } from '@deepseek-ai/dsh-session/types'
 import type { TokenUsage } from '@deepseek-ai/dsh-llm'
 import {
   aggregateUsage, createUsageAggregator, configFingerprint, dayStamp, foldSession, foldUsage, emptyUsage, workspaceNameOf, hostTimeZone,
-  siteBucketKey, siteOriginOf, siteRefOf, runLedgerMigrations, FOLD_VERSION, foldSearchCall, DEFAULT_SEARCH_CALL_ESTIMATE_CNY,
-  DEFAULT_SUBSCRIPTION_PROVIDERS,
+  siteBucketKey, siteOriginOf, siteRefOf, sumSiteBuckets, runLedgerMigrations, FOLD_VERSION, foldSearchCall, DEFAULT_SEARCH_CALL_ESTIMATE_CNY,
+  DEFAULT_SUBSCRIPTION_PROVIDERS, subParentOf,
   type LedgerMigration, type UsageLedgerDocument, type UsageLedgerSession,
   AGGREGATE_TTL_MS, LEDGER_SAVE_INTERVAL_MS, SESSION_ROW_LIMIT, type UsagePersistence,
 } from '../src/aggregate.ts'
 import { isSubscriptionProviderId } from '../src/subscriptions.ts'
-import { applyLivePricing, cnyToUsd, modelOf, resolveCatalogKey } from '../src/client/pricing.ts'
+import { applyUserModelAliases, cnyToUsd, modelOf, resolveCatalogKey } from '../src/client/pricing.ts'
 
 /** Minimal `request/header` event recording the active model and provider. */
 function header(seq: number, model: string, provider = 'deepseek-official'): SessionEvent {
   return {
     type: 'request/header', seq, time: 1_000,
     data: { header: { config: { provider, model, reasoningEffort: 'high', maxTokens: 256_000 }, version: 1, id: 's', createdAt: 0, cwd: '/tmp', agentPreset: 'standard' }, reason: 'initial' },
+  } as unknown as SessionEvent
+}
+
+/** `session/title` 事件：宿主重命名会话时追加（source.kind='user'）。 */
+function titleEvent(seq: number, time: number, title: string): SessionEvent {
+  return {
+    type: 'session/title', seq, time,
+    data: { title, messageSeqs: [], source: { kind: 'user' } },
   } as unknown as SessionEvent
 }
 
@@ -66,7 +81,7 @@ function legacyFold(): UsageLedgerSession['fold'] {
     total,
     byModel: {}, byDay: {}, byDayModels: {}, bySite: {},
     unpricedModels: [], planCalls: {},
-    turns: [], perf: [],
+    turns: [], perfDigest: {}, perfHourDigest: {},
     roles: { userChars: 0, toolChars: 0, inputCost: 0, outputCost: 0 },
     lastActive: 1_000,
   }
@@ -87,6 +102,17 @@ function fakeLedgerStore(sessions: UsageLedgerSession[]) {
 }
 
 describe('recent model pricing without live upstreams', () => {
+  it('can preserve historical unknown-route estimates without marking them official or billing subscriptions', () => {
+    const events = [header(1, 'gpt-6.1-sol', 'retired-relay'), message(2, 2_000, USAGE)]
+    const strict = foldSession(events, new Set())
+    const estimated = foldSession(events, new Set(), undefined, {}, DEFAULT_SEARCH_CALL_ESTIMATE_CNY, 0, {}, true)
+    const subscription = foldSession(events, new Set(['retired-relay']), undefined, {}, DEFAULT_SEARCH_CALL_ESTIMATE_CNY, 0, {}, true)
+    expect(strict.total.cost).toBe(0)
+    expect(estimated.total.cost).toBeGreaterThan(0)
+    expect(estimated.bySite.get('unknown')?.cost).toBe(estimated.total.cost)
+    expect(estimated.total.officialCost).toBe(0)
+    expect(subscription.total.cost).toBe(0)
+  })
   it.each([
     ['claude-opus-5-5', 'claude-opus-5-5', 2.56],
     ['claude-opus-5.5', 'claude-opus-5-5', 2.56],
@@ -112,7 +138,7 @@ describe('recent model pricing without live upstreams', () => {
       message(2, Date.UTC(2026, 10, 4), {
         inputTokens: 100_000, cacheReadTokens: 800_000, outputTokens: 100_000, cacheWriteTokens: 0,
       }),
-    ], new Set())
+    ], new Set(), undefined, { 'metered-relay': {} })
     expect(resolveCatalogKey(id)).toBe(key)
     expect(modelOf(id).key).toBe(key)
     expect(fold.unpricedModels.size).toBe(0)
@@ -134,7 +160,7 @@ describe('recent model pricing without live upstreams', () => {
     }])
     const persistence = fakePersistence({ s: events })
     persistence.stampOf = async () => 'unchanged'
-    const stats = await createUsageAggregator(persistence, { ledger: ledger.store }).aggregate()
+    const stats = await createUsageAggregator(persistence, { ledger: ledger.store, estimateUnknownRoutes: true }).aggregate()
     expect(stats.total.cost).toBeGreaterThan(0)
     expect(stats.byModel[model]?.calls).toBe(1)
     expect(stats.unpricedModels).toBeUndefined()
@@ -211,14 +237,165 @@ describe('byDayModelsSite (issue #16)', () => {
     const day = dayStamp(2_000)
 
     const exempted = foldSession(events, new Set(['grok-build']))
-    const directCell = exempted.byDayModelsSite.get(day)?.get('grok-4.6')?.get('direct:grok-build')
+    // 模型格按解析后的目录键归位：grok-4.6 的目录键是 `grok`（该条目 name 即 Grok 4.6）。
+    const directCell = exempted.byDayModelsSite.get(day)?.get('grok')?.get('direct:grok-build')
     expect(directCell?.calls).toBe(1)
     // 订阅豁免：不计费，也不进 DeepSeek 官方统计。
     expect(directCell?.cost).toBe(0)
     expect(directCell?.officialCalls).toBe(0)
 
     const notExempted = foldSession(events, new Set())
-    expect(notExempted.byDayModelsSite.get(day)?.get('grok-4.6')?.get('unknown')?.calls).toBe(1)
+    expect(notExempted.byDayModelsSite.get(day)?.get('grok')?.get('unknown')?.calls).toBe(1)
+  })
+})
+
+describe('known adapter providers (workbuddy)', () => {
+  it('homes workbuddy calls to direct and prices them by catalog rate', () => {
+    // dsh-workbuddy-connect 经 ctx.llm.registerAdapter 注册 provider，不经
+    // llm-pi-ai 路由表：旧口径落 unknown 桶且费用记 0（issue #82），归位后按
+    // 模型官方目录价计 Token 成本。
+    const events: SessionEvent[] = [header(1, 'deepseek-v4.1-flash', 'workbuddy'), message(2, 2_000, USAGE)]
+    const fold = foldSession(events, new Set())
+    const day = dayStamp(2_000)
+
+    // 归位 direct:<provider> 桶，不再是 unknown。
+    expect(fold.bySite.has('unknown')).toBe(false)
+    const direct = fold.bySite.get('direct:workbuddy')
+    expect(direct?.calls).toBe(1)
+    // 三维格同样归位（provider 视图的模型行按此取数）。
+    expect(fold.byDayModelsSite.get(day)?.get('flash')?.get('direct:workbuddy')?.calls).toBe(1)
+    // 计价：目录内模型按目录价算出金额（token 口径与 foldUsage 单测同源）。
+    expect(fold.total.cost).toBeGreaterThan(0)
+    expect(direct?.cost).toBeGreaterThan(0)
+    // 不是订阅通道，token 照常统计。
+    expect(fold.total.calls).toBe(1)
+    expect(fold.total.input).toBe(920)
+  })
+
+  it('homes the international workbuddy-ai variant the same way', () => {
+    const events: SessionEvent[] = [header(1, 'glm-5.3-flash', 'workbuddy-ai'), message(2, 2_000, USAGE)]
+    const fold = foldSession(events, new Set())
+    expect(fold.bySite.has('direct:workbuddy-ai')).toBe(true)
+    expect(fold.bySite.has('unknown')).toBe(false)
+    expect(fold.total.cost).toBeGreaterThan(0)
+  })
+
+  it('homes case variants of the adapter route to direct (nit from PR #90 review)', () => {
+    // 宿主不强制 route 小写；名单判定与 isOfficialProvider 同姿态（trim + 大小写
+    // 不敏感），避免日志里出现大小写变体时静默落回 unknown 桶。
+    const events: SessionEvent[] = [header(1, 'deepseek-v4.1-flash', 'WorkBuddy'), message(2, 2_000, USAGE)]
+    const fold = foldSession(events, new Set())
+    expect(fold.bySite.has('unknown')).toBe(false)
+    expect(fold.bySite.get('direct:WorkBuddy')?.calls).toBe(1)
+    expect(fold.total.cost).toBeGreaterThan(0)
+    // 仍不算官方渠道。
+    expect(fold.total.officialCalls).toBe(0)
+  })
+
+  it('never counts workbuddy calls as the official DeepSeek channel', () => {
+    // workbuddy 是腾讯 WorkBuddy 桌面 App 的账号通道，不是 DeepSeek 官方直连：
+    // 归位 direct 不得顺带把调用算进官方口径（officialCalls/officialCost 必须为 0），
+    // 否则「官方 vs 三方」分桶与 DeepSeek 官方组会虚增。
+    const events: SessionEvent[] = [header(1, 'deepseek-v4.1-flash', 'workbuddy'), message(2, 2_000, USAGE)]
+    const fold = foldSession(events, new Set())
+    expect(fold.total.officialCalls).toBe(0)
+    expect(fold.total.officialCost).toBe(0)
+    const direct = fold.bySite.get('direct:workbuddy')
+    expect(direct?.officialCalls).toBe(0)
+    expect(direct?.officialCost).toBe(0)
+  })
+
+  it('leaves unlisted providers outside the route table in the unknown bucket', () => {
+    // 反证：名单外的配置外 provider 仍按 issue #82 口径落 unknown、记 0 费用。
+    // 这条断言同时守住「不猜通道」的边界——加名单是显式行为，不是前缀/模式匹配。
+    const events: SessionEvent[] = [header(1, 'deepseek-v4.1-flash', 'some-other-plugin'), message(2, 2_000, USAGE)]
+    const fold = foldSession(events, new Set())
+    expect(fold.bySite.has('unknown')).toBe(true)
+    expect(fold.total.cost).toBe(0)
+  })
+
+  it('keeps unknown-channel models uncatalogued out of the priced path', () => {
+    // 归位只解决通道归属，不解决目录缺口：目录外模型仍记 0 并进 unpricedModels，
+    // 面板据此提示「未收录」而不是伪造金额。
+    const events: SessionEvent[] = [header(1, 'not-a-real-model-id', 'workbuddy'), message(2, 2_000, USAGE)]
+    const fold = foldSession(events, new Set())
+    expect(fold.bySite.has('direct:workbuddy')).toBe(true)
+    expect(fold.total.cost).toBe(0)
+
+    expect([...fold.unpricedModels]).toContain('not-a-real-model-id')
+  })
+})
+
+describe('no workbuddy installed (known-adapter isolation)', () => {
+  /**
+   * 负向隔离（g-001/g-002 的正确性边界）：KNOWN_ADAPTER_PROVIDERS 是显式名单，
+   * 只在会话日志出现 workbuddy/workbuddy-ai 调用时才参与判定。未安装
+   * dsh-workly-connect 的部署不产生这类事件，计费结果必须与名单引入前逐字段一致。
+   * 本组用例证明这一点：同一套「不含 workbuddy 通道」的事件流，四种通道形态的
+   * 归位、计价、官方口径全部走原有路径；平行对照组再证明测试本身有区分度。
+   */
+
+  /** 一套覆盖四种通道形态的事件流，provider 名经参数注入（平行对照组用）。 */
+  function mixedChannelEvents(provider: string): SessionEvent[] {
+    return [
+      // 形态 1：deepseek 前缀官方直连（不经路由表）→ direct + 官方口径 + 目录价。
+      header(1, 'deepseek-v4.1-flash', 'deepseek-official'), message(2, 1_000, USAGE),
+      // 形态 2：路由表命中带 baseURL → site 桶（按 origin 归组）。
+      header(3, 'glm-5.3-flash', provider === 'workbuddy' ? 'workbuddy' : provider), message(4, 2_000, USAGE),
+      // 形态 3：订阅豁免通道 → direct + 记 0 + plan 标记。
+      header(5, 'kimi-k3', 'kimi-coding'), message(6, 3_000, USAGE),
+      // 形态 4：名单外配置外 provider → unknown 桶记 0（issue #82）。
+      header(7, 'flash', 'some-other-plugin'), message(8, 4_000, USAGE),
+    ]
+  }
+
+  /** 断言一套 fold 与预期语义逐字段一致（四种形态各验关键不变量）。 */
+  function expectBaselineSemantics(fold: SessionFold, siteProvider: string): void {
+    // 形态 1：官方直连不变——official 计数与费用来自 deepseek 前缀，与名单无关。
+    expect(fold.total.officialCalls).toBe(1)
+    expect(fold.total.officialCost).toBeGreaterThan(0)
+    expect(fold.bySite.get('direct:deepseek-official')?.officialCalls).toBe(1)
+    // 形态 2：site 桶按 origin 归组（路由表优先于名单——名单不抢配置路径）。
+    expect(fold.bySite.has(`site:https://relay.example.com`)).toBe(true)
+    // 形态 3：订阅豁免记 0（kimi-k3 有目录价但走 kimi-coding 订阅通道）。
+    expect(fold.bySite.get('direct:kimi-coding')?.cost).toBe(0)
+    expect(fold.bySite.get('direct:kimi-coding')?.calls).toBe(1)
+    // 形态 4：名单外配置外 provider 仍 unknown 记 0（issue #82 语义不动）。
+    expect(fold.bySite.get('unknown')?.calls).toBe(1)
+    expect(fold.bySite.get('unknown')?.cost).toBe(0)
+    // 名单绝不给非 workbuddy 通道发 direct 归位。
+    expect(fold.bySite.has(`direct:${siteProvider}`)).toBe(siteProvider.startsWith('workbuddy'))
+  }
+
+  it('prices a mixed-channel log identically with or without the known-adapter list', () => {
+    // 路由视图：一条带 baseURL 的中转路由（形态 2 的 site 桶来源）。
+    const routes = { 'my-relay': { baseURL: 'https://relay.example.com/v1' } }
+    // 对照组 A：provider 名为普通中转名（未安装 workbuddy 时日志里的形态）。
+    const foldA = foldSession(mixedChannelEvents('my-relay'), new Set(['kimi-coding']), undefined, routes)
+    expectBaselineSemantics(foldA, 'my-relay')
+    const sumA = [...foldA.bySite.values()].reduce((sum, cell) => sum + cell.cost, 0)
+    // total 与 bySite 之和一致（无双口径）。
+    expect(foldA.total.cost).toBeCloseTo(sumA, 6)
+
+    // 对照组 B：同样的结构、provider 名换成另一个非 workbuddy 名——结果同构
+    //（桶键跟随 provider 名变化，其余语义逐字段一致）。KNOWN_ADAPTER_PROVIDERS
+    // 存在与否不改变这两组中的任何字段。
+    const foldB = foldSession(mixedChannelEvents('other-relay'), new Set(['kimi-coding']), undefined, { 'other-relay': { baseURL: 'https://relay.example.com/v1' } })
+    expectBaselineSemantics(foldB, 'other-relay')
+    expect(foldB.total.cost).toBeCloseTo(foldA.total.cost, 6)
+    expect(foldB.total.calls).toBe(foldA.total.calls)
+    expect(foldB.total.officialCalls).toBe(foldA.total.officialCalls)
+    expect(foldB.total.officialCost).toBeCloseTo(foldA.total.officialCost, 6)
+  })
+
+  it('differs only when the provider id itself is on the known-adapter list', () => {
+    // 平行对照：同名事件流，唯一变量是 provider 是否叫 workbuddy——
+    // 证明上一条测试的「零改变」断言不是恒真，名单确实只在命中时生效。
+    const routes = { 'workbuddy': { baseURL: 'https://relay.example.com/v1' } }
+    const fold = foldSession(mixedChannelEvents('workbuddy'), new Set(['kimi-coding']), undefined, routes)
+    // 路由表命中（形态 2）优先于名单：site 桶仍按 origin 归组，名单不抢配置路径。
+    expect(fold.bySite.has('site:https://relay.example.com')).toBe(true)
+    expect(fold.bySite.has('direct:workbuddy')).toBe(false)
   })
 })
 
@@ -251,6 +428,15 @@ describe('foldUsage', () => {
     expect(acc.cost).toBe(0)
   })
 
+  it('charges nothing for calls from unverified channels even when the model is priced (issue #82)', () => {
+    // 未知通道（配置外 provider）的已收录模型：支出主体无法核实，费用记 0，token 照常。
+    const acc = emptyUsage()
+    foldUsage(acc, USAGE, 'flash', false, 1_000, false, undefined, true)
+    expect(acc.calls).toBe(1)
+    expect(acc.input).toBeGreaterThan(0)
+    expect(acc.cost).toBe(0)
+  })
+
   it('prices peak vs off-peak by the call time (P0-1)', () => {
     // 同一桶、同一模型：北京时间 10 点（高峰）比 13 点（低谷）贵。
     const peak = emptyUsage()
@@ -266,6 +452,26 @@ describe('foldUsage', () => {
     foldUsage(acc, { inputTokens: 100, outputTokens: 500, reasoningTokens: 200 } as TokenUsage, 'flash', false, 1_000)
     expect(acc.output).toBe(500)
     expect(acc.reasoning).toBe(200)
+  })
+})
+
+describe('sumSiteBuckets (usage_stats 工具的站点口径)', () => {
+  const cell = (cost: number): { cost: number; calls: number; input: number; output: number } => ({ cost, calls: 1, input: 10, output: 5 })
+  const bySite = {
+    'site:https://relay.example.com': cell(2),
+    'direct:deepseek': cell(3),
+    unknown: cell(1),
+  }
+
+  it('sums every bucket for bySite', () => {
+    expect(sumSiteBuckets(bySite, 'bySite').cost).toBe(6)
+  })
+
+  it('counts only relay-site buckets for relay (direct/unknown excluded)', () => {
+    // 此前 relay 与 bySite 共用无过滤循环：直连/未知桶全被计入，relay ≈ all。
+    const sum = sumSiteBuckets(bySite, 'relay')
+    expect(sum.cost).toBe(2)
+    expect(sum.calls).toBe(1)
   })
 })
 
@@ -351,6 +557,12 @@ describe('message.source attribution (issue #14)', () => {
     expect(glm?.cost).toBe(0)
     expect(fold.planCalls.get('glm-5.3-flash')).toBe(2)
     expect(fold.planCalls.has('flash')).toBe(false)
+    // 三维格同款计数（provider 行按通道判 plan）：glm 两个订阅调用落同一格。
+    const sitePlans = [...fold.planSiteCalls]
+    expect(sitePlans).toHaveLength(1)
+    expect(sitePlans[0]?.[0]).toContain('"glm-5.3-flash"')
+    expect(sitePlans[0]?.[0]).toContain('"direct:zai-coding-cn"')
+    expect(sitePlans[0]?.[1]).toBe(2)
     expect(flash?.cost ?? 0).toBeGreaterThan(0)
     // site 桶也跟随各自的 source：订阅直连 vs 官方直连。
     expect([...fold.bySite.keys()]).toEqual(['direct:zai-coding-cn', 'direct:deepseek-official'])
@@ -664,6 +876,38 @@ describe('relay site attribution (P0-2)', () => {
       fakePersistence({ s1: [header(1, 'deepseek-v4-flash', 'missing-route'), message(2, Date.UTC(2026, 7, 15, 4, 0, 0), USAGE)] }),
     )
     expect(stats.bySite?.['unknown']?.calls).toBe(1)
+  })
+
+  it('records zero cost for unknown channels while tokens still count (issue #82)', () => {
+    const ev = (type: string, seq: number, time: number, data: Record<string, unknown>): SessionEvent =>
+      ({ type, seq, time, data }) as unknown as SessionEvent
+    const fold = foldSession([
+      ev('request/header', 1, 1_000, { header: { config: { provider: 'missing-route', model: 'deepseek-v4-flash' } } }),
+      ev('assistant/message', 2, 1_001, { turn: 1, step: 1, usage: USAGE }),
+    ], new Set())
+    // 已收录模型走未知通道：费用记 0、token 照常、不进「目录外模型」提示。
+    expect(fold.total.calls).toBe(1)
+    expect(fold.total.cost).toBe(0)
+    expect(fold.total.input).toBeGreaterThan(0)
+    expect(fold.bySite.get('unknown')?.cost ?? 0).toBe(0)
+    expect(fold.bySite.get('unknown')?.calls).toBe(1)
+    expect(fold.unpricedModels.size).toBe(0)
+  })
+
+  it('keeps unknown-channel cost out of totals when mixed with direct usage (issue #82)', () => {
+    const ev = (type: string, seq: number, time: number, data: Record<string, unknown>): SessionEvent =>
+      ({ type, seq, time, data }) as unknown as SessionEvent
+    const fold = foldSession([
+      ev('request/header', 1, 1_000, { header: { config: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } } }),
+      ev('assistant/message', 2, 1_001, { turn: 1, step: 1, usage: USAGE }),
+      ev('request/header', 3, 2_000, { header: { config: { provider: 'missing-route', model: 'deepseek-v4-flash' } } }),
+      ev('assistant/message', 4, 2_001, { turn: 2, step: 1, usage: USAGE }),
+    ], new Set())
+    // total 只含 direct 调用的费用；unknown 调用只贡献 calls/token。
+    expect(fold.total.calls).toBe(2)
+    expect(fold.total.cost).toBeGreaterThan(0)
+    expect(fold.total.cost).toBe(fold.bySite.get('direct:deepseek-official')?.cost ?? -1)
+    expect(fold.bySite.get('unknown')?.cost ?? 0).toBe(0)
   })
 })
 
@@ -1094,7 +1338,7 @@ describe('createUsageAggregator (incremental cache)', () => {
       id: 'a',
       stamp: `${String(info.mtimeMs)}:${String(info.size)}`,
       foldVersion: FOLD_VERSION,
-      fingerprint: configFingerprint(new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {}, DEFAULT_SEARCH_CALL_ESTIMATE_CNY),
+      fingerprint: configFingerprint(new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {}, DEFAULT_SEARCH_CALL_ESTIMATE_CNY, {}, new Set()),
       fold: (() => { const row = legacyFold(); row.total.calls = 7; return row })(),
     }])
     const aggregator = createUsageAggregator(persistence, { ledger: store.store })
@@ -1138,6 +1382,103 @@ describe('createUsageAggregator (incremental cache)', () => {
     expect(listCalls).toBe(1)
     expect(docA).toBe(docB)
     expect(docA.total.calls).toBe(1)
+  })
+
+  it('exposes the last completed document without triggering a new fold (issue #103)', async () => {
+    // lastDocOf：路由超预算时的第一回落（内存里最近一次**已完成**的聚合文档）。
+    // 契约：只读、不触发折叠、不改 TTL 游标；尚无完成的聚合时 undefined。
+    let lists = 0
+    const persistence = {
+      list: async () => {
+        lists += 1
+        return [{ id: 'a' }]
+      },
+      readFrom: async (id: SessionId) => ({
+        meta: { id },
+        events: [header(1, 'deepseek-v4-flash'), message(2, 1_000, USAGE)],
+      }),
+    } as unknown as UsagePersistence
+    const aggregator = createUsageAggregator(persistence)
+
+    // 聚合前：没有已完成文档。
+    expect(aggregator.lastDocOf()).toBeUndefined()
+
+    const doc = await aggregator.aggregate()
+    expect(aggregator.lastDocOf()).toBe(doc)
+    expect(lists).toBe(1)
+
+    // 再次读取不触发新折叠（list 不再被调）。
+    expect(aggregator.lastDocOf()).toBe(doc)
+    expect(lists).toBe(1)
+  })
+
+  it('follows a rename appended to the session log (issue #103)', async () => {
+    // 重命名会话 = 日志尾部追加一条 session/title 事件（宿主 sessionTitle 服务
+    // 的行为）。插件的会话标题取日志里最后一条标题事件：增量折叠路径必须把
+    // 新标题吃进去，否则账单明细一直显示旧标题。
+    vi.useFakeTimers()
+    const logs: Record<string, SessionEvent[]> = {
+      s1: [titleEvent(0, 1_000, '旧标题'), header(1, 'deepseek-v4-flash'), message(2, 1_100, USAGE)],
+    }
+    let revision = 'rev-1'
+    const persistence = {
+      list: async () => [{ id: 's1' as SessionId }],
+      stampOf: async () => revision,
+      readFrom: async (id: SessionId, fromSeq: number) => ({
+        meta: { id },
+        inheritedEventCount: 0,
+        events: (logs[id] ?? []).filter(event => (event.seq ?? 0) >= fromSeq),
+      }),
+    } as unknown as UsagePersistence
+    const aggregator = createUsageAggregator(persistence)
+
+    const first = await aggregator.aggregate()
+    expect(first.bySession?.[0]?.title).toBe('旧标题')
+
+    // 宿主重命名：日志尾部追加标题事件，日志 revision 随之变化。
+    logs.s1 = [...logs.s1, titleEvent(3, 2_000, '新标题')]
+    revision = 'rev-2'
+    vi.advanceTimersByTime(AGGREGATE_TTL_MS + 1_000)
+    const second = await aggregator.aggregate()
+    expect(second.bySession?.[0]?.title).toBe('新标题')
+  })
+
+  it('falls back to the host-side title when the session log cannot be read (issue #103)', async () => {
+    // 日志读不动（宿主拒绝该格式/代际）时，插件只能吃账本旧行——标题会永远
+    // 停在重命名前的值。宿主侧的会话标题（投影缓存）优先：重命名后的标题
+    // 照样显示，账单明细与工作区一致。
+    const ledgerRow = legacyFold()
+    ledgerRow.title = '旧标题'
+    const store = fakeLedgerStore([{
+      id: 'broken',
+      stamp: 'v1',
+      foldVersion: FOLD_VERSION,
+      fingerprint: configFingerprint(new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {}, DEFAULT_SEARCH_CALL_ESTIMATE_CNY, {}, new Set()),
+      fold: ledgerRow,
+    }])
+    const persistence = {
+      list: async () => [{ id: 'broken' as SessionId }],
+      // stamp 与账本行不一致 → 账本快路径不命中，本轮真去读日志 → 读不动。
+      stampOf: async () => 'v2',
+      readFrom: async () => {
+        throw new Error('SessionFormatUnsupportedError: unsupported format')
+      },
+    } as unknown as UsagePersistence
+    const aggregator = createUsageAggregator(persistence, {
+      ledger: store.store,
+      resolveSessionTitle: () => '新标题',
+    })
+    const doc = await aggregator.aggregate()
+    expect(doc.bySession?.[0]?.title).toBe('新标题')
+    // 读不动的会话仍照旧计入（账本存档兜底），未统计提示不受影响。
+    expect(doc.bySession?.[0]?.calls).toBe(2)
+    expect(doc.unreadableSessions).toBe(1)
+
+    // 负缓存生效后不再重读该会话（没有新事件可折），标题仍走宿主侧兜底。
+    vi.useFakeTimers()
+    vi.advanceTimersByTime(AGGREGATE_TTL_MS + 1_000)
+    const again = await aggregator.aggregate()
+    expect(again.bySession?.[0]?.title).toBe('新标题')
   })
 
   it('negative-caches unreadable sessions by stamp until the log changes', async () => {
@@ -1194,7 +1535,7 @@ describe('createUsageAggregator (incremental cache)', () => {
         return inner.readFrom(id, fromSeq)
       },
     } as unknown as UsagePersistence
-    const fingerprint = configFingerprint(new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {}, DEFAULT_SEARCH_CALL_ESTIMATE_CNY)
+    const fingerprint = configFingerprint(new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {}, DEFAULT_SEARCH_CALL_ESTIMATE_CNY, {}, new Set())
     const ledgerRows: UsageLedgerSession[] = []
     for (const id of ['h1', 'h2', 'h3']) {
       const info = await stat(paths[id]!)
@@ -1248,6 +1589,50 @@ describe('createUsageAggregator (incremental cache)', () => {
     vi.advanceTimersByTime(LEDGER_SAVE_INTERVAL_MS + AGGREGATE_TTL_MS + 1000)
     await aggregator.aggregate()
     expect(store.saved).toHaveLength(3)
+  })
+})
+
+describe('sessionUsageOf (byTurn cap bypass)', () => {
+  /** 单轮事件对：turn/start + assistant/message（带 usage），seq 递增。 */
+  function turnPair(seq: number, turnNum: number, time: number): SessionEvent[] {
+    return [
+      { type: 'turn/start', seq, time, data: { turn: turnNum } } as unknown as SessionEvent,
+      {
+        type: 'assistant/message', seq: seq + 1, time,
+        data: { turn: turnNum, step: 1, message: { role: 'assistant', content: [] }, usage: USAGE },
+      } as unknown as SessionEvent,
+    ]
+  }
+
+  it('returns the full session total even when its turns fell out of the capped byTurn', async () => {
+    const T0 = Date.UTC(2026, 7, 15, 4, 0, 0)
+    // 会话 a：5 轮（时间最早）；会话 b：205 轮（更晚）——byTurn 封顶 200 行后
+    // a 的轮次被全部挤出，从 doc 反推该会话会得到 0（usage_stats 低估场景）。
+    const a: SessionEvent[] = [header(1, 'deepseek-v4-flash')]
+    for (let i = 0; i < 5; i++) a.push(...turnPair(2 + i * 2, i + 1, T0 + i * 10))
+    const b: SessionEvent[] = [header(1, 'deepseek-v4-flash')]
+    for (let i = 0; i < 205; i++) b.push(...turnPair(2 + i * 2, i + 1, T0 + 100_000 + i * 10))
+    const aggregator = createUsageAggregator(fakePersistence({ a, b }))
+
+    const doc = await aggregator.aggregate()
+    // 前置：a 的轮次确实已被封顶挤出（旧路径在此低估为 0）。
+    expect(doc.byTurn.every(row => row.sessionId === 'b')).toBe(true)
+
+    // 修复后：sessionUsageOf 直读该会话的折叠，返回完整累计（input 口径含缓存桶）。
+    const summary = await aggregator.sessionUsageOf('a')
+    expect(summary).toEqual({
+      calls: 5,
+      cost: expect.any(Number),
+      input: 5 * (USAGE.inputTokens + USAGE.cacheReadTokens + USAGE.cacheWriteTokens),
+      output: 5 * USAGE.outputTokens,
+    })
+    expect(summary?.cost ?? 0).toBeGreaterThan(0)
+  })
+
+  it('answers undefined for a session absent from logs and ledger', async () => {
+    const aggregator = createUsageAggregator(fakePersistence({ a: [header(1, 'deepseek-v4-flash'), message(2, 1_000, USAGE)] }))
+    await aggregator.aggregate()
+    await expect(aggregator.sessionUsageOf('no-such-session')).resolves.toBeUndefined()
   })
 })
 
@@ -1456,10 +1841,88 @@ describe('LEDGER_MIGRATIONS (fold-version-backfill)', () => {
   it('skips backfill once the migration id is recorded (幂等)', () => {
     const row: UsageLedgerSession = { id: 'already-1', foldVersion: 1, fold: legacyFold() }
     const document = doc([row])
-    document.appliedMigrations = ['fold-version-backfill']
+    // 全部注册迁移均已应用：无行级变更、无新迁移 id 需记录，整体幂等。
+    document.appliedMigrations = ['fold-version-backfill', 'perf-sample-to-digest']
     const changed = runLedgerMigrations(document)
     expect(changed).toBe(false)
     expect(document.sessions[0]?.foldVersion).toBe(1)
+  })
+})
+
+describe('LEDGER_MIGRATIONS (perf-sample-to-digest)', () => {
+  /** 已含 `appliedMigrations: []` 的最简账本文档。 */
+  const doc = (sessions: UsageLedgerSession[]): UsageLedgerDocument => ({
+    version: 1, updatedAt: 1, sessions, appliedMigrations: [],
+  })
+
+  /** v15 及更早的逐样本 `perf` 数组（旧账本行形态）。 */
+  const oldSamples = [
+    { model: 'flash', hour: '2026-08-15T12', ttftMs: 100, tps: 500, latencyMs: 900, estimated: false },
+    { model: 'flash', hour: '2026-08-15T12', ttftMs: 300, estimated: true },
+  ]
+
+  it('converts legacy perf sample arrays into model and hour digests', () => {
+    const fold = { ...legacyFold(), perf: oldSamples } as unknown as UsageLedgerSession['fold']
+    const document = doc([{ id: 'old-row', foldVersion: 15, fold }])
+    const changed = runLedgerMigrations(document)
+    expect(changed).toBe(true)
+    const migrated = document.sessions[0]?.fold
+    // 逐样本数组被移除，摘要字段就位；P50/P90 为样本侧精确插值。
+    expect((migrated as { perf?: unknown }).perf).toBeUndefined()
+    expect(migrated.perfDigest.flash).toEqual({
+      samples: 2, ttftSum: 400, ttftMax: 300, ttftSpikes: 0,
+      ttftP50: 200, ttftP90: 280, tpsCount: 1, tpsSum: 500,
+      latencyCount: 1, latencySum: 900, estimated: 1,
+    })
+    expect(migrated.perfHourDigest['2026-08-15T12']?.flash).toEqual({
+      samples: 2, ttftSum: 400, tpsCount: 1, tpsSum: 500,
+    })
+    expect(document.appliedMigrations).toContain('perf-sample-to-digest')
+  })
+
+  it('skips conversion once the migration id is recorded (幂等)', () => {
+    const fold = { ...legacyFold(), perf: oldSamples } as unknown as UsageLedgerSession['fold']
+    const document = doc([{ id: 'old-row', foldVersion: 15, fold }])
+    document.appliedMigrations = ['fold-version-backfill', 'perf-sample-to-digest']
+    const changed = runLedgerMigrations(document)
+    expect(changed).toBe(false)
+    expect((document.sessions[0]?.fold as { perf?: unknown }).perf).toHaveLength(2)
+  })
+
+  it('fills empty digest fields on rows carrying neither form', () => {
+    // 无 perf 也无摘要的异常行：补空摘要，保持 deserialize 边界的完备性。
+    const fold = legacyFold() as unknown as UsageLedgerSession['fold'] & { perfDigest?: unknown }
+    delete (fold as { perfDigest?: unknown }).perfDigest
+    const document = doc([{ id: 'bare-row', foldVersion: 16, fold }])
+    const changed = runLedgerMigrations(document)
+    expect(changed).toBe(true)
+    expect(document.sessions[0]?.fold.perfDigest).toEqual({})
+    expect(document.sessions[0]?.fold.perfHourDigest).toEqual({})
+  })
+})
+
+describe('perf digest aggregation from restored ledger rows', () => {
+  it('merges digest-only rows into doc perf stats without reading logs', async () => {
+    // 账本恢复行（日志已删）：性能以摘要参与聚合，均值/计数精确。
+    const fold = {
+      ...legacyFold(),
+      perfDigest: {
+        flash: {
+          samples: 2, ttftSum: 400, ttftMax: 300, ttftSpikes: 0,
+          ttftP50: 200, ttftP90: 280, tpsCount: 1, tpsSum: 500,
+          latencyCount: 1, latencySum: 900, estimated: 1,
+        },
+      },
+      perfHourDigest: { '2026-08-15T12': { flash: { samples: 2, ttftSum: 400, tpsCount: 1, tpsSum: 500 } } },
+    }
+    const { store } = fakeLedgerStore([{ id: 'gone-session', stamp: 's1', foldVersion: FOLD_VERSION, fold }])
+    const stats = await aggregateUsage(fakePersistence({}), { ledger: store })
+    expect(stats.perf?.byModel.flash).toMatchObject({
+      samples: 2, ttftAvg: 200, ttftMax: 300, tpsAvg: 500, latencyAvg: 900, estimatedSamples: 1,
+    })
+    expect(stats.perf?.byHourModel['2026-08-15T12']?.flash).toMatchObject({
+      samples: 2, ttftAvg: 200, tpsAvg: 500,
+    })
   })
 })
 
@@ -1484,7 +1947,7 @@ describe('ledger foldVersion / stale confidence', () => {
     const { store, saved, current } = fakeLedgerStore([{
       id: 'fresh-session',
       foldVersion: FOLD_VERSION,
-      fingerprint: configFingerprint(new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {}, DEFAULT_SEARCH_CALL_ESTIMATE_CNY),
+      fingerprint: configFingerprint(new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {}, DEFAULT_SEARCH_CALL_ESTIMATE_CNY, {}, new Set()),
       fold: legacyFold(),
     }])
     const stats = await aggregateUsage(fakePersistence({}), { ledger: store })
@@ -1497,6 +1960,416 @@ describe('ledger foldVersion / stale confidence', () => {
     expect(saved).toHaveLength(1)
     expect(current().appliedMigrations).toContain('fold-version-backfill')
     expect(current().sessions[0]?.foldVersion).toBe(FOLD_VERSION)
+  })
+})
+
+describe('unreadable sessions visibility', () => {
+  it('counts migration-refused sessions into unreadableSessions for the UI notice', async () => {
+    // 拒读场景：readFrom 抛出（如上游读时迁移拒绝旧世代 descriptor，插件 issue #71）——
+    // 会话被跳过，但计数进入文档供面板明示「未统计」，而不是让今日费用静默为空。
+    const failing = {
+      list: async () => [{ id: 'broken-session' }],
+      readFrom: async () => { throw new Error('SessionFormatUnsupportedError: unsupported descriptor version 2') },
+    } as unknown as UsagePersistence
+    const stats = await aggregateUsage(failing)
+
+    expect(stats.unreadableSessions).toBe(1)
+    // 格式拒读子集单独计数：message 保留宿主错误类名即可识别（issue #84）。
+    expect(stats.unreadableFormatSessions).toBe(1)
+    expect(stats.bySession).toHaveLength(0)
+  })
+
+  it('classifies by error.name too (host class instances, issue #84)', async () => {
+    // 宿主真实路径：SessionFormatUnsupportedError 实例的类名落在 error.name。
+    const failing = {
+      list: async () => [{ id: 'v0-session' }],
+      readFrom: async () => {
+        const error = new Error('…refuses this format v0 Session: permission/preset 0 data has unexpected member "origin"')
+        error.name = 'SessionFormatUnsupportedError'
+        throw error
+      },
+    } as unknown as UsagePersistence
+    const stats = await aggregateUsage(failing)
+
+    expect(stats.unreadableSessions).toBe(1)
+    expect(stats.unreadableFormatSessions).toBe(1)
+  })
+
+  it('does not classify non-format failures as format refusals', async () => {
+    // 损坏/其他读取失败：进未统计总数，但不进格式拒读子集（归因不混淆）。
+    const failing = {
+      list: async () => [{ id: 'torn-session' }],
+      readFrom: async () => { throw new Error('zstd torn frame') },
+    } as unknown as UsagePersistence
+    const stats = await aggregateUsage(failing)
+
+    expect(stats.unreadableSessions).toBe(1)
+    expect(Object.hasOwn(stats, 'unreadableFormatSessions')).toBe(false)
+  })
+
+  it('keeps counting negative-cached sessions on later rounds (issue #84)', async () => {
+    // 负缓存命中轮次不重读失败会话（skipped 为空、stderr 不再打印），但未统计
+    // 计数仍保留——否则面板的「未统计」通知在首轮之后归零消失（issue 报告现象）。
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      let reads = 0
+      const persistence = {
+        list: async () => [{ id: 'v0-session' }],
+        stampOf: async () => 'stamp-1',
+        readFrom: async () => {
+          reads += 1
+          throw new Error('SessionFormatUnsupportedError: unsupported descriptor version 2')
+        },
+      } as unknown as UsagePersistence
+      const aggregator = createUsageAggregator(persistence)
+
+      const first = await aggregator.aggregate()
+      expect(first.unreadableSessions).toBe(1)
+      // 首轮两条告警：单会话 skip + 末尾汇总（含 skipped id 明细）。
+      expect(warn).toHaveBeenCalledTimes(2)
+
+      const second = await aggregator.aggregate()
+      expect(second.unreadableSessions).toBe(1)
+      expect(second.unreadableFormatSessions).toBe(1)
+      // 负缓存生效的核心不变量：两轮聚合 readFrom 只被调用一次（不重读不重打日志）。
+      expect(reads).toBe(1)
+      expect(warn).toHaveBeenCalledTimes(2)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('splits unreadable sessions by archived-history availability (issue #84 copy precision)', async () => {
+    // 有账本行的拒读会话：历史按存档计入（total.calls 来自存档行），只缺新增
+    // 部分——不算「完全未计入」；无账本行的拒读会话才是真正全部缺失，单独
+    // 计数进 unreadableNoLedgerSessions，面板据此区分「部分缺失/完全缺失」。
+    const { store } = fakeLedgerStore([{ id: 'archived-broken', stamp: 's1', foldVersion: FOLD_VERSION, fold: legacyFold() }])
+    const failing = {
+      list: async () => [{ id: 'archived-broken' }, { id: 'never-folded-broken' }],
+      readFrom: async () => { throw new Error('SessionFormatUnsupportedError: refuses this format v0 Session') },
+    } as unknown as UsagePersistence
+    const stats = await aggregateUsage(failing, { ledger: store })
+
+    expect(stats.unreadableSessions).toBe(2)
+    expect(stats.unreadableNoLedgerSessions).toBe(1)
+    // 存档行的历史仍合并进统计（legacyFold 的 total.calls = 2）。
+    expect(stats.total.calls).toBe(2)
+  })
+
+  it('omits unreadableSessions when every session folds', async () => {
+    const stats = await aggregateUsage(fakePersistence({ s1: [message(0, 1, USAGE)] }))
+
+    // exactOptionalPropertyTypes：无拒读时不带 key，UI 判空逻辑不必区分 0 与缺省。
+    expect(Object.hasOwn(stats, 'unreadableSessions')).toBe(false)
+  })
+})
+
+describe('lazy reprice after live catalog arrives (fold-version preserved)', () => {
+  /** 真实日志形态：step-6-preview 在预热折叠时刻未收录（cost=0、落 unpricedModels）。 */
+  function step5Events(): SessionEvent[] {
+    return [header(1, 'step-6-preview'), message(2, Date.UTC(2026, 9, 12, 4, 0, 0), USAGE)]
+  }
+
+  afterEach(() => {
+    vi.useRealTimers()
+    applyLivePricing({ source: 'builtin' })
+  })
+
+  it('refolds a cached fold whose unpriced model becomes priced', async () => {
+    vi.useFakeTimers()
+    try {
+      const logs: Record<string, SessionEvent[]> = { a: step5Events() }
+      const reads: number[] = []
+      const persistence = {
+        list: async () => [{ id: 'a' }],
+        readFrom: async (id: SessionId, fromSeq: number) => {
+          reads.push(fromSeq)
+          return { meta: { id }, events: (logs.a ?? []).filter(e => e.seq >= fromSeq) }
+        },
+      } as unknown as UsagePersistence
+      const aggregator = createUsageAggregator(persistence)
+
+      // 折叠时刻价目表不含 step-6-preview：cost=0、落 unpricedModels。
+      const before = await aggregator.aggregate()
+      expect(before.byModel['step-6-preview']?.cost ?? 0).toBe(0)
+      expect(before.unpricedModels).toContain('step-6-preview')
+
+      // 价目表注入（models.dev extraModels）后重折：step-6-preview 折出 cost，
+      // total.cost 与 byModel 之和一致（无双口径）。
+      applyLivePricing({
+        source: 'live',
+        rate: 7,
+        extraModels: [{ key: 'step-6-preview', name: 'Step 5 Preview', provider: 'Step', price: { input: 2, cacheHit: 0.2, output: 8 } }],
+      })
+      vi.advanceTimersByTime(AGGREGATE_TTL_MS + 1000)
+      const after = await aggregator.aggregate()
+      const cellAfter = after.byModel['step-6-preview']
+      expect(cellAfter?.cost ?? 0).toBeGreaterThan(0)
+      expect(after.unpricedModels ?? []).not.toContain('step-6-preview')
+      const byModelSum = Object.values(after.byModel).reduce((sum, row) => sum + row.cost, 0)
+      expect(after.total.cost).toBeCloseTo(byModelSum, 6)
+      // 关键：旧折叠（cache 命中，同 stamp 零读取）没有吞掉重折——
+      // 日志被重新读取（全量 from=0），cost 由此折出。
+      expect(reads).toContain(0)
+      expect(reads.length).toBeGreaterThanOrEqual(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('invalidates the incremental cursor when the cached fold has since-priced unpriced models', async () => {
+    vi.useFakeTimers()
+    try {
+      const logs: Record<string, SessionEvent[]> = { a: step5Events() }
+      const reads: string[] = []
+      const persistence = {
+        list: async () => [{ id: 'a' }],
+        readFrom: async (id: SessionId, fromSeq: number) => {
+          reads.push(`from=${String(fromSeq)}`)
+          return { meta: { id }, events: (logs.a ?? []).filter(e => e.seq >= fromSeq) }
+        },
+      } as unknown as UsagePersistence
+      const aggregator = createUsageAggregator(persistence)
+      await aggregator.aggregate()
+      expect(reads).toEqual(['from=0'])
+
+      // 追加事件 + 价目表就绪：惰性失效须丢弃增量游标退回全量重折，
+      // 旧段按新价目表计价（增量追加永远补不出旧段的 cost）。
+      logs.a = [...step5Events(), { type: 'assistant/message', seq: 3, time: Date.UTC(2026, 9, 12, 5, 0, 0), data: { turn: 1, step: 2, message: { role: 'assistant', content: [] }, usage: USAGE } } as unknown as SessionEvent]
+      applyLivePricing({
+        source: 'live',
+        rate: 7,
+        extraModels: [{ key: 'step-6-preview', name: 'Step 5 Preview', provider: 'Step', price: { input: 2, cacheHit: 0.2, output: 8 } }],
+      })
+      vi.advanceTimersByTime(AGGREGATE_TTL_MS + 1000)
+      const after = await aggregator.aggregate()
+      // 第二次读取是全量（from=0），而非增量 from=2。
+      expect(reads).toEqual(['from=0', 'from=0'])
+      expect(after.total.cost).toBeGreaterThan(0)
+      expect(after.byModel['step-6-preview']?.calls).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('refolds a cache hit whose unpriced model becomes priced on a stamped backend (PR #90 P1)', async () => {
+    // 生产形态的宿主（有 locate → 稳定 stamp）下，预热折叠会同时写入 cache 行与
+    // 账本行。价目表就绪后的下一轮：账本门触发落穿，但若 cache 命中路径没有同一
+    // 道门，就会零读取复用旧折叠 —— 空闲会话 stamp 永不变，整个进程生命周期
+    // cost=0，只有重启才自愈。本用例守住 cache 命中路径的惰性失效门。
+    vi.useFakeTimers()
+    let dir: string | undefined
+    try {
+      const logs: Record<string, SessionEvent[]> = { a: step5Events() }
+      dir = await mkdtemp(join(tmpdir(), 'dsh-billing-reprice-cachehit-'))
+      const path = join(dir, 'a.jsonl')
+      await writeFile(path, 'seed')
+      let reads = 0
+      // 无账本（纯 cache 路径）+ 真实文件 locate → stamp 稳定（同 test 3 的形态）。
+      const persistence = {
+        list: async () => [{ id: 'a' }],
+        locate: (meta: { id: SessionId }) => ({ kind: 'jsonl', path }),
+        readFrom: async (id: SessionId, fromSeq: number) => {
+          reads += 1
+          return { meta: { id }, events: (logs.a ?? []).filter(e => e.seq >= fromSeq) }
+        },
+      } as unknown as UsagePersistence
+      const aggregator = createUsageAggregator(persistence)
+
+      // 第一轮：价目表未就绪 → cost=0、落 unpricedModels，写入 cache。
+      const before = await aggregator.aggregate()
+      expect(reads).toBe(1)
+      expect(before.byModel['step-6-preview']?.cost ?? 0).toBe(0)
+      expect(before.unpricedModels).toContain('step-6-preview')
+
+      // 价目表就绪后的下一轮：cache 命中路径必须让路（stamp 未变）。
+      applyLivePricing({
+        source: 'live',
+        rate: 7,
+        extraModels: [{ key: 'step-6-preview', name: 'Step 5 Preview', provider: 'Step', price: { input: 2, cacheHit: 0.2, output: 8 } }],
+      })
+      vi.advanceTimersByTime(AGGREGATE_TTL_MS + 1000)
+      const after = await aggregator.aggregate()
+      // 关键断言：日志被重新全量读取（不是 cache 零读取吞掉），cost 折出。
+      expect(reads).toBe(2)
+      expect(after.byModel['step-6-preview']?.cost ?? 0).toBeGreaterThan(0)
+      expect(after.unpricedModels ?? []).not.toContain('step-6-preview')
+    } finally {
+      vi.useRealTimers()
+      if (dir !== undefined) await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('reuses a ledger row whose unpriced models stay unpriced, refolds when priced', async () => {
+    vi.useFakeTimers()
+    let dir: string | undefined
+    try {
+      const logs: Record<string, SessionEvent[]> = { a: step5Events() }
+      dir = await mkdtemp(join(tmpdir(), 'dsh-billing-reprice-'))
+      const path = join(dir, 'a.jsonl')
+      await writeFile(path, 'seed')
+      const info = await stat(path)
+      let reads = 0
+      const persistence = {
+        list: async () => [{ id: 'a' }],
+        locate: (meta: { id: SessionId }) => ({ kind: 'jsonl', path }),
+        readFrom: async (id: SessionId, fromSeq: number) => {
+          reads += 1
+          return { meta: { id }, events: (logs.a ?? []).filter(e => e.seq >= fromSeq) }
+        },
+      } as unknown as UsagePersistence
+      const fold = legacyFold()
+      fold.unpricedModels = ['step-6-preview']
+      const store = fakeLedgerStore([{
+        id: 'a',
+        stamp: `${String(info.mtimeMs)}:${String(info.size)}`,
+        foldVersion: FOLD_VERSION,
+        fingerprint: configFingerprint(new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {}, DEFAULT_SEARCH_CALL_ESTIMATE_CNY, {}, new Set()),
+        fold,
+      }])
+      const aggregator = createUsageAggregator(persistence, { ledger: store.store })
+
+      // 负向对照：模型仍未收录 → 账本行零读取复用（惰性失效不误伤未受影响行）。
+      const before = await aggregator.aggregate()
+      expect(reads).toBe(0)
+      expect(before.unpricedModels).toContain('step-6-preview')
+
+      // 价目表注入后：账本行失效重折，cost>0、unpriced 标记清除、账本行重写。
+      applyLivePricing({
+        source: 'live',
+        rate: 7,
+        extraModels: [{ key: 'step-6-preview', name: 'Step 5 Preview', provider: 'Step', price: { input: 2, cacheHit: 0.2, output: 8 } }],
+      })
+      vi.advanceTimersByTime(AGGREGATE_TTL_MS + 1000)
+      const after = await aggregator.aggregate()
+      expect(reads).toBe(1)
+      expect(after.byModel['step-6-preview']?.cost ?? 0).toBeGreaterThan(0)
+      expect(after.unpricedModels ?? []).not.toContain('step-6-preview')
+      expect(after.staleLedgerSessions ?? 0).toBe(0)
+      // 重折后的账本行须落盘：unpricedModels 已按新价目表清空（recordLedger 的
+      // changed 判定须识别惰性失效行，否则元数据全同会挡掉重写）。
+      await aggregator.flush()
+      expect(store.current().sessions[0]?.fold.unpricedModels).toEqual([])
+    } finally {
+      vi.useRealTimers()
+      if (dir !== undefined) await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('registered adapter providers home to direct (issue #91)', () => {
+  /** 插件注册通道的最小日志：request/header 带 provider + model，message 报 usage。 */
+  function adapterLog(seq: number, provider: string, model: string): SessionEvent[] {
+    return [
+      header(seq, model, provider),
+      message(seq + 1, 1_000, USAGE),
+    ]
+  }
+
+  it('homes a host-registered adapter channel to direct:commandcode and prices it', async () => {
+    // llm-pi-ai 之外的插件路由（ctx.llm.registerAdapter）经 resolveRegisteredProviders
+    // 归位 direct:<provider>，按模型官方目录价计费——不再落 unknown 记 0。
+    const persistence = fakePersistence({
+      cc: adapterLog(0, 'commandcode', 'deepseek/deepseek-v4.1-flash'),
+    })
+    const stats = await aggregateUsage(persistence, {
+      resolveRegisteredProviders: () => new Set(['commandcode']),
+    })
+
+    const site = stats.bySite?.['direct:commandcode']
+    expect(site?.calls).toBe(1)
+    expect(site?.cost ?? 0).toBeGreaterThan(0)
+    // 不落 unknown（issue #82 的记 0 口径只留给宿主也不认识的通道）。
+    expect(stats.bySite?.unknown?.calls ?? 0).toBe(0)
+    // 厂商前缀 id 归一到 flash 键（v1.4.30 别名），费用 = flash 目录价。
+    expect(stats.byModel['flash']?.cost ?? 0).toBeGreaterThan(0)
+    expect(stats.byModel['deepseek/deepseek-v4.1-flash']).toBeUndefined()
+  })
+
+  it('keeps channels unknown to the host in the unknown bucket at zero cost', async () => {
+    // 未注册（宿主也不认识）的通道维持 issue #82 口径：token 照记、费用为 0。
+    const persistence = fakePersistence({
+      ghost: adapterLog(0, 'ghost-provider', 'deepseek/deepseek-v4.1-flash'),
+    })
+    const stats = await aggregateUsage(persistence, {
+      resolveRegisteredProviders: () => new Set(['commandcode']),
+    })
+
+    expect(stats.bySite?.unknown?.calls).toBe(1)
+    expect(stats.bySite?.unknown?.cost ?? 0).toBe(0)
+    expect(stats.bySite?.['direct:commandcode']).toBeUndefined()
+  })
+
+  it('refolds rows when the registered set changes (per-round fingerprint)', async () => {
+    // provider 插件装卸（llm/adapters-updated）后的第一轮聚合按新通道口径重折。
+    // fake timers 跳过聚合 TTL：否则第二轮直接命中上轮 doc，测不到重折。
+    vi.useFakeTimers()
+    try {
+      let registered = new Set(['commandcode'])
+      const persistence = fakePersistence({
+        cc: adapterLog(0, 'commandcode', 'deepseek/deepseek-v4.1-flash'),
+      })
+      const aggregator = createUsageAggregator(persistence, {
+        resolveRegisteredProviders: () => registered,
+      })
+
+      const before = await aggregator.aggregate()
+      expect(before.bySite?.['direct:commandcode']?.cost ?? 0).toBeGreaterThan(0)
+
+      registered = new Set()
+      vi.advanceTimersByTime(AGGREGATE_TTL_MS + 1000)
+      const after = await aggregator.aggregate()
+      expect(after.bySite?.unknown?.calls).toBe(1)
+      expect(after.bySite?.unknown?.cost ?? 0).toBe(0)
+      expect(after.bySite?.['direct:commandcode']).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('queries the registry at most once per aggregation round', async () => {
+    // 性能回归：注册表查询（ctx.get('llm') 服务调用 + 集合合并）在每个分片折叠
+    // 调用点执行会放大成风暴；聚合器须按轮次缓存路由视图与注册集合（issue #91）。
+    let registryReads = 0
+    const persistence = fakePersistence({
+      cc: adapterLog(0, 'commandcode', 'deepseek/deepseek-v4.1-flash'),
+    })
+    const aggregator = createUsageAggregator(persistence, {
+      resolveRegisteredProviders: () => {
+        registryReads += 1
+        return new Set(['commandcode'])
+      },
+    })
+
+    await aggregator.aggregate()
+    expect(registryReads).toBe(1)
+  })
+
+  it('refolds rows when user model aliases change (fingerprint includes aliases)', async () => {
+    // 别名改动（issue #91 P2）：旧行按旧 key「zz-custom」未收录记 0；指纹含别名后
+    // 新聚合器强制重折，用量按新目录键 flash 计价，byModel 不再新旧 key 并存。
+    const { store, current } = fakeLedgerStore([])
+    const persistence = fakePersistence({
+      custom: [header(0, 'zz-custom', 'commandcode'), message(1, 1_000, USAGE)],
+    })
+    const before = await createUsageAggregator(persistence, { ledger: store }).aggregate()
+    expect(before.byModel['zz-custom']?.cost ?? 0).toBe(0)
+
+    applyUserModelAliases({ 'zz-custom': 'flash' })
+    try {
+      const after = await createUsageAggregator(persistence, {
+        ledger: store,
+        modelKeyAliases: { 'zz-custom': 'flash' },
+        resolveRegisteredProviders: () => new Set(['commandcode']),
+      }).aggregate()
+      expect(after.byModel['flash']?.cost ?? 0).toBeGreaterThan(0)
+      expect(after.byModel['zz-custom']).toBeUndefined()
+      // 旧行被重写（foldVersion 22 + 新指纹），不是新旧并存。
+      expect(current().sessions[0]?.foldVersion).toBe(FOLD_VERSION)
+      expect(Object.keys(current().sessions[0]?.fold.byModel ?? {})).toEqual(['flash'])
+    } finally {
+      applyUserModelAliases(undefined)
+    }
   })
 })
 
@@ -1577,7 +2450,9 @@ describe('official channel by origin + route aliases (Tencent gateway)', () => {
 })
 
 describe('subscription matcher (default set vs explicit RE rule)', () => {
-  const tokenhubRoutes = { tencent: { baseURL: 'https://tokenhub.tencentmaas.com/v1' } }
+  // 订阅路由本身也要在册（无 baseURL → direct）：unknown 桶是「配置外通道」，
+  // 修复 issue #82 后不计价，不能用它承载「空集 → 按量」的断言。
+  const tokenhubRoutes = { tencent: { baseURL: 'https://tokenhub.tencentmaas.com/v1' }, 'tencent-token-plan': {} }
 
   it('exempts tencent-token-plan calls from token pricing by the default set', () => {
     const events = [header(1, 'glm-5.3', 'tencent-token-plan'), message(2, 2_000, USAGE)]
@@ -1596,5 +2471,241 @@ describe('subscription matcher (default set vs explicit RE rule)', () => {
     const events = [header(1, 'glm-5.3', 'tencent-token-plan'), message(2, 2_000, USAGE)]
     const fold = foldSession(events, new Set(), undefined, tokenhubRoutes)
     expect(fold.total.cost).toBeGreaterThan(0)
+  })
+})
+
+describe('route baseURL in the config fingerprint (history re-folds on endpoint change)', () => {
+  let root: string | undefined
+  afterEach(async () => {
+    if (root !== undefined) await rm(root, { recursive: true, force: true })
+    root = undefined
+  })
+
+  it('invalidates ledger rows when a route baseURL changes, and only then', async () => {
+    vi.useFakeTimers()
+    const logs: Record<string, SessionEvent[]> = { a: [header(1, 'deepseek-v4-flash'), message(2, 2_000, USAGE)] }
+    root = await mkdtemp(join(tmpdir(), 'dsh-billing-fp-'))
+    const reads: Record<string, number> = { a: 0 }
+    const path = join(root, 'a.jsonl')
+    await writeFile(path, JSON.stringify(1))
+    const persistence = {
+      list: async () => [{ id: 'a' }],
+      locate: (meta: { id: SessionId }) => ({ kind: 'jsonl', path }),
+      readFrom: async (id: SessionId, fromSeq: number) => {
+        reads[String(id)] += 1
+        return { meta: { id }, events: (logs.a ?? []).filter(event => event.seq >= fromSeq) }
+      },
+    } as unknown as UsagePersistence
+    let baseURL = 'https://relay-a.example'
+    const store = fakeLedgerStore([])
+    const aggregator = createUsageAggregator(persistence, {
+      ledger: store.store,
+      resolveRoutes: () => ({ relay: { baseURL } }),
+    })
+    await aggregator.aggregate()
+    expect(reads.a).toBe(1)
+    vi.advanceTimersByTime(AGGREGATE_TTL_MS + 1_000)
+    await aggregator.aggregate()
+    // baseURL 未变：指纹一致，账本行复用（零读取）。
+    expect(reads.a).toBe(1)
+    // baseURL 变化：站点归组/官方判定口径变化，历史行失效重折。
+    baseURL = 'https://relay-b.example'
+    vi.advanceTimersByTime(AGGREGATE_TTL_MS + 1_000)
+    await aggregator.aggregate()
+    expect(reads.a).toBe(2)
+    vi.useRealTimers()
+  })
+})
+
+describe('byTier latency-tier exclusion (FOLD_VERSION 23)', () => {
+  // 北京工作日 10:00 = 峰时（2026-10-14 是周三）。
+  const PEAK_TIME = Date.UTC(2026, 9, 14, 2, 0, 0)
+
+  it('keeps latency-tier (Gemini) traffic out of the peak/valley buckets', () => {
+    const events = [
+      header(1, 'deepseek-v4-flash', 'deepseek-official'),
+      message(2, PEAK_TIME, USAGE),
+      header(3, 'gemini-3.8-flash', 'gemini'),
+      message(4, PEAK_TIME, USAGE),
+    ]
+    const fold = foldSession(events, new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {})
+    // 峰谷桶只收 DeepSeek 一条：Gemini 延迟档与时刻无关（peakShare 混合计价），
+    // 套北京窗口分桶会把无时间窗语义的流量虚计入峰/谷。
+    expect(fold.byTier.get('peak')?.calls ?? 0).toBe(1)
+    expect(fold.byTier.get('offPeak')?.calls ?? 0).toBe(0)
+    // 其余桶不受影响：两条调用都按模型正常归账（deepseek-v4-flash 归一为目录键 flash）。
+    expect(fold.byModel.get('flash')?.calls).toBe(1)
+    expect(fold.byModel.get('gemini-3.8-flash')?.calls).toBe(1)
+  })
+
+  it('still buckets window-billed (DeepSeek) traffic by time of day', () => {
+    // 同一模型峰/谷两个时刻：byTier 分桶照常工作（回归保护）。
+    // 北京周四 00:00（10-15）落在峰窗外 = 谷时。
+    const OFFPEAK_TIME = Date.UTC(2026, 9, 14, 16, 0, 0)
+    const events = [
+      header(1, 'deepseek-v4-flash', 'deepseek-official'),
+      message(2, PEAK_TIME, USAGE),
+      message(3, OFFPEAK_TIME, USAGE),
+    ]
+    const fold = foldSession(events, new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {})
+    expect(fold.byTier.get('peak')?.calls ?? 0).toBe(1)
+    expect(fold.byTier.get('offPeak')?.calls ?? 0).toBe(1)
+  })
+})
+
+describe('subagent session rollup (子智能体归并)', () => {
+  /** 峰时时刻（费用>0 与时段无关，只为断言稳定）。 */
+  const T = Date.UTC(2026, 9, 15, 4, 0, 0)
+
+  /** persistence double：list 的 header 可携带宿主 v4 的子智能体归并字段。 */
+  function subPersistence(
+    logs: Record<string, SessionEvent[]>,
+    headers: Record<string, { origin?: 'subagent'; parentSession?: string; delegationDepth?: number }> = {},
+  ): UsagePersistence {
+    return {
+      list: async () => Object.keys(logs).map(id => ({ id, ...(headers[id] ?? {}) })),
+      readFrom: async (id: SessionId, fromSeq: number) => ({
+        meta: { id },
+        inheritedEventCount: 0,
+        events: (logs[id] ?? []).filter(event => event.seq >= fromSeq),
+      }),
+    } as unknown as UsagePersistence
+  }
+
+  it('subParentOf 只认 origin/delegationDepth 门，fork 种子血缘不归并', () => {
+    const meta = (fields: Record<string, unknown>): SessionHeader =>
+      ({ id: 's', createdAt: 0, isSeeded: false, ...fields }) as unknown as SessionHeader
+    expect(subParentOf(meta({ origin: 'subagent', parentSession: 'root', delegationDepth: 1 })))
+      .toBe('root')
+    // 无 origin 但深度 > 0（异常宿主只写深度）同样归并。
+    expect(subParentOf(meta({ delegationDepth: 2, parentSession: 'root' })))
+      .toBe('root')
+    // fork/resume：parentSession 是种子血缘，无子智能体标记 → 不归并。
+    expect(subParentOf(meta({ isSeeded: true, parentSession: 'origin' })))
+      .toBeUndefined()
+    // 深度 0 的顶层会话、老宿主无标记 header → 不归并。
+    expect(subParentOf(meta({ delegationDepth: 0 })))
+      .toBeUndefined()
+    expect(subParentOf(meta({})))
+      .toBeUndefined()
+  })
+
+  it('子会话行带 parentId，父行汇总后代费用与调用；总额口径不变', async () => {
+    const logs: Record<string, SessionEvent[]> = {
+      'session-root': [header(1, 'deepseek-v4-flash'), message(2, T, USAGE)],
+      'session-sub1': [header(1, 'deepseek-v4-flash'), message(2, T, USAGE)],
+      'session-sub2': [header(1, 'glm-5.2'), message(2, T, USAGE)],
+    }
+    const stats = await aggregateUsage(subPersistence(logs, {
+      'session-sub1': { origin: 'subagent', parentSession: 'session-root', delegationDepth: 1 },
+      // 只带深度的变体：同归并门。
+      'session-sub2': { delegationDepth: 1, parentSession: 'session-root' },
+    }))
+    const root = stats.bySession.find(row => row.id === 'session-root')
+    const sub1 = stats.bySession.find(row => row.id === 'session-sub1')
+    const sub2 = stats.bySession.find(row => row.id === 'session-sub2')
+    expect(sub1?.parentId).toBe('session-root')
+    expect(sub2?.parentId).toBe('session-root')
+    // 子行自己无后代：不写合计字段。
+    expect(sub1?.subCalls).toBeUndefined()
+    expect(sub1?.subCost).toBeUndefined()
+    expect(root?.parentId).toBeUndefined()
+    expect(root?.subCalls).toBe(2)
+    expect(root?.subCost).toBeCloseTo((sub1?.cost ?? 0) + (sub2?.cost ?? 0), 10)
+    // 纯展示层归并：总额仍按 3 次调用计（子会话费用本就在 total 里）。
+    expect(stats.total.calls).toBe(3)
+  })
+
+  it('多级委派整链递归到根对话', async () => {
+    const logs: Record<string, SessionEvent[]> = {
+      'session-root': [header(1, 'deepseek-v4-flash'), message(2, T, USAGE)],
+      'session-mid': [header(1, 'deepseek-v4-flash'), message(2, T, USAGE)],
+      'session-leaf': [header(1, 'deepseek-v4-flash'), message(2, T, USAGE)],
+    }
+    const stats = await aggregateUsage(subPersistence(logs, {
+      'session-mid': { origin: 'subagent', parentSession: 'session-root', delegationDepth: 1 },
+      'session-leaf': { origin: 'subagent', parentSession: 'session-mid', delegationDepth: 2 },
+    }))
+    const root = stats.bySession.find(row => row.id === 'session-root')
+    const mid = stats.bySession.find(row => row.id === 'session-mid')
+    // 中间节点只汇总自己的直接后代（叶子），根汇总整链。
+    expect(mid?.subCalls).toBe(1)
+    expect(root?.subCalls).toBe(2)
+  })
+
+  it('账本兜底行保留 subOf 归并标记（日志已删的子会话仍归位）', async () => {
+    const store = fakeLedgerStore([
+      {
+        id: 'session-sub-gone',
+        subOf: 'session-root',
+        foldVersion: FOLD_VERSION,
+        fold: legacyFold(),
+      },
+    ])
+    const stats = await aggregateUsage(subPersistence({
+      'session-root': [header(1, 'deepseek-v4-flash'), message(2, T, USAGE)],
+    }), { ledger: store.store })
+    const sub = stats.bySession.find(row => row.id === 'session-sub-gone')
+    const root = stats.bySession.find(row => row.id === 'session-root')
+    expect(sub?.parentId).toBe('session-root')
+    expect(sub?.stale).toBe(true)
+    // 父行把只剩账本行的子会话也汇总进去。
+    expect(root?.subCalls).toBe(2)
+  })
+
+  it('recordLedger 把 subOf 持久化进账本行', async () => {
+    const store = fakeLedgerStore([])
+    await aggregateUsage(subPersistence({
+      'session-root': [header(1, 'deepseek-v4-flash'), message(2, T, USAGE)],
+      'session-sub': [header(1, 'deepseek-v4-flash'), message(2, T, USAGE)],
+    }, {
+      'session-sub': { origin: 'subagent', parentSession: 'session-root', delegationDepth: 1 },
+    }), { ledger: store.store })
+    const sub = store.current().sessions.find(row => row.id === 'session-sub')
+    const root = store.current().sessions.find(row => row.id === 'session-root')
+    expect(sub?.subOf).toBe('session-root')
+    expect(root?.subOf).toBeUndefined()
+  })
+})
+
+describe('subscriptionMatcher by reference (MiniMax key-based exemption)', () => {
+  it('re-folds history when the referenced set changes, flipping MiniMax between pay-as-you-go and plan', async () => {
+    // 同一官方路由 id（minimax-cn）按量/套餐两用：集合里没有 → 按量计费；运行期按 key
+    // 前缀判出 Coding Plan 加入集合 → 指纹变化触发重折，同一批历史行变为订阅豁免。
+    const routes = new Set<string>()
+    // 路由须在 providers 表里（直连），否则落「未知路由」桶计 0（issue #91 口径）。
+    const aggregator = createUsageAggregator(
+      fakePersistence({ s1: [header(1, 'MiniMax-M3', 'minimax-cn'), message(2, 1_000, USAGE)] }),
+      { subscriptionMatcher: routes, resolveRoutes: () => ({ 'minimax-cn': {} }) },
+    )
+    vi.useFakeTimers()
+    try {
+      const before = await aggregator.aggregate()
+      expect(before.total.cost).toBeGreaterThan(0)
+      expect(before.byModel['minimax']?.plan).toBeUndefined()
+
+      // 结果有 5s TTL 缓存（生产上集合变化在下一轮 ≤5s 生效）：推进时钟越过 TTL。
+      routes.add('minimax-cn')
+      vi.advanceTimersByTime(AGGREGATE_TTL_MS + 1000)
+      const after = await aggregator.aggregate()
+      expect(after.total.cost).toBe(0)
+      expect(after.byModel['minimax']?.plan).toBe(true)
+
+      // 反向：key 换回按量（集合移除）→ 再次重折，费用恢复。
+      routes.delete('minimax-cn')
+      vi.advanceTimersByTime(AGGREGATE_TTL_MS + 1000)
+      const reverted = await aggregator.aggregate()
+      expect(reverted.total.cost).toBeCloseTo(before.total.cost, 10)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('fingerprints a referenced set by its current contents (not identity)', () => {
+    const routes = new Set<string>(['kimi-coding'])
+    const a = configFingerprint(routes, undefined, {}, 0)
+    routes.add('minimax-cn')
+    const b = configFingerprint(routes, undefined, {}, 0)
+    expect(a).not.toBe(b)
   })
 })

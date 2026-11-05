@@ -21,6 +21,8 @@ export interface LivePricing {
   source: 'live' | 'builtin'
   /** USD → CNY mid rate (present when the rate fetch succeeded). */
   rate?: number
+  /** EUR → CNY mid rate (present when the euro rate fetch succeeded). */
+  rateEur?: number
   /** Overrides keyed by built-in catalog key (present when router matches succeeded). */
   prices?: Record<string, LivePrice>
   /**
@@ -29,6 +31,8 @@ export interface LivePricing {
    * 内置目录未收录」的模型也能计价并出现在费率表。
    */
   extraModels?: readonly ExtraModelPrice[]
+  /** 上次价格目录同步完成的本机时间戳（毫秒）；0 = 尚未完成过任何一次同步。 */
+  syncedAt?: number
 }
 
 /** models.dev 补充的目录外模型价（USD / 1M tokens）。 */
@@ -80,6 +84,12 @@ export interface BalanceResponse {
   balances: readonly ProviderBalance[]
   /** 官方余额差对账提示（对账开启且当日有余额消费时下发）。 */
   reconcile?: ReconcileNotice
+  /**
+   * 本次余额来自上一次成功的查询（服务端刷新超预算，issue #104）：
+   * 上游查询被拖住时不再把响应长期挂起，改为回旧值并标记，客户端据此提示
+   * 「余额数据来自上次查询」。
+   */
+  stale?: boolean
 }
 
 /** 官方余额差对账提示（drift 时携带供 UI 展示的已用/本地费用）。 */

@@ -18,19 +18,15 @@ import { useMemo, useState } from 'react'
 import clsx from 'clsx'
 import css from './UsageBilling.module.css'
 import type { UsageBillingKey } from './locales.ts'
-import { formatTokens, modelOf } from './pricing.ts'
+import { formatTokens, localDayStamp, modelOf } from './pricing.ts'
+import { downloadText } from './export.ts'
 import type { TrendSeriesModel } from './TrendChart.tsx'
-import type { UsageStats } from './UsageBilling.tsx'
+import type { UsageStats } from './domain/types.ts'
 
-/** 本地时区 `YYYY-MM-DD`（与服务端 dayStamp 一致）。 */
-function localStamp(time = Date.now()): string {
-  const d = new Date(time)
-  const p = (n: number): string => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
-}
 
-/** 短数字刻度：`1.2M` / `3.4K`。 */
-function shortNumber(v: number): string {
+
+/** 短数字刻度：`1.2M` / `3.4K`。导出供概览 KPI 峰值日卡复用。 */
+export function shortNumber(v: number): string {
   if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`
   if (v >= 1_000) return `${(v / 1_000).toFixed(1)}K`
   return String(Math.round(v))
@@ -85,11 +81,10 @@ const PAD = { top: 14, right: 18, bottom: 22, left: 46 }
  * 用于按列宽推算两端多少根柱处于「居中会溢出容器」的安全区外（issue #45）。 */
 const TOOLTIP_HALF_PX = 80
 
-const MISS_COLOR = 'var(--dsw-static-blue-500)'
-// 缓存命中段：用青色系与输入（蓝）区分；`--dsw-static-cyan-500` 在宿主主题里不存在，
-// 改用自定义青绿色（#14b8a6）保证可读性。
-const HIT_COLOR = '#14b8a6'
-const OUTPUT_COLOR = 'var(--dsw-static-amber-500)'
+const MISS_COLOR = 'var(--ds-blue)'
+// 缓存命中段：用青色系与输入（蓝）区分，取设计 spec §3.4 的 --ds-cyan（#2dd4bf）。
+const HIT_COLOR = 'var(--ds-cyan)'
+const OUTPUT_COLOR = 'var(--ds-amber)'
 
 /** 聚焦时其余模型段的透明度：目标段保持原色，y 轴与柱总高不变。 */
 const DIM_OPACITY = 0.15
@@ -164,7 +159,7 @@ export function TokenPanel(props: {
     for (let offset = trendDays - 1; offset >= 0; offset -= 1) {
       const d = new Date()
       d.setDate(d.getDate() - offset)
-      const date = localStamp(d.getTime())
+      const date = localDayStamp(d.getTime())
       const day = byDay[date]
       out.push({
         date,
@@ -183,7 +178,7 @@ export function TokenPanel(props: {
     for (let offset = trendDays - 1; offset >= 0; offset -= 1) {
       const d = new Date()
       d.setDate(d.getDate() - offset)
-      const date = localStamp(d.getTime())
+      const date = localDayStamp(d.getTime())
       const cells = stats.byDayModels?.[date]
       const models: Record<string, ModelDayCell> = {}
       let dayTotal = 0
@@ -263,24 +258,7 @@ export function TokenPanel(props: {
     return rows.map(r => ({ ...r, share: grand > 0 ? r.total / grand : 0 }))
   }, [byModel])
 
-  // 结构 KPI。（对旧快照缺失字段兜底：reasoning/cacheRead 等可能为 undefined。）
-  const kpis = useMemo(() => {
-    const hit = total.cacheHit ?? 0
-    const miss = total.cacheMiss ?? 0
-    const input = total.input ?? 0
-    const output = total.output ?? 0
-    const reasoning = total.reasoning ?? 0
-    const hitMiss = hit + miss
-    const cacheHitRate = hitMiss > 0 ? (hit / hitMiss) * 100 : 0
-    const reasoningPct = output > 0 ? (reasoning / output) * 100 : 0
-    const io = output > 0 ? input / output : 0
-    let peak: DailyBucket | undefined
-    for (const d of days) {
-      const t2 = d.miss + d.hit + d.output
-      if (peak === undefined || t2 > peak.miss + peak.hit + peak.output) peak = d
-    }
-    return { cacheHitRate, reasoningPct, io, peak, hit, miss, input, output, reasoning }
-  }, [total, days])
+  // 结构 KPI 已并入概览 KPI 七卡（issue #47 反馈），此处不再重复渲染。
 
   // 工具调用排行：取前 8 名，其余合并为「其他」。
   const toolRows = useMemo(() => {
@@ -313,20 +291,10 @@ export function TokenPanel(props: {
 
   // 导出：按日 token CSV（结构口径，保持不变）+ 全量 JSON（含按日 × 模型明细）。
   const exportTokenCsv = (): void => {
-    const blob = new Blob([tokenDayCsv(days)], { type: 'text/csv' })
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
-    a.download = `token-daily-${localStamp()}.csv`
-    a.click()
-    setTimeout(() => URL.revokeObjectURL(a.href), 0)
+    downloadText(`token-daily-${localDayStamp()}.csv`, tokenDayCsv(days), 'text/csv')
   }
   const exportTokenJson = (): void => {
-    const blob = new Blob([tokenDailyJson(days, models, modelDays, total)], { type: 'application/json' })
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
-    a.download = `token-${localStamp()}.json`
-    a.click()
-    setTimeout(() => URL.revokeObjectURL(a.href), 0)
+    downloadText(`token-${localDayStamp()}.json`, tokenDailyJson(days, models, modelDays, total), 'application/json')
   }
 
   // 悬停日的明细（tooltip 数据源）；未悬停或索引越界时不显示。
@@ -354,33 +322,7 @@ export function TokenPanel(props: {
         </button>
       </div>
 
-      {/* Token 结构 KPI。 */}
-      <div className={css.kpiGrid} data-testid="billing-token-kpis">
-        <div className={css.kpiTile}>
-          <span className={css.kpiLabel}>{t('tokenCacheHitRate')}</span>
-          <span className={css.kpiValue}>{kpis.cacheHitRate.toFixed(1)}%</span>
-          {/* 显式缓存写入（cacheMiss 子集）在命中卡副行附带展示；无该维度时不显示。 */}
-          <span className={css.kpiDetail}>
-            {formatTokens(kpis.hit)} / {formatTokens(kpis.hit + kpis.miss)}
-            {(total.cacheWrite ?? 0) > 0 ? ` · ${t('tokenCacheWrite')} ${formatTokens(total.cacheWrite ?? 0)}` : ''}
-          </span>
-        </div>
-        <div className={css.kpiTile}>
-          <span className={css.kpiLabel}>{t('tokenReasoningShare')}</span>
-          <span className={css.kpiValue}>{kpis.reasoningPct.toFixed(1)}%</span>
-          <span className={css.kpiDetail}>{formatTokens(kpis.reasoning)}</span>
-        </div>
-        <div className={css.kpiTile}>
-          <span className={css.kpiLabel}>{t('tokenIo')}</span>
-          <span className={css.kpiValue}>{kpis.io.toFixed(2)}</span>
-          <span className={css.kpiDetail}>{formatTokens(kpis.input)} / {formatTokens(kpis.output)}</span>
-        </div>
-        <div className={css.kpiTile}>
-          <span className={css.kpiLabel}>{t('tokenPeak')}</span>
-          <span className={css.kpiValue}>{kpis.peak === undefined ? '—' : shortNumber(kpis.peak.miss + kpis.peak.hit + kpis.peak.output)}</span>
-          <span className={css.kpiDetail}>{kpis.peak?.date ?? '—'}</span>
-        </div>
-      </div>
+      {/* Token 结构 KPI 已并入概览（issue #47 反馈），用量页从每日趋势开始。 */}
 
       {/* 每日 token 堆叠趋势（按结构 / 按模型 双视角）。 */}
       <section className={css.panel} data-testid="billing-token-daily">
@@ -542,7 +484,7 @@ export function TokenPanel(props: {
                   const cell = activeModelDay.models[m.key]
                   if (cell === undefined) return null
                   return (
-                    <div key={m.key} className={css.chartTooltipModel}>
+                    <div key={m.key}>
                       <div className={clsx(css.chartTooltipRow, css.chartTooltipSplit)}>
                         <span className={css.chartTooltipLabel}>
                           <span className={css.chartTooltipSwatch} style={{ background: m.color }} />
@@ -616,6 +558,15 @@ export function TokenPanel(props: {
                     className={clsx(modelViewAvailable && css.modelRowFocusable, activeFocus === m.key && css.modelRowActive)}
                     aria-selected={modelViewAvailable ? activeFocus === m.key : undefined}
                     onClick={modelViewAvailable ? () => { toggleFocus(m.key) } : undefined}
+                    /* 与会话折叠行同一 U1 键盘模式：Tab 聚焦，Enter/Space 切换聚焦模型；
+                    保留 tr 的 row 语义，不加 role 以免破坏表格结构。 */
+                    tabIndex={modelViewAvailable ? 0 : undefined}
+                    onKeyDown={modelViewAvailable ? (event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault()
+                        toggleFocus(m.key)
+                      }
+                    } : undefined}
                   >
                     <td><span className={css.modelName}>{m.name}</span></td>
                     <td className={css.numCol}>{formatTokens(m.input)}</td>

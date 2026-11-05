@@ -107,6 +107,33 @@ describe('queryDeclaredEndpoints', () => {
     expect(rows[0]).toMatchObject({ error: 'unconfigured' })
   })
 
+  it('takes the credential from the route conventional ref when apiKeyEnv is absent (new-host shape)', async () => {
+    // 新版宿主把路由 key 存成凭据 refs（<ROUTE>_API_KEY），路由配置里没有
+    // apiKeyEnv——匹配到同源 provider 后应按约定 ref 找回 key 并完成查询。
+    const newShapeProviders = { 'my-relay': { baseURL: 'https://relay.example.com/v1' } }
+    const ctx = {
+      credentials: {
+        resolve: vi.fn(async (ref: unknown) => {
+          return ref === 'MY_RELAY_API_KEY' ? { value: 'sk-convention' } : undefined
+        }),
+      },
+    } as never
+    const fetchSpy = vi.fn(async () => ({
+      ok: true, status: 200, type: 'basic', text: async () => JSON.stringify({ data: { balance: 9 } }),
+    }))
+    vi.stubGlobal('fetch', fetchSpy)
+    const rows = await queryDeclaredEndpoints(ctx, newShapeProviders, [{
+      origin: 'https://relay.example.com',
+      path: '/api/quota',
+      fields: { total: 'data.balance' },
+    }])
+    expect(rows[0]).toMatchObject({ totalBalance: 9, declared: true })
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'https://relay.example.com/api/quota',
+      expect.objectContaining({ headers: expect.objectContaining({ authorization: 'Bearer sk-convention' }) }),
+    )
+  })
+
   it('flags a declaration whose paths miss every field instead of showing an empty card', async () => {
     const ctx = fakeContext('k')
     vi.stubGlobal('fetch', bodyFetch('{}'))
@@ -117,5 +144,26 @@ describe('queryDeclaredEndpoints', () => {
     }])
     expect(rows[0]).toMatchObject({ error: 'invalid', reason: '声明路径未命中任何字段' })
     expect(rows[0]?.totalBalance).toBeUndefined()
+  })
+
+  it('reports unreachable (no crash) when the upstream body is not parseable JSON', async () => {
+    // 上游改 Content-Type 抛 HTML 错误页 / 反代注入 BOM / 空 body 时，原生
+    // SyntaxError 不带诊断信息；显式 try/catch 后统一降级为 unreachable，路由
+    // 不会 500，面板显示声明端点不可读（与鉴权错 / 跨源错同等姿态）。
+    const ctx = fakeContext('k')
+    for (const body of [
+      '<html>502 Bad Gateway</html>',
+      '',
+      'not-json-at-all',
+      '\uFEFF{"data":{', // BOM + 截断
+    ]) {
+      vi.stubGlobal('fetch', bodyFetch(body))
+      const rows = await queryDeclaredEndpoints(ctx, providers, [{
+        origin: 'https://relay.example.com',
+        path: '/api/quota',
+        fields: { total: 'data.balance' },
+      }])
+      expect(rows[0]).toMatchObject({ error: 'unreachable', declared: true })
+    }
   })
 })

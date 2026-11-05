@@ -9,7 +9,7 @@
  */
 
 import type { ExtraModelPrice, LivePrice, LivePricing } from './pricing-shared.ts'
-import { MODEL_CATALOG, MODEL_KEY_ALIASES } from './client/pricing.ts'
+import { BUILTIN_MODEL_CATALOG, BUILTIN_MODEL_KEY_ALIASES } from './builtin-catalog.ts'
 import { createCooldownGate, withRetry } from './resilience.ts'
 
 /** Abort a fetch when the upstream hangs beyond this budget. */
@@ -170,8 +170,40 @@ async function fetchJson(url: string): Promise<unknown> {
 }
 
 /** Latest USD → CNY rate from the first working source, or undefined when none respond. */
-async function fetchRate(): Promise<number | undefined> {
-  for (const source of RATE_SOURCES) {
+/**
+ * EUR → CNY 汇率源。与 USD 同一套降级约定：腾讯行情优先（免 key、国内可达），
+ * open.er-api.com 兑底；全部失败由调用方降级内置汇率，不阻塞其他价格拉取。
+ */
+const EUR_RATE_SOURCES: readonly { url: string; parse: (text: string) => number | undefined }[] = [
+  {
+    url: 'https://qt.gtimg.cn/q=whEURCNY',
+    parse: (text) => {
+      const match = /"([^"]*)"/.exec(text)
+      const price = match?.[1]?.split('~')[3]
+      return price !== undefined && price !== '' ? Number(price) : undefined
+    },
+  },
+  {
+    url: 'https://open.er-api.com/v6/latest/EUR',
+    parse: (text) => {
+      try {
+        const data = JSON.parse(text) as { rates?: Record<string, unknown> }
+        const cny = data.rates?.CNY
+        return typeof cny === 'number' && Number.isFinite(cny) && cny > 0 ? cny : undefined
+      } catch {
+        return undefined
+      }
+    },
+  },
+]
+
+/**
+ * 按顺序尝试汇率源，返回第一个合法正数。
+ * @param sources - 待尝试的汇率源。
+ * @returns 汇率；全部失败时 undefined。
+ */
+async function fetchRateFrom(sources: readonly { url: string; parse: (text: string) => number | undefined }[]): Promise<number | undefined> {
+  for (const source of sources) {
     const text = await fetchText(source.url)
     if (text === null) continue
     const value = source.parse(text)
@@ -185,6 +217,10 @@ function routerPrice(value: unknown): number | undefined {
   if (typeof value !== 'number' && (typeof value !== 'string' || value.trim() === '')) return undefined
   const price = Number(value) * 1_000_000
   return Number.isFinite(price) && price >= 0 ? price : undefined
+}
+
+async function fetchRate(): Promise<number | undefined> {
+  return fetchRateFrom(RATE_SOURCES)
 }
 
 /** OpenRouter model rows with usable USD unit prices, or undefined on failure. */
@@ -211,14 +247,19 @@ async function fetchRouterModels(): Promise<readonly RouterModel[] | undefined> 
   return models
 }
 
-/** Match one catalog key's candidates: exact id first, then a single strong substring hit. */
+/** Match one catalog key's candidates: exact id first, then per-hint unique strong substring. */
 function matchRouterModel(hints: readonly string[], models: readonly RouterModel[]): RouterModel | undefined {
   const exact = models.find(model => hints.some(hint => model.id === hint))
   if (exact !== undefined) return exact
-  // 强子串：hint 足够具体（≥8 字符）且唯一命中，避免同前缀模型误配。
-  const strong = models.filter(model => hints.some(hint => hint.length >= 8 && model.id.includes(hint)))
-  if (strong.length !== 1) return undefined
-  return strong[0]
+  // 强子串按 hint 声明顺序逐条判定（≥8 字符且唯一命中）：此前把全部 hint 池化
+  // 取并集，宽泛的兜底 hint（如 'deepseek-v4'）会把同族模型全拉进候选集，
+  // 具体 hint（'deepseek-v4-flash'）因此永远判「不唯一」跳过，实时价静默落空。
+  for (const hint of hints) {
+    if (hint.length < 8) continue
+    const strong = models.filter(model => model.id.includes(hint))
+    if (strong.length === 1) return strong[0]
+  }
+  return undefined
 }
 
 /** Map router matches onto catalog keys; undefined when nothing matched. */
@@ -237,6 +278,32 @@ function asPrice(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
 }
 
+/** models.dev 常把同一模型收录在多个 provider 下（厂商 + 转售）。这些 id 是模型
+ *  自身的厂商，其报价视为权威：转售可能加价，也可能省略 cache_read 而落到下方
+ *  `input * 0.1` 的猜测值。去重时优先采用。 */
+const FIRST_PARTY_PRICE_SOURCES: ReadonlySet<string> = new Set([
+  'anthropic', 'openai', 'google', 'mistral', 'deepseek', 'moonshotai', 'zhipuai',
+  'alibaba', 'alibaba-cn', 'xai', 'meta', 'cohere', 'ai21', 'minimax', 'stepfun',
+  'upstage', 'perplexity', 'morph',
+])
+
+/** 同一目录键的一条候选报价，附带用于择优的证据。 */
+interface PriceCandidate {
+  entry: ExtraModelPrice
+  input: number
+  output: number
+  /** `input/output` 组合，用于统计多数报价。 */
+  pair: string
+  /** provider 是该模型的厂商（白名单命中，或模型 id 的命名空间等于 provider id）。 */
+  firstParty: boolean
+  /** 该条目显式声明了 cache_read，而非退化到 input * 0.1。 */
+  declared: boolean
+  /** 模型 id 的命名空间（`vendor/model` 的 vendor 部分），无则为空串。 */
+  namespace: string
+  family?: string
+  providerDisplay: string
+}
+
 /**
  * models.dev 响应 → 目录外补充条目。不再按厂商白名单过滤：凡是有有效
  * cost 的模型都纳入（探活模型可能来自任何预制厂商，白名单会漏掉）。厂商
@@ -248,18 +315,27 @@ export function buildExtraModels(data: unknown): ExtraModelPrice[] {
   if (data === null || typeof data !== 'object') return []
   // 已在内置目录收录（含别名表归一化后的目录键）：跳过，走内置价/别名避免重复。
   const catalogKeys = new Set<string>([
-    ...MODEL_CATALOG.map(entry => entry.key.toLowerCase()),
-    ...Object.keys(MODEL_KEY_ALIASES).map(key => MODEL_KEY_ALIASES[key]?.toLowerCase() ?? key.toLowerCase()),
+    ...BUILTIN_MODEL_CATALOG.map(entry => entry.key.toLowerCase()),
+    ...Object.keys(BUILTIN_MODEL_KEY_ALIASES).map(key => BUILTIN_MODEL_KEY_ALIASES[key]?.toLowerCase() ?? key.toLowerCase()),
   ])
-  const extras: ExtraModelPrice[] = []
+  // 同一目录键会被多个 provider 各收录一条。先全部收集，再按证据择优——
+  // 此前按遍历顺序保留第一条，等于让 models.dev 的 JSON 字段顺序决定价格。
+  const offers = new Map<string, PriceCandidate[]>()
+  // models.dev 的 family → 一手收录它的厂商。从数据本身学习，使同一 family 的
+  // 模型归到同一厂商，而不是被各自中标的转售站拆散。
+  const familyVendorVotes = new Map<string, Map<string, number>>()
   for (const [providerId, providerDoc] of Object.entries(data as Record<string, unknown>)) {
     if (providerDoc === null || typeof providerDoc !== 'object') continue
     const models = (providerDoc as { models?: unknown }).models
     if (models === null || typeof models !== 'object') continue
+    const providerKey = providerId.toLowerCase()
+    const providerName = (providerDoc as { name?: unknown }).name
+    const providerDisplay = MODELS_DEV_PROVIDERS[providerKey]
+      ?? (typeof providerName === 'string' && providerName !== '' ? providerName : providerId)
     for (const [modelId, modelDoc] of Object.entries(models as Record<string, unknown>)) {
       // models.dev 的 key 是厂商原始 id（deepseek-v4-flash）；先按别名归一化为
       // 目录键（flash），命中内置目录则跳过。
-      const catalogKey = (MODEL_KEY_ALIASES[modelId] ?? modelId).toLowerCase()
+      const catalogKey = (BUILTIN_MODEL_KEY_ALIASES[modelId] ?? modelId).toLowerCase()
       if (catalogKeys.has(catalogKey)) continue
       const key = catalogKey
       if (modelDoc === null || typeof modelDoc !== 'object') continue
@@ -268,15 +344,103 @@ export function buildExtraModels(data: unknown): ExtraModelPrice[] {
       const input = asPrice((cost as { input?: unknown }).input)
       const output = asPrice((cost as { output?: unknown }).output)
       if (input === undefined || output === undefined) continue
-      const cacheRead = asPrice((cost as { cache_read?: unknown }).cache_read) ?? input * 0.1
+      const declaredCacheRead = asPrice((cost as { cache_read?: unknown }).cache_read)
+      const cacheRead = declaredCacheRead ?? input * 0.1
       const name = (modelDoc as { name?: unknown }).name
-      extras.push({
-        key,
-        name: typeof name === 'string' && name !== '' ? name : modelId,
-        provider: MODELS_DEV_PROVIDERS[providerId.toLowerCase()] ?? providerId,
-        price: { input, cacheHit: cacheRead, output },
+      const familyValue = (modelDoc as { family?: unknown }).family
+      const family = typeof familyValue === 'string' && familyValue !== '' ? familyValue : undefined
+      // 带命名空间的 id（`vendor/model`）自带厂商信息，provider id 与之相等即为
+      // 一手报价——无需维护词表，对任何厂商都成立。
+      const slash = modelId.indexOf('/')
+      const namespace = slash > 0 ? modelId.slice(0, slash).toLowerCase() : ''
+      const firstParty = FIRST_PARTY_PRICE_SOURCES.has(providerKey) || (namespace !== '' && namespace === providerKey)
+      if (firstParty && family !== undefined) {
+        // 白名单里的 provider 也会转售别家模型，单条报价不足以决定整个 family，
+        // 取多数票。
+        let votes = familyVendorVotes.get(family)
+        if (votes === undefined) {
+          votes = new Map<string, number>()
+          familyVendorVotes.set(family, votes)
+        }
+        votes.set(providerDisplay, (votes.get(providerDisplay) ?? 0) + 1)
+      }
+      let list = offers.get(key)
+      if (list === undefined) {
+        list = []
+        offers.set(key, list)
+      }
+      list.push({
+        entry: {
+          key,
+          name: typeof name === 'string' && name !== '' ? name : modelId,
+          provider: providerDisplay,
+          price: { input, cacheHit: cacheRead, output },
+        },
+        input,
+        output,
+        pair: `${input}/${output}`,
+        firstParty,
+        declared: declaredCacheRead !== undefined,
+        namespace,
+        ...(family === undefined ? {} : { family }),
+        providerDisplay,
       })
     }
+  }
+  const familyVendor = new Map<string, string>()
+  for (const [family, votes] of familyVendorVotes) {
+    let winner: string | undefined
+    let winnerVotes = 0
+    for (const [vendor, count] of votes) {
+      if (count > winnerVotes) {
+        winnerVotes = count
+        winner = vendor
+      }
+    }
+    if (winner !== undefined) familyVendor.set(family, winner)
+  }
+  const extras: ExtraModelPrice[] = []
+  for (const list of offers.values()) {
+    const firstPartyRow = list.find(candidate => candidate.firstParty)
+    let pool: PriceCandidate[]
+    if (firstPartyRow !== undefined) {
+      pool = list.filter(candidate => candidate.firstParty)
+    } else {
+      // 多数报价：最多 provider 公布的同一 input/output 组合。
+      const tally = new Map<string, number>()
+      for (const candidate of list) tally.set(candidate.pair, (tally.get(candidate.pair) ?? 0) + 1)
+      let consensus: string | undefined
+      let consensusCount = 0
+      for (const [pair, count] of tally) {
+        if (count > consensusCount) {
+          consensusCount = count
+          consensus = pair
+        }
+      }
+      if (consensusCount > 1) {
+        pool = list.filter(candidate => candidate.pair === consensus)
+      } else {
+        // 无共识时取中位数，避免被单个高价或低价离群值带偏。
+        const sorted = [...list].sort((a, b) => a.input - b.input || a.output - b.output)
+        const median = sorted[Math.floor((sorted.length - 1) / 2)]
+        pool = median === undefined ? [] : [median]
+      }
+    }
+    // 同分时优先真实声明的 cache_read，而非 input * 0.1 的猜测值。
+    const best = pool.find(candidate => candidate.declared) ?? pool[0]
+    if (best === undefined) continue
+    // 展示的厂商应是模型的厂商，而非中标的价格来源。
+    const familyName = list.find(candidate => candidate.family !== undefined)?.family
+    const learnedVendor = familyName === undefined ? undefined : familyVendor.get(familyName)
+    best.entry.provider = learnedVendor
+      ?? (best.firstParty
+        ? best.providerDisplay
+        : best.namespace !== ''
+          ? MODELS_DEV_PROVIDERS[best.namespace] ?? best.namespace
+          : familyName !== undefined
+            ? familyName.charAt(0).toUpperCase() + familyName.slice(1)
+            : best.providerDisplay)
+    extras.push(best.entry)
   }
   return extras
 }
@@ -287,13 +451,14 @@ export function buildExtraModels(data: unknown): ExtraModelPrice[] {
  * @returns the live pricing snapshot (builtin when everything failed).
  */
 export async function fetchLivePricing(): Promise<LivePricing> {
-  const [rate, models, modelsDev] = await Promise.all([fetchRate(), fetchRouterModels(), fetchJson(MODELS_DEV_URL)])
+  const [rate, rateEur, models, modelsDev] = await Promise.all([fetchRate(), fetchRateFrom(EUR_RATE_SOURCES), fetchRouterModels(), fetchJson(MODELS_DEV_URL)])
   const prices = models === undefined ? undefined : buildPrices(models)
   const extraModels = modelsDev === null ? undefined : buildExtraModels(modelsDev)
-  if (rate === undefined && prices === undefined && (extraModels === undefined || extraModels.length === 0)) return { source: 'builtin' }
+  if (rate === undefined && rateEur === undefined && prices === undefined && (extraModels === undefined || extraModels.length === 0)) return { source: 'builtin' }
   return {
     source: 'live',
     ...(rate !== undefined ? { rate } : {}),
+    ...(rateEur !== undefined ? { rateEur } : {}),
     ...(prices !== undefined ? { prices } : {}),
     ...(extraModels !== undefined && extraModels.length > 0 ? { extraModels } : {}),
   }

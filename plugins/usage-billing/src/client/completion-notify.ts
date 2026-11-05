@@ -8,6 +8,7 @@
 
 import type { SessionListState, SessionSummary } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
+import { swallowed } from '../silent.ts'
 
 /** 配置持久化 key：开启/关闭 + 提醒持续模式（0=常驻，其余=秒后自动关）。 */
 export const COMPLETION_NOTIFY_KEY = 'dsh-billing-completion-notify-v1'
@@ -46,7 +47,9 @@ export function saveNotifyConfig(config: CompletionNotifyConfig): void {
 
 /** 判断一个会话是否「完成」：completed 标志为真，或已不再 running。 */
 function isFinished(summary: SessionSummary): boolean {
-  if (summary.completed === true) return true
+  // 宿主 0.1.7 的 SessionSummary 移除 completed 字段（类型面与运行时同步移除）；
+  // 该分支只对 ≤0.1.6 快照生效，0.1.7+ 快照恒走 running===false 兜底，判定不变。
+  if ((summary as SessionSummary & { completed?: boolean }).completed === true) return true
   return summary.running === false
 }
 
@@ -92,6 +95,7 @@ export function installCompletionNotifier(list: ObservableSnapshot<SessionListSt
       }
     } catch {
       // 某些浏览器 Notification 构造失败：静默，不影响其它能力。
+      swallowed('notification-constructor-failed')
     }
   }
 

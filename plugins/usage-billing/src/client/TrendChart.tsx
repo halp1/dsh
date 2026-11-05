@@ -11,7 +11,16 @@
 
 import { useMemo, useState } from 'react'
 import css from './UsageBilling.module.css'
-import { cnyToUsd, formatMoney, type CostCurrency } from './pricing.ts'
+import { zh } from './locales.ts'
+import { convertFromCny, formatMoney, type CostCurrency } from './pricing.ts'
+import { shortNumber } from './TokenPanel.tsx'
+
+/** 本地日期戳：YYYY-MM-DD（与 stats.byDay 的键一致）。 */
+function localDayStamp(): string {
+  const d = new Date()
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
 
 /** One model's legend identity: key, display name, and brand color. */
 export interface TrendSeriesModel {
@@ -31,7 +40,7 @@ export interface TrendPoint {
   cost: number
   /** API calls that day (total across models). */
   calls: number
-  /** Total tokens that day (input+output+cache); used by the `tokens` metric. */
+  /** Total tokens that day (input+output — stats.input already includes cache hit/miss); used by the `tokens` metric. */
   tokens?: number
   /** Per-model cost that day (stats key → CNY); absent entries plot zero. */
   byModel?: Readonly<Record<string, number>>
@@ -48,12 +57,7 @@ function shortDate(iso: string): string {
   return `${Number(month)}/${Number(day)}`
 }
 
-/** Compact tick label for the calls axis: `1.2K` / `3.4M`. */
-function shortNumber(value: number): string {
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`
-  return String(Math.round(value))
-}
+/* shortNumber 复用 TokenPanel 的实现（同一 bundle，避免两份重复定义）。 */
 
 /** Ticks every `step` items for sparse axis labels. */
 function tickIndexes(length: number, step: number): number[] {
@@ -64,7 +68,7 @@ function tickIndexes(length: number, step: number): number[] {
 }
 
 /** Single-color fallback identity used when the stats carry no per-model detail. */
-const TOTAL_MODEL: TrendSeriesModel = { key: '__total__', name: '总计', color: '' }
+const TOTAL_MODEL: TrendSeriesModel = { key: '__total__', name: '', color: '' }
 
 /** One stacked segment: one model's cost inside one day's bar. */
 interface Bar {
@@ -90,9 +94,11 @@ export type TrendMetric = 'cost' | 'tokens'
  * @param props.currency - display currency for the cost labels.
  * @param props.metric - `cost` (stacked per-model CNY, default) or `tokens` (single-color total tokens).
  */
-export function TrendChart({ data, models = [], currency = 'cny', metric = 'cost' }: { data: readonly TrendPoint[]; models?: readonly TrendSeriesModel[]; currency?: CostCurrency; metric?: TrendMetric }): React.ReactNode {
+export function TrendChart({ data, models = [], currency = 'cny', metric = 'cost', t }: { data: readonly TrendPoint[]; models?: readonly TrendSeriesModel[]; currency?: CostCurrency; metric?: TrendMetric; t?: (key: 'trendEmpty' | 'trendTotal' | 'calls') => string }): React.ReactNode {
+  // 省略 t 时回落到中文词典，保持既有调用方（含测试）行为不变。
+  const tr = t ?? ((key: 'trendEmpty' | 'trendTotal' | 'calls'): string => zh[key])
   const [hover, setHover] = useState<number | null>(null)
-  const money = (cny: number): string => formatMoney(currency === 'usd' ? cnyToUsd(cny) : cny, currency)
+  const money = (cny: number): string => formatMoney(convertFromCny(cny, currency), currency)
   const axisOf = (value: number): string => metric === 'tokens' ? shortNumber(value) : money(value)
   // Column value source by metric: cost (stacked) vs total tokens (single color).
   const valueOf = (d: TrendPoint): number => metric === 'tokens' ? (d.tokens ?? 0) : d.cost
@@ -127,6 +133,7 @@ export function TrendChart({ data, models = [], currency = 'cny', metric = 'cost
       const x = inner(i) - barW / 2
       if (models.length === 0 || metric === 'tokens') {
         // 无模型明细或 Token 指标：单色总费用/总量柱兜底。
+        //（柱体只读 model.color/key；name 从不渲染，不再按 locale 生成。）
         return [{ date: d.date, model: TOTAL_MODEL, x, base: 0, value: valueOf(d), topRounded: true }]
       }
       // 顶部圆角给当天最后一个有量的模型段。
@@ -154,7 +161,7 @@ export function TrendChart({ data, models = [], currency = 'cny', metric = 'cost
   }, [data, models, metric])
 
   if (layout === null) {
-    return <div className={css.chartEmpty}>暂无趋势数据</div>
+    return <div className={css.chartEmpty}>{tr('trendEmpty')}</div>
   }
 
   const { n, plotW, plotH, inner, yCost, yCalls, barW, bars, costTicks, callsTicks, linePath } = layout
@@ -228,6 +235,44 @@ export function TrendChart({ data, models = [], currency = 'cny', metric = 'cost
 
         {/* Calls line (right axis): the daily call volume trend. */}
         <path d={linePath} fill="none" className={css.chartLine} />
+        {/* v1.5：今日竖虚线 + 渐变填充（面积图下垫）。 */}
+        {(() => {
+          const todayKey = localDayStamp()
+          const todayIdx = data.findIndex(d => d.date === todayKey)
+          return todayIdx >= 0 ? (
+            <>
+              <defs>
+                <linearGradient id="chartAreaGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+                  <stop offset="0%" stopColor="var(--ds-blue)" stopOpacity="0.35" />
+                  <stop offset="100%" stopColor="var(--ds-blue)" stopOpacity="0" />
+                </linearGradient>
+              </defs>
+              {/* 面积填充：折线下方到 0 的渐变 */}
+              <path
+                d={`${linePath} L ${inner(data.length - 1)} ${yCalls(0)} L ${inner(0)} ${yCalls(0)} Z`}
+                fill="url(#chartAreaGrad)"
+              />
+              {/* 今日竖虚线 + 顶部标记 */}
+              <line
+                x1={inner(todayIdx)} x2={inner(todayIdx)}
+                y1={PAD.top} y2={PAD.top + plotH}
+                stroke="var(--ds-amber)"
+                strokeWidth="1"
+                strokeDasharray="3 3"
+                opacity="0.6"
+              />
+              <text
+                x={inner(todayIdx) + 4}
+                y={PAD.top - 6}
+                fill="var(--ds-amber)"
+                fontSize="10"
+                fontFamily="var(--font-num)"
+              >
+                {shortDate(todayKey)}
+              </text>
+            </>
+          ) : null
+        })()}
         {/* Right-axis call labels. */}
         {callsTicks.map((value, idx) => {
           const y = yCalls(value)
@@ -270,11 +315,11 @@ export function TrendChart({ data, models = [], currency = 'cny', metric = 'cost
           ))}
           <div className={css.chartTooltipRow}>
             <span className={css.chartLegendBar} />
-            总计 <strong>{metric === 'tokens' ? shortNumber(activePoint.tokens ?? 0) : money(activePoint.cost)}</strong>
+            {tr('trendTotal')} <strong>{metric === 'tokens' ? shortNumber(activePoint.tokens ?? 0) : money(activePoint.cost)}</strong>
           </div>
           <div className={css.chartTooltipRow}>
             <span className={css.chartLegendLine} />
-            调用 <strong>{activePoint.calls.toLocaleString()}</strong>
+            {tr('calls')} <strong>{activePoint.calls.toLocaleString()}</strong>
           </div>
         </div>
       )}
@@ -290,7 +335,7 @@ export function TrendChart({ data, models = [], currency = 'cny', metric = 'cost
           ))}
           <span>
             <span className={css.chartLegendLine} />
-            调用
+            {tr('calls')}
           </span>
         </div>
       )}

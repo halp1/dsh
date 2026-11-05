@@ -10,7 +10,8 @@
  * Google-style two-band billing is modeled per model: Gemini's Flex tier
  * prices spare-capacity traffic at -50%; DeepSeek splits peak
  * (weekdays 09:00-12:00 / 14:00-18:00 Beijing) at 2x the off-peak rate —
- * weekends (Sat/Sun, Beijing) are charged at the off-peak rate all day.
+ * weekends (Sat/Sun, Beijing) and Chinese statutory holidays are charged at
+ * the off-peak rate all day (see {@link CHINA_HOLIDAYS}).
  * The estimator mixes both bands by a configured peak share ({@link DEFAULT_PEAK_SHARE}).
  *
  * Time-limited launch promos ({@link PricePromo}) never mutate the catalog:
@@ -30,15 +31,20 @@ import { FALLBACK_RATES } from './plan-knowledge.ts'
  */
 export const USD_TO_CNY = 6.79
 
+/** 内置 EUR→CNY 汇率（实时汇率不可用时的兑底，与 USD_TO_CNY 同口径）。 */
+export const EUR_TO_CNY = 7.71
+
 /** 运行时实时覆盖：undefined = 用内置目录与内置汇率（默认值降级）。 */
 let liveRate: number | undefined
+/** 实时 EUR→CNY 汇率；undefined = 尚未拿到，走内置值。 */
+let liveEurRate: number | undefined
 let livePrices: Readonly<Record<string, LivePrice>> | undefined
 let liveExtraModels: readonly ExtraModelPrice[] | undefined
 let liveCatalogModels: readonly CatalogModel[] | undefined
 /**
  * 用户自定义模型别名（插件配置 `modelKeyAliases`，聚合启动时注入）：真实日志
  * model id → 计费目录键。优先级高于内置别名表——目录外的新模型无需等发版，
- * 配置一条别名即完成识别与计价（键必须是 MODEL_CATALOG 的既有 key）。
+ * 配置一条别名即完成识别与计价（键必须是内置目录的既有 key）。
  */
 let userModelAliases: Readonly<Record<string, string>> | undefined
 
@@ -198,6 +204,10 @@ export function applyLivePricing(pricing: LivePricing): void {
   liveRate = typeof pricing.rate === 'number' && Number.isFinite(pricing.rate) && pricing.rate > 0
     ? pricing.rate
     : undefined
+  // 欧元汇率同理：异常值一律保留内置值，不让展示币种把金额算成 0/NaN。
+  liveEurRate = typeof pricing.rateEur === 'number' && Number.isFinite(pricing.rateEur) && pricing.rateEur > 0
+    ? pricing.rateEur
+    : undefined
   livePrices = pricing.prices
   liveExtraModels = pricing.extraModels
 }
@@ -227,12 +237,22 @@ function currentRate(): number {
   return liveRate ?? USD_TO_CNY
 }
 
+/** 当前 EUR→CNY 汇率（实时值缺失时回退内置值）。 */
+function currentEurRate(): number {
+  return liveEurRate ?? EUR_TO_CNY
+}
+
 /**
  * 当前生效的 USD → CNY 汇率及其来源：live = 启动时实时拉取成功，
  * builtin = 实时拉取失败、正在用内置默认值。
  */
 export function getRateInfo(): { rate: number; live: boolean } {
   return { rate: currentRate(), live: liveRate !== undefined }
+}
+
+/** 欧元汇率与其是否为实时值（与 {@link getRateInfo} 同形）。 */
+export function getEurRateInfo(): { rate: number; live: boolean } {
+  return { rate: currentEurRate(), live: liveEurRate !== undefined }
 }
 
 /** Default share of traffic assumed to fall in the peak band (0..1). */
@@ -292,7 +312,7 @@ const LEGACY_DEEPSEEK_BANDS: Readonly<Record<string, PriceBand>> = {
 export type PriceTierId = 'peak' | 'offPeak'
 
 /** 成本显示币种：人民币（国内模型直价）/ 美元（国外模型直价或换算显示）。 */
-export type CostCurrency = 'cny' | 'usd'
+export type CostCurrency = 'cny' | 'usd' | 'eur'
 
 /**
  * 工作日高峰时段判定（北京时间，UTC+8，无夏令时）：09:00–12:00、14:00–18:00。
@@ -306,14 +326,30 @@ export function isPeakHour(beijingHour: number): boolean {
 /**
  * 由时刻（epoch 毫秒）推断计费时段；时刻未知/非法时按高峰计（保守：未知
  * 时刻不低估成本，与社区 dsh-usage-chart 的 tierAt 语义一致）。
- * 周末（北京时间周六/周日）全天不区分峰谷，统一按低谷价。
+ * 周末（北京时间周六/周日）与中国法定节假日全天不区分峰谷，统一按低谷价
+ * （官方 2026-09-19 口径：调休上班的周末、法定节假日全天均按空闲时段计费；
+ * 调休上班日全部落在周末，故由周末分支覆盖，无需单列）。
  * @param timeMs - Unix epoch 毫秒；null/undefined/NaN 视为未知。
  */
 export function tierAt(timeMs: number | null | undefined): PriceTierId {
   if (timeMs === null || timeMs === undefined || !Number.isFinite(timeMs)) return 'peak'
-  if (isBeijingWeekend(timeMs)) return 'offPeak'
-  const beijingHour = (new Date(timeMs).getUTCHours() + 8) % 24
-  return isPeakHour(beijingHour) ? 'peak' : 'offPeak'
+  return tierAtWithBounds(timeMs, TIER_BOUNDARY_MINUTES, true)
+}
+
+/**
+ * 按给定峰段边界判档：低谷日全天低谷；工作日分钟数落在任一 [b(i), b(i+1)) 峰段即为高峰。
+ * @param holidays - 是否把中国法定节假日并入低谷日。该官方口径只适用于 DeepSeek 按量分时；
+ *   智谱 Coding Plan 的积分口径未见节假日说明，故默认不启用，由调用点显式传入。
+ */
+function tierAtWithBounds(timeMs: number, bounds: readonly number[], holidays = false): PriceTierId {
+  if (isBeijingWeekend(timeMs) || (holidays && isBeijingHoliday(timeMs))) return 'offPeak'
+  const minute = Math.floor(beijingMillisOfDay(timeMs) / 60_000)
+  for (let i = 0; i + 1 < bounds.length; i += 2) {
+    const start = bounds[i] ?? 0
+    const end = bounds[i + 1] ?? 0
+    if (minute >= start && minute < end) return 'peak'
+  }
+  return 'offPeak'
 }
 
 /** 时刻是否落在北京时间周末（周六/周日）。 */
@@ -322,8 +358,41 @@ function isBeijingWeekend(timeMs: number): boolean {
   return day === 0 || day === 6
 }
 
+/**
+ * 中国法定节假日 —— **生成块，勿手改**。数据源
+ * [NateScarlet/holiday-cn](https://github.com/NateScarlet/holiday-cn)（逐年抓取国务院公告；
+ * 2026 年依据 https://www.gov.cn/zhengce/zhengceku/202511/content_7047091.htm）。
+ *
+ * 只收录峰谷计费起点（{@link WEEKEND_OFFPEAK_START_MS}，北京时间 2026-08-23 00:00）之后的日期：
+ * 更早的调用由 v1 规则定价，不涉及节假日。表中没有的年份退化为「仅周末低谷」，
+ * 国务院公布下一年安排后在此追加一条即可。
+ *
+ * 编码为空格分隔的 `YYYYMMDD` 列表（按年分组、同年日期连续排列，便于逐年追加）：
+ * 每个键长度固定为 8，故 `includes` 不会跨键误匹配；相比「区间 + 运行时展开」
+ * 省掉一段解析代码——client / index 两个 face 都要过本仓自设的体积成本线
+ * （sync.sh 的 256/500 KiB；DSH Store 对插件 JS bundle 本身无审查上限）。
+ */
+const CHINA_HOLIDAYS =
+  '20260925 20260926 20260927 20261001 20261002 20261003 20261004 20261005 20261006 20261007'
+
+/** 北京日期键 YYYYMMDD（与宿主时区无关）。 */
+function beijingDateKey(timeMs: number): string {
+  return new Date(timeMs + 8 * 3_600_000).toISOString().slice(0, 10).replace(/-/g, '')
+}
+
+/** 时刻是否落在北京时间法定节假日（仅覆盖 {@link CHINA_HOLIDAYS} 内已收录的年份）。 */
+function isBeijingHoliday(timeMs: number): boolean {
+  return CHINA_HOLIDAYS.includes(beijingDateKey(timeMs))
+}
+
 /** 峰谷切换边界（北京时间的当日分钟数）：09:00 / 12:00 / 14:00 / 18:00。 */
 const TIER_BOUNDARY_MINUTES: readonly number[] = [540, 720, 840, 1080]
+
+/**
+ * 智谱 Coding Plan 的高峰边界（北京时间当日分钟）：工作日 14:00–18:00 为高峰，
+ * 额度按基础积分全额抵扣；其余时段（含周末全天）按基础积分 5 折抵扣。
+ */
+const ZHIPU_CODING_PLAN_BOUNDARY_MINUTES: readonly number[] = [840, 1080]
 
 /** 北京时间的当日毫秒数（0–86,400,000）。 */
 function beijingMillisOfDay(timeMs: number): number {
@@ -335,28 +404,39 @@ function beijingMillisOfDay(timeMs: number): number {
  *
  * 下一切换点统一定义为档位真正变化的最近边界：自当前时刻起逐天扫描工作日的
  * 09:00 / 12:00 / 14:00 / 18:00，候选时刻的档位由 {@link tierAt} 判定——
- * 周末（周六/周日）北京全天低谷、没有边界，扫描自然跳过；工作日深夜跨周末
- * 时落到周一 09:00 而非周末伪边界（issue #33）。
- * 最坏情形（周五 18:00 后 → 周一 09:00）约 63h，7 天窗口必然覆盖。
+ * 周末（周六/周日）与法定节假日北京全天低谷、没有边界，扫描自然跳过；工作日
+ * 深夜跨周末时落到周一 09:00 而非周末伪边界（issue #33）。
+ * 最坏情形是「长假 + 相邻周末」：最长连休 8 天（2025-10-01 ~ 10-08 型）时，
+ * 假期前最后一个工作日深夜的下一切换可落在约 9.4 天之后——故扫描窗口取
+ * 10 天。原实现取 7 天（注释记「最坏 63h」），在连休下会扫不到真边界而落进
+ * 兜底伪边界。
  * @param nowMs - 当前时刻（epoch 毫秒）。
  * @returns 当前档位与到下一切换边界的毫秒数。
  */
 export function tierCountdown(nowMs: number): { tier: PriceTierId; nextSwitchInMs: number } {
-  const tier = tierAt(nowMs)
+  return tierCountdownWithBounds(nowMs, TIER_BOUNDARY_MINUTES, true)
+}
+
+/**
+ * 按给定峰段边界计算当前档位与距下一切换的时长（扫描结构与 tierCountdown 相同）。
+ * @param holidays - 是否把法定节假日并入低谷日（见 {@link tierAtWithBounds}）。
+ */
+function tierCountdownWithBounds(nowMs: number, bounds: readonly number[], holidays = false): { tier: PriceTierId; nextSwitchInMs: number } {
+  const tier = tierAtWithBounds(nowMs, bounds, holidays)
   const dayMs = beijingMillisOfDay(nowMs)
-  for (let dayOffset = 0; dayOffset < 7; dayOffset++) {
+  for (let dayOffset = 0; dayOffset < 10; dayOffset++) {
     const dayStart = dayOffset * 86_400_000 - dayMs
-    for (const boundary of TIER_BOUNDARY_MINUTES) {
+    for (const boundary of bounds) {
       const inMs = dayStart + boundary * 60_000
-      // 当天已过的边界不是候选；未来的边界按 tierAt 判档位是否真变化。
+      // 当天已过的边界不是候选；未来的边界按同一边界集判档位是否真变化。
       if (inMs <= 0) continue
-      if (tierAt(nowMs + inMs) !== tier) {
+      if (tierAtWithBounds(nowMs + inMs, bounds, holidays) !== tier) {
         return { tier, nextSwitchInMs: inMs }
       }
     }
   }
-  // 不可达兜底：7 天窗口内必有档位切换（任一工作日就有四次边界）。
-  const firstBoundary = TIER_BOUNDARY_MINUTES[0] ?? 0
+  // 不可达兜底：10 天窗口覆盖最长连休（8 天）加相邻周末，窗口内必有档位切换。
+  const firstBoundary = bounds[0] ?? 0
   return { tier, nextSwitchInMs: 86_400_000 - dayMs + firstBoundary * 60_000 }
 }
 
@@ -367,11 +447,58 @@ export function tierCountdown(nowMs: number): { tier: PriceTierId; nextSwitchInM
  * @param leadMs - 提前量（毫秒）。
  */
 export function upcomingTierSwitch(nowMs: number, leadMs: number): { entering: PriceTierId; atMs: number } | null {
-  const { nextSwitchInMs } = tierCountdown(nowMs)
+  return upcomingSwitchWithBounds(nowMs, TIER_BOUNDARY_MINUTES, leadMs, true)
+}
+
+/**
+ * 按给定峰段边界的切换预告（扫描结构与 upcomingTierSwitch 相同）。
+ * @param holidays - 是否把法定节假日并入低谷日（见 {@link tierAtWithBounds}）。
+ */
+function upcomingSwitchWithBounds(nowMs: number, bounds: readonly number[], leadMs: number, holidays = false): { entering: PriceTierId; atMs: number } | null {
+  const { nextSwitchInMs } = tierCountdownWithBounds(nowMs, bounds, holidays)
   if (nextSwitchInMs > leadMs) return null
   const atMs = nowMs + nextSwitchInMs
   // 边界另一侧的档位即即将进入的档位（边界时刻本身按新档位计）。
-  return { entering: tierAt(atMs), atMs }
+  return { entering: tierAtWithBounds(atMs, bounds, holidays), atMs }
+}
+
+/** 计费通道的峰谷窗口：无窗口 / DeepSeek 按量分时 / 智谱 Coding Plan 积分分时。 */
+export type RateChannel = 'none' | 'deepseek-metered' | 'zhipu-coding-plan'
+
+/**
+ * 由会话当前模型与订阅状态推断峰谷窗口。DeepSeek 目录模型恒为按量分时；
+ * 智谱模型仅在持有 Z.ai Coding Plan（status ok）时适用积分分时——智谱按量价
+ * 全天统一，不涉及峰谷。其余模型（含未收录）返回 none：不显示档位、不提醒，
+ * 峰谷提示严格跟随当前对话实际使用的模型而非全局规则。
+ * @param modelKey - 当前会话最近一轮的计费目录键（归因模型 key）；无轮次时 undefined。
+ * @param hasZhipuPlan - 是否存在状态正常的 Z.ai Coding Plan 订阅。
+ * @returns 命中的峰谷窗口种类。
+ */
+export function rateChannelOf(modelKey: string | undefined, hasZhipuPlan: boolean): RateChannel {
+  if (modelKey === undefined || modelKey === '') return 'none'
+  const resolved = resolveCatalogKey(modelKey)
+  const provider = modelCatalog().find(entry => entry.key === resolved)?.provider
+  if (provider === 'DeepSeek') return 'deepseek-metered'
+  if (hasZhipuPlan && provider === '智谱 AI') return 'zhipu-coding-plan'
+  return 'none'
+}
+
+/** 按计费通道的峰谷倒计时：none 返回 null（调用方据此隐藏档位 UI 与切换预告）。 */
+export function channelCountdown(nowMs: number, channel: RateChannel): { tier: PriceTierId; nextSwitchInMs: number } | null {
+  switch (channel) {
+    case 'deepseek-metered': return tierCountdownWithBounds(nowMs, TIER_BOUNDARY_MINUTES, true)
+    case 'zhipu-coding-plan': return tierCountdownWithBounds(nowMs, ZHIPU_CODING_PLAN_BOUNDARY_MINUTES)
+    case 'none': return null
+  }
+}
+
+/** 按计费通道的切换预告：语义同 upcomingTierSwitch，窗口取自通道；none 恒 null。 */
+export function channelUpcomingSwitch(nowMs: number, channel: RateChannel, leadMs: number): { entering: PriceTierId; atMs: number } | null {
+  switch (channel) {
+    case 'deepseek-metered': return upcomingSwitchWithBounds(nowMs, TIER_BOUNDARY_MINUTES, leadMs, true)
+    case 'zhipu-coding-plan': return upcomingSwitchWithBounds(nowMs, ZHIPU_CODING_PLAN_BOUNDARY_MINUTES, leadMs)
+    case 'none': return null
+  }
 }
 
 /**
@@ -422,12 +549,12 @@ export interface ModelPrice extends PriceBand {
  * （主档与 offPeak）单价按 factor 折扣计价与显示，截止时刻起自动恢复刊例价。
  */
 export interface PricePromo {
-  /** 折扣系数（0.5 = 五折）；仅 (0,1) 区间有效，非法值视为无促销。 */
+  /** 折扣系数（0.5 = 五折，0 = 活动期免费）；仅 [0,1) 区间有效，非法值视为无促销。 */
   factor: number
   /**
    * 分档折扣覆盖：厂商对不同档位给不同折扣时逐档指定（如 GPT-5.6 Sol 促销为
    * 缓存 0.8 / 输入 0.8 / 输出 2/3）。缺省档位沿用 {@link factor}；单档取值
-   * 仅 (0,1) 区间有效，非法值回落 factor。
+   * 仅 [0,1) 区间有效（0 = 该档活动期免费），非法值回落 factor。
    */
   factors?: Partial<Record<'input' | 'cacheHit' | 'cacheMiss' | 'output', number>>
   /**
@@ -503,944 +630,50 @@ export interface ModelEntry {
 }
 
 /**
- * Built-in catalog of current mainstream models as of 2026-08-16, priced from
- * each provider's official price page. Domestic providers are OpenAI-API
- * compatible and publish RMB prices directly; overseas providers publish USD
- * and convert through the exchange rate at estimate time. Retired models
- * (GPT-4o family, Gemini 2.x, GLM-4.x-lite, older Qwen) are deliberately
- * absent. Anthropic Claude models are supported through native and
- * compatible provider routes. DeepSeek
- * keys match the harness stats file so real usage prices from the catalog;
- * unknown keys fall back to `other`.
- *
- * Time-of-day billing (peak/off-peak) is now real: DeepSeek V4 officially
- * splits peak (09:00-12:00 / 14:00-18:00 Beijing) at 2x the off-peak rate
- * from 2026-08-17, and Gemini's Flex tier discounts spare-capacity traffic.
+ * 内置目录与别名表的运行时注入态：数据本体在 src/builtin-catalog.ts（仅随 node
+ * 半构建发布）。宿主半区在插件 activate 时同步注入；客户端在 /api/billing/pricing
+ * 首次响应时注入。未注入时目录为空——计价消费方走 UNSEEDED_OTHER 兜底（不产生
+ * 费用），费率表渲染加载态，不视为错误。
  */
-/** DeepSeek 官方高峰时段说明（峰谷分时计费目录条目共用）。 */
-const DEEPSEEK_PEAK_HOURS = '09:00-12:00 / 14:00-18:00'
-const GEMINI_PEAK_HOURS = 'Standard / Flex'
-
-export const MODEL_CATALOG: readonly ModelEntry[] = [
-  // DeepSeek — V4 peak/off-peak rates (cloud.tencent.com TokenHub 2026-08-14),
-  // RMB per 1M tokens: peak / off-peak (50%).
-  {
-    key: 'flash',
-    name: 'DeepSeek V4.1 Flash',
-    provider: 'DeepSeek',
-    colorVar: 'dsw-static-blue-500',
-    // 2026-09-10 12:00（北京）起官方调价：谷 1.5/0.05/4.5 → 1/0.02/4（峰 = 谷 × 2）。
-    // 此处写现行价；分界前的历史事件由 computeCostAt 按 FLASH_REPRICE_MS 回算旧价。
-    // 型号名对齐官方价目页现行版本：旧 V4 Flash / Vision (Exp) 已下线，flash 流量
-    // 全部由 DeepSeek-V4.1-Flash 服务（价目页新规范名 deepseek-flash，图像理解并入）。
-    price: {
-      currency: 'CNY',
-      input: 2,
-      cacheHit: 0.04,
-      output: 8,
-      offPeak: { input: 1, cacheHit: 0.02, output: 4 },
-    },
-    peakHours: DEEPSEEK_PEAK_HOURS,
-  },
-  // OpenCode's explicitly free route, confirmed in models.dev on 2026-11-04.
-  // Do not alias it to the paid Flash catalog key.
-  {
-    key: 'deepseek-v4.1-flash-free',
-    name: 'DeepSeek V4.1 Flash Free',
-    provider: 'DeepSeek',
-    colorVar: 'dsw-static-blue-500',
-    price: { currency: 'USD', input: 0, cacheHit: 0, output: 0 },
-  },
-  {
-    key: 'flash-vision-exp',
-    name: 'DeepSeek V4 Flash Vision (Exp)',
-    provider: 'DeepSeek',
-    colorVar: 'dsw-static-blue-500',
-    // 官方已下线（价目页注释：旧名仍可调用，请求由 V4.1 Flash 服务并按 Flash
-    // 价计）；与 flash 同价、同步调价（2026-09-10 12:00 起），历史回算同
-    // FLASH_REPRICE_MS。retired = 不进费率表面板，目录与历史回算保留。
-    retired: true,
-    price: {
-      currency: 'CNY',
-      input: 2,
-      cacheHit: 0.04,
-      output: 8,
-      offPeak: { input: 1, cacheHit: 0.02, output: 4 },
-    },
-    peakHours: DEEPSEEK_PEAK_HOURS,
-  },
-  {
-    key: 'pro',
-    name: 'DeepSeek V4 Pro',
-    provider: 'DeepSeek',
-    colorVar: 'dsw-static-deepseek-500',
-    // V4 Pro 峰谷刊例（谷 4.5 / 0.15 / 13.5，峰 = 谷 × 2）即长期现行价。官方原定
-    // 2026-09-14 12:00 起把 V4 Pro 请求路由至 V4.1 Flash 计费，随后公告改为
-    // 「09-14 之后继续提供 V4 Pro，计费方式保持不变」（价目页注释 (2)）——
-    // 路由分界取消，历史与未来事件同口径，不再需要运行时切换。
-    price: {
-      currency: 'CNY',
-      input: 9,
-      cacheHit: 0.3,
-      output: 27,
-      offPeak: { input: 4.5, cacheHit: 0.15, output: 13.5 },
-    },
-    peakHours: DEEPSEEK_PEAK_HOURS,
-  },
-  // 智谱 GLM (OpenAI-compatible, 腾讯云 TokenHub 官方价 2026-08-14).
-  {
-    key: 'glm',
-    name: 'GLM-5.2',
-    provider: '智谱 AI',
-    colorVar: 'dsw-static-blue-600',
-    price: { currency: 'CNY', input: 8, cacheHit: 2, output: 28 },
-  },
-  {
-    key: 'glm-5.3',
-    name: 'GLM-5.3',
-    provider: '智谱 AI',
-    colorVar: 'dsw-static-blue-500',
-    price: { currency: 'CNY', input: 8, cacheHit: 2, output: 28 },
-  },
-  {
-    key: 'glm-5.3-flash',
-    name: 'GLM-5.3-Flash',
-    provider: '智谱 AI',
-    colorVar: 'dsw-static-blue-300',
-    // 官方刊例价（元 / 每百万 token）：输入 ¥0.8（未命中）/ ¥0.23（命中）/ 输出 ¥2.8。
-    price: { currency: 'CNY', input: 0.8, cacheHit: 0.23, output: 2.8 },
-    // 上线限时 5 折，至北京时间 2026-09-09 00:00（= 2026-09-08T16:00Z）；到期自动恢复刊例价。
-    promo: { factor: 0.5, endsAtMs: Date.UTC(2026, 8, 8, 16, 0, 0), note: '限时 5 折' },
-  },
-  {
-    key: 'glm-4.6',
-    name: 'GLM-4.6',
-    provider: '智谱 AI',
-    colorVar: 'dsw-static-blue-400',
-    price: { currency: 'CNY', input: 4, cacheHit: 0.8, output: 16 },
-  },
-  // 智谱 GLM 其余按量价（元 / 每百万 token，≤32K 档，官方 open.bigmodel.cn / 百炼）。
-  {
-    key: 'glm-4.5-air',
-    name: 'GLM-4.5-Air',
-    provider: '智谱 AI',
-    colorVar: 'dsw-static-blue-300',
-    price: { currency: 'CNY', input: 0.8, cacheHit: 0.16, output: 2 },
-  },
-  {
-    key: 'glm-4.7',
-    name: 'GLM-4.7',
-    provider: '智谱 AI',
-    colorVar: 'dsw-static-blue-400',
-    price: { currency: 'CNY', input: 4, cacheHit: 1, output: 16 },
-    // GLM-4.7 无公开按量价：按其在 coding-plan 的抵扣系数相对 GLM-5-Turbo 的比例估算。
-    estimated: true,
-  },
-  {
-    key: 'glm-5-turbo',
-    name: 'GLM-5-Turbo',
-    provider: '智谱 AI',
-    colorVar: 'dsw-static-blue-500',
-    price: { currency: 'CNY', input: 5, cacheHit: 1.2, output: 22 },
-  },
-  {
-    key: 'glm-5.1',
-    name: 'GLM-5.1',
-    provider: '智谱 AI',
-    colorVar: 'dsw-static-blue-600',
-    price: { currency: 'CNY', input: 6, cacheHit: 1.2, output: 24 },
-  },
-  {
-    key: 'glm-5v-turbo',
-    name: 'GLM-5V-Turbo',
-    provider: '智谱 AI',
-    colorVar: 'dsw-static-blue-300',
-    price: { currency: 'CNY', input: 5, cacheHit: 1.2, output: 22 },
-  },
-  // 阿里通义千问 (OpenAI-compatible, 百炼 2026-08).
-  {
-    key: 'qwen-3.8-max',
-    name: 'Qwen3.8 Max',
-    provider: '阿里通义',
-    colorVar: 'dsw-static-blue-600',
-    // 2026-08-06 发布；人民币刊例：输入 12 / 缓存命中 1.5 / 输出 36。
-    price: { currency: 'CNY', input: 12, cacheHit: 1.5, output: 36 },
-    // 附加计价维度（纯展示，估算计费仍走主价三桶）：
-    // Batch File 为长期半价档；Batch Chat 原价与标准价一致（其限时活动按需求忽略）。
-    extraRows: [
-      { label: '显式缓存创建', input: 15 },
-      { label: '显式缓存命中', input: 1 },
-      { label: 'Batch File', input: 6, output: 18, note: '长期半价' },
-      { label: 'Batch Chat', input: 12, output: 36, note: '与标准价一致' },
-    ],
-  },
-  {
-    key: 'qwen-3.8-flash',
-    name: 'Qwen3.8 Flash',
-    provider: '阿里通义',
-    colorVar: 'dsw-static-blue-400',
-    // 人民币刊例：输入 1 / 缓存命中 0.1 / 输出 3。
-    price: { currency: 'CNY', input: 1, cacheHit: 0.1, output: 3 },
-    // 附加计价维度（纯展示，估算计费仍走主价三桶）：
-    // Batch File 为长期半价档；Batch Chat 原价与标准价一致。
-    extraRows: [
-      { label: '显式缓存创建', input: 1.25 },
-      { label: '显式缓存命中', input: 0.1 },
-      { label: 'Batch File', input: 0.5, output: 1.5, note: '长期半价' },
-      { label: 'Batch Chat', input: 1, output: 3, note: '与标准价一致' },
-    ],
-  },
-  {
-    key: 'qwen-max',
-    name: 'Qwen3.7-Max',
-    provider: '阿里通义',
-    colorVar: 'dsw-static-blue-300',
-    // 官方刊例价（元 / 每百万 token，0-1M 单一档）：输入 ¥12 / 命中 ¥1.2 / 输出 ¥36。
-    price: { currency: 'CNY', input: 12, cacheHit: 1.2, output: 36 },
-    // 整单限时 5 折（输入 6 / 输出 18），官方未公布截止日；长期生效直至公告后补填。
-    promo: { factor: 0.5, note: '限时 5 折' },
-    // 附加计价维度（纯展示，估算计费仍走主价三桶）：Batch File 为长期半价档；
-    // Batch Chat 原价与标准价一致（其限时活动按惯例忽略）。
-    extraRows: [
-      { label: '显式缓存创建', input: 15 },
-      { label: '显式缓存命中', input: 1.2 },
-      { label: 'Batch File', input: 6, output: 18, note: '长期半价' },
-      { label: 'Batch Chat', input: 12, output: 36, note: '与标准价一致' },
-    ],
-  },
-  {
-    key: 'qwen-plus',
-    name: 'Qwen3.5-Plus',
-    provider: '阿里通义',
-    colorVar: 'dsw-static-blue-500',
-    // 官方刊例价（元 / 每百万 token，≤128K 档）：输入 ¥0.8 / 命中 ¥0.08 / 输出 ¥4.8。
-    price: { currency: 'CNY', input: 0.8, cacheHit: 0.08, output: 4.8 },
-    // 附加计价维度（纯展示，估算计费仍走主价三桶；≤128K 档官方价目）：
-    // Batch File 为长期半价档；Batch Chat 原价与标准价一致。
-    extraRows: [
-      { label: '显式缓存创建', input: 1 },
-      { label: '显式缓存命中', input: 0.08 },
-      { label: 'Batch File', input: 0.4, output: 2.4, note: '长期半价' },
-      { label: 'Batch Chat', input: 0.8, output: 4.8, note: '与标准价一致' },
-    ],
-  },
-  {
-    key: 'qwen-flash',
-    name: 'Qwen3.5-Flash',
-    provider: '阿里通义',
-    colorVar: 'dsw-static-blue-400',
-    // 官方刊例价（元 / 每百万 token）：输入 ¥0.2 / 命中 ¥0.02 / 输出 ¥2。
-    price: { currency: 'CNY', input: 0.2, cacheHit: 0.02, output: 2 },
-    // 附加计价维度（纯展示，估算计费仍走主价三桶）：显式缓存按百炼统一惯例
-    // 创建 = 输入价 125%、命中 = 10%；批量推理支持情况未核实到官方依据，暂不列示。
-    extraRows: [
-      { label: '显式缓存创建', input: 0.25 },
-      { label: '显式缓存命中', input: 0.02 },
-    ],
-  },
-  // 字节豆包 (OpenAI-compatible, 火山方舟 2026).
-  {
-    key: 'doubao',
-    name: 'Doubao Seed-2.0 Pro',
-    provider: '字节豆包',
-    colorVar: 'dsw-static-red-500',
-    price: { currency: 'CNY', input: 3.2, cacheHit: 0.64, output: 16 },
-  },
-  {
-    key: 'doubao-mini',
-    name: 'Doubao Seed-2.0 Mini',
-    provider: '字节豆包',
-    colorVar: 'dsw-static-red-300',
-    price: { currency: 'CNY', input: 0.2, cacheHit: 0.02, output: 2 },
-  },
-  {
-    key: 'doubao-1.6',
-    name: 'Doubao Seed-1.6',
-    provider: '字节豆包',
-    colorVar: 'dsw-static-red-400',
-    price: { currency: 'CNY', input: 0.8, cacheHit: 0, output: 8 },
-  },
-  // 火山方舟 2026 新模型（官方 CNY 价 / 每百万 token）。
-  {
-    key: 'doubao-seed-evolving',
-    name: 'Doubao-Seed-Evolving',
-    provider: '字节豆包',
-    colorVar: 'dsw-static-red-500',
-    price: { currency: 'CNY', input: 6, cacheHit: 1.2, output: 30 },
-  },
-  {
-    key: 'doubao-seed-2.1-pro',
-    name: 'Doubao Seed-2.1 Pro',
-    provider: '字节豆包',
-    colorVar: 'dsw-static-red-400',
-    price: { currency: 'CNY', input: 6, cacheHit: 1.2, output: 30 },
-  },
-  {
-    key: 'doubao-seed-2.1-turbo',
-    name: 'Doubao Seed-2.1 Turbo',
-    provider: '字节豆包',
-    colorVar: 'dsw-static-red-300',
-    price: { currency: 'CNY', input: 3, cacheHit: 0.6, output: 15 },
-  },
-  // 月之暗面 Kimi (OpenAI-compatible, 腾讯云 TokenHub 官方价 2026-08-14).
-  {
-    key: 'kimi',
-    name: 'Kimi K2.7 Code',
-    provider: '月之暗面',
-    colorVar: 'dsw-static-neutral-bluish-700',
-    price: { currency: 'CNY', input: 6.5, cacheHit: 1.3, output: 27 },
-  },
-  {
-    key: 'kimi-k2.7-hs',
-    name: 'Kimi K2.7 Code HighSpeed',
-    provider: '月之暗面',
-    colorVar: 'dsw-static-neutral-bluish-600',
-    price: { currency: 'CNY', input: 13, cacheHit: 2.6, output: 54 },
-  },
-  {
-    key: 'kimi-k2.6',
-    name: 'Kimi K2.6',
-    provider: '月之暗面',
-    colorVar: 'dsw-static-neutral-bluish-500',
-    price: { currency: 'CNY', input: 6.5, cacheHit: 1.1, output: 27 },
-  },
-  {
-    key: 'kimi-k3',
-    name: 'Kimi K3',
-    provider: '月之暗面',
-    colorVar: 'dsw-static-neutral-bluish-500',
-    price: { currency: 'CNY', input: 20, cacheHit: 2, output: 100 },
-  },
-  // 小米 MiMo (OpenAI-compatible; token plan 通道 model id 为 mimo-v2.5，
-  // 按订阅豁免计费；按量单价 2026-08 官方公布：命中缓存 / 未命中 / 输出).
-  {
-    key: 'mimo-v2.5',
-    name: 'MiMo V2.5',
-    provider: '小米',
-    colorVar: 'dsw-static-green-400',
-    price: { currency: 'CNY', input: 1, cacheHit: 0.02, output: 2 },
-  },
-  {
-    key: 'mimo-v2.5-pro',
-    name: 'MiMo V2.5 Pro',
-    provider: '小米',
-    colorVar: 'dsw-static-green-400',
-    price: { currency: 'CNY', input: 3, cacheHit: 0.025, output: 6 },
-  },
-  // MiniMax (OpenAI-compatible, TokenHub 2026-08-14).
-  {
-    key: 'minimax',
-    name: 'MiniMax-M3',
-    provider: 'MiniMax',
-    colorVar: 'dsw-static-amber-500',
-    price: { currency: 'CNY', input: 2.1, cacheHit: 0.42, output: 8.4 },
-  },
-  // MiniMax-M2.7 / M2.7-highspeed：官方按量价（元 / 每百万 token，2026-08）。
-  {
-    key: 'minimax-m2.7',
-    name: 'MiniMax-M2.7',
-    provider: 'MiniMax',
-    colorVar: 'dsw-static-amber-400',
-    price: { currency: 'CNY', input: 2.1, cacheHit: 0.42, output: 8.4 },
-  },
-  {
-    key: 'minimax-m2.7-highspeed',
-    name: 'MiniMax-M2.7-highspeed',
-    provider: 'MiniMax',
-    colorVar: 'dsw-static-amber-500',
-    price: { currency: 'CNY', input: 4.2, cacheHit: 0.42, output: 16.8 },
-  },
-  // 百度文心 (OpenAI-compatible, 千帆 2026-08).
-  {
-    key: 'ernie',
-    name: 'ERNIE-5.1',
-    provider: '百度文心',
-    colorVar: 'dsw-static-blue-300',
-    price: { currency: 'CNY', input: 4, cacheHit: 0.4, output: 18 },
-  },
-  // 腾讯混元 (OpenAI-compatible, TokenHub 2026-08-14).
-  {
-    key: 'hunyuan',
-    name: '混元 Hy3',
-    provider: '腾讯混元',
-    colorVar: 'dsw-static-amber-400',
-    price: { currency: 'CNY', input: 1, cacheHit: 0.25, output: 4 },
-  },
-  {
-    key: 'hunyuan-t1',
-    name: '混元 T1',
-    provider: '腾讯混元',
-    colorVar: 'dsw-static-amber-300',
-    price: { currency: 'CNY', input: 1, cacheHit: 0.1, output: 4 },
-  },
-  // 零一万物 (OpenAI-compatible, 2026-08).
-  {
-    key: 'yi',
-    name: 'Yi-Lightning',
-    provider: '零一万物',
-    colorVar: 'dsw-static-green-500',
-    price: { currency: 'CNY', input: 0.99, cacheHit: 0.1, output: 0.99 },
-  },
-  // 阶跃星辰 Step (OpenAI-compatible, platform.stepfun.com 2026-08; 缓存命中 ¥0.27).
-  {
-    key: 'step',
-    name: 'Step 3.7 Flash',
-    provider: '阶跃星辰',
-    colorVar: 'dsw-static-neutral-bluish-400',
-    price: { currency: 'CNY', input: 1.35, cacheHit: 0.27, output: 8.1 },
-  },
-  // 科大讯飞星火 (OpenAI-compatible, 2026-07 汇总; 套餐制，价格约)。
-  {
-    key: 'spark',
-    name: 'Spark 4.0 Ultra',
-    provider: '科大讯飞',
-    colorVar: 'dsw-static-green-400',
-    price: { currency: 'CNY', input: 5, cacheHit: 0.5, output: 10 },
-    estimated: true,
-  },
-  // 商汤日日新 (OpenAI-compatible, 2026-07 汇总; 公测中，价格约)。
-  {
-    key: 'sensenova',
-    name: 'SenseNova 6.5',
-    provider: '商汤',
-    colorVar: 'dsw-static-red-400',
-    price: { currency: 'CNY', input: 4.5, cacheHit: 0.45, output: 9 },
-    estimated: true,
-  },
-  // 百川智能 (OpenAI-compatible, 2026-07 汇总)。
-  {
-    key: 'baichuan',
-    name: 'Baichuan M3-Plus',
-    provider: '百川智能',
-    colorVar: 'dsw-static-neutral-bluish-500',
-    price: { currency: 'CNY', input: 5, cacheHit: 0.5, output: 9 },
-  },
-  // OpenAI — GPT-6 / GPT-5.6 family (developers.openai.com/api/docs/pricing 2026-09).
-  {
-    key: 'gpt-6-astra',
-    name: 'GPT-6 Astra',
-    provider: 'OpenAI',
-    colorVar: 'dsw-static-green-500',
-    // 标准档（输入 ≤272K）：缓存输入 $1 / 输入 $10 / 输出 $50。官方另有超长上下文
-    // 加价（单请求输入 >272K 时整笔输入 ×2、输出 ×1.5）与 Fast 模式 ×2、Batch ×0.5，
-    // 目录只记标准档，费率表按刊例展示。
-    price: { currency: 'USD', input: 10, cacheHit: 1, output: 50 },
-  },
-  {
-    key: 'gpt-5.6-sol',
-    name: 'GPT-5.6 Sol',
-    provider: 'OpenAI',
-    colorVar: 'dsw-static-green-500',
-    price: { currency: 'USD', input: 5, cacheHit: 0.5, output: 30 },
-    // 官方促销（至少持续至 2026-11-21）：缓存输入 $0.4 / 输入 $4 / 输出 $20。
-    // 三档折扣并不同比（0.8 / 0.8 / 2/3），用 factors 逐档覆盖。
-    promo: {
-      factor: 0.8,
-      factors: { output: 2 / 3 },
-      endsAtMs: Date.UTC(2026, 10, 21, 16, 0, 0),
-      note: '限时促销至 2026-11-21',
-    },
-  },
-  {
-    key: 'gpt-5.6-terra',
-    name: 'GPT-5.6 Terra',
-    provider: 'OpenAI',
-    colorVar: 'dsw-static-green-400',
-    price: { currency: 'USD', input: 2, cacheHit: 0.2, output: 12 },
-  },
-  {
-    key: 'gpt-5.6-luna',
-    name: 'GPT-5.6 Luna',
-    provider: 'OpenAI',
-    colorVar: 'dsw-static-green-500',
-    price: { currency: 'USD', input: 0.2, cacheHit: 0.02, output: 1.2 },
-  },
-  // Standard-context USD rates from models.dev's openai catalog, 2026-11-04.
-  // Keep these offline so an upstream outage cannot zero out recent usage.
-  {
-    key: 'gpt-6-sol',
-    name: 'GPT-6 Sol',
-    provider: 'OpenAI',
-    colorVar: 'dsw-static-green-500',
-    price: { currency: 'USD', input: 2, cacheHit: 0.2, output: 10 },
-  },
-  {
-    key: 'gpt-6.1-sol',
-    name: 'GPT-6.1 Sol',
-    provider: 'OpenAI',
-    colorVar: 'dsw-static-green-500',
-    price: { currency: 'USD', input: 2, cacheHit: 0.1, output: 10 },
-  },
-  {
-    key: 'gpt-6-luna',
-    name: 'GPT-6 Luna',
-    provider: 'OpenAI',
-    colorVar: 'dsw-static-green-400',
-    price: { currency: 'USD', input: 0.1, cacheHit: 0.01, output: 0.5 },
-  },
-  // Google: Gemini 3.x (ai.google.dev/gemini-api/docs/pricing 2026-08).
-  // Google does NOT bill by time of day: Standard is the real-time full
-  // price, while the Flex tier prices spare-capacity traffic at exactly -50%
-  // (1-15 min latency). The estimator treats Standard as the peak band and
-  // Flex as the off-peak band, mixed by the configured peak share.
-  {
-    key: 'gemini-pro',
-    name: 'Gemini 3.1 Pro',
-    provider: 'Google',
-    colorVar: 'dsw-static-blue-600',
-    price: {
-      currency: 'USD',
-      input: 2,
-      cacheHit: 0.2,
-      output: 12,
-      offPeak: { input: 1, cacheHit: 0.1, output: 6 },
-    },
-    peakHours: GEMINI_PEAK_HOURS,
-    tierSemantics: 'latency',
-  },
-  {
-    key: 'gemini-flash',
-    name: 'Gemini 3.6 Flash',
-    provider: 'Google',
-    colorVar: 'dsw-static-blue-400',
-    price: {
-      currency: 'USD',
-      input: 1.5,
-      cacheHit: 0.15,
-      output: 7.5,
-      offPeak: { input: 0.75, cacheHit: 0.075, output: 3.75 },
-    },
-    peakHours: GEMINI_PEAK_HOURS,
-    tierSemantics: 'latency',
-  },
-  // Gateway variant reference checked 2026-11-04:
-  // https://kineticrouter.com/models/gemini/gemini-3.8-flash-tiered
-  // Uses Gemini 3.8 Flash introductory standard rates through 2026-12-31.
-  // Actual gateway charges can differ. Tiered does not imply Flex billing.
-  {
-    key: 'gemini-3.8-flash-tiered',
-    name: 'Gemini 3.8 Flash Tiered',
-    provider: 'Google',
-    colorVar: 'dsw-static-blue-400',
-    price: { currency: 'USD', input: 0.75, cacheHit: 0.075, output: 3.75 },
-    estimated: true,
-  },
-  // xAI: current Grok family (docs.x.ai 2026-08).
-  {
-    key: 'grok',
-    name: 'Grok 4.6',
-    provider: 'xAI',
-    colorVar: 'dsw-static-neutral-bluish-700',
-    price: { currency: 'USD', input: 2, cacheHit: 0.5, output: 6 },
-  },
-  {
-    key: 'grok-4.3',
-    name: 'Grok 4.3',
-    provider: 'xAI',
-    colorVar: 'dsw-static-neutral-bluish-500',
-    price: { currency: 'USD', input: 1.25, cacheHit: 0.2, output: 2.5 },
-  },
-  // Meta — Llama 4 (Together/OpenRouter list rates 2026-08).
-  {
-    key: 'llama',
-    name: 'Llama 4 Maverick',
-    provider: 'Meta',
-    colorVar: 'dsw-static-red-500',
-    price: { currency: 'USD', input: 0.2, cacheHit: 0.05, output: 0.6 },
-  },
-  {
-    key: 'llama-scout',
-    name: 'Llama 4 Scout',
-    provider: 'Meta',
-    colorVar: 'dsw-static-red-400',
-    price: { currency: 'USD', input: 0.1, cacheHit: 0.025, output: 0.3 },
-  },
-  // Anthropic Claude / Mistral / Cohere：models.dev 公开美元价（USD / 每百万 token）。
-  {
-    key: 'claude-opus-4-6',
-    name: 'Claude Opus 4.6',
-    provider: 'Anthropic',
-    colorVar: 'dsw-static-red-500',
-    price: { currency: 'USD', input: 5, cacheHit: 0.5, output: 25 },
-  },
-  {
-    key: 'claude-sonnet-4-6',
-    name: 'Claude Sonnet 4.6',
-    provider: 'Anthropic',
-    colorVar: 'dsw-static-red-400',
-    price: { currency: 'USD', input: 3, cacheHit: 0.3, output: 15 },
-  },
-  {
-    key: 'claude-haiku-4-5',
-    name: 'Claude Haiku 4.5',
-    provider: 'Anthropic',
-    colorVar: 'dsw-static-red-300',
-    price: { currency: 'USD', input: 1, cacheHit: 0.1, output: 5 },
-  },
-  {
-    key: 'claude-opus-5',
-    name: 'Claude Opus 5',
-    provider: 'Anthropic',
-    colorVar: 'dsw-static-red-500',
-    price: { currency: 'USD', input: 5, cacheHit: 0.5, output: 25 },
-  },
-  // Gateway-specific thinking/fast ID, estimated using the Opus 5 Fast rate.
-  // https://platform.claude.com/docs/en/build-with-claude/fast-mode#pricing
-  // Fast input/output is twice standard Opus 5, with a 10% cache-read rate.
-  {
-    key: 'claude-opus-5-thinking-fast',
-    name: 'Claude Opus 5 Thinking Fast',
-    provider: 'Anthropic',
-    colorVar: 'dsw-static-red-500',
-    price: { currency: 'USD', input: 10, cacheHit: 1, output: 50 },
-    estimated: true,
-  },
-  {
-    key: 'claude-sonnet-5',
-    name: 'Claude Sonnet 5',
-    provider: 'Anthropic',
-    colorVar: 'dsw-static-red-400',
-    price: { currency: 'USD', input: 2, cacheHit: 0.2, output: 10 },
-  },
-  // Standard-context USD rates from models.dev's anthropic catalog, 2026-11-04.
-  {
-    key: 'claude-opus-5-5',
-    name: 'Claude Opus 5.5',
-    provider: 'Anthropic',
-    colorVar: 'dsw-static-red-500',
-    price: { currency: 'USD', input: 4, cacheHit: 0.2, output: 20 },
-  },
-  {
-    key: 'claude-sonnet-5-5',
-    name: 'Claude Sonnet 5.5',
-    provider: 'Anthropic',
-    colorVar: 'dsw-static-red-400',
-    price: { currency: 'USD', input: 2, cacheHit: 0.1, output: 10 },
-  },
-  {
-    key: 'claude-haiku-5-5',
-    name: 'Claude Haiku 5.5',
-    provider: 'Anthropic',
-    colorVar: 'dsw-static-red-300',
-    price: { currency: 'USD', input: 0.1, cacheHit: 0.01, output: 0.5 },
-  },
-  {
-    key: 'mistral-large-2512',
-    name: 'Mistral Large 3',
-    provider: 'Mistral AI',
-    colorVar: 'dsw-static-violet-500',
-    price: { currency: 'USD', input: 0.5, cacheHit: 0.05, output: 1.5 },
-  },
-  {
-    key: 'mistral-small-2603',
-    name: 'Mistral Small 4',
-    provider: 'Mistral AI',
-    colorVar: 'dsw-static-violet-400',
-    price: { currency: 'USD', input: 0.15, cacheHit: 0.015, output: 0.6 },
-  },
-  {
-    key: 'ministral-8b-latest',
-    name: 'Ministral 8B',
-    provider: 'Mistral AI',
-    colorVar: 'dsw-static-violet-300',
-    price: { currency: 'USD', input: 0.1, cacheHit: 0.01, output: 0.1 },
-  },
-  {
-    key: 'command-a-03-2025',
-    name: 'Command A',
-    provider: 'Cohere',
-    colorVar: 'dsw-static-cyan-500',
-    price: { currency: 'USD', input: 2.5, cacheHit: 0.25, output: 10 },
-  },
-  {
-    key: 'command-r-08-2024',
-    name: 'Command R',
-    provider: 'Cohere',
-    colorVar: 'dsw-static-cyan-400',
-    price: { currency: 'USD', input: 0.15, cacheHit: 0.015, output: 0.6 },
-  },
-  // 国产新兴/开源模型：无官方公开价，按家族口径估算 CNY（标记 estimated）。
-  {
-    key: 'longcat-2.0',
-    name: 'LongCat 2.0',
-    provider: '美团',
-    colorVar: 'dsw-static-amber-500',
-    price: { currency: 'CNY', input: 4, cacheHit: 0.8, output: 16 },
-    estimated: true,
-  },
-  {
-    key: 'minicpm-v-4.5',
-    name: 'MiniCPM-V 4.5',
-    provider: '面壁智能',
-    colorVar: 'dsw-static-green-500',
-    price: { currency: 'CNY', input: 1, cacheHit: 0.2, output: 4 },
-    estimated: true,
-  },
-  {
-    key: 'ernie-4.5',
-    name: 'ERNIE-4.5 300B',
-    provider: '百度文心',
-    colorVar: 'dsw-static-blue-300',
-    price: { currency: 'CNY', input: 2, cacheHit: 0.4, output: 8 },
-    estimated: true,
-  },
-  {
-    key: 'dots-3-note-preview',
-    name: 'Dots3-Note Preview',
-    provider: '小红书',
-    colorVar: 'dsw-static-red-500',
-    price: { currency: 'CNY', input: 2, cacheHit: 0.4, output: 8 },
-    estimated: true,
-  },
-  // 主流厂商缺失/新增模型：国内统一按官方 CNY 价；无公开价的按家族口径估算并标记 estimated。
-  {
-    key: 'qwen3.6-max',
-    name: 'Qwen3.6 Max',
-    provider: '阿里通义',
-    colorVar: 'dsw-static-orange-500',
-    // 官方刊例价（元 / 每百万 token，0-128K 档）：输入 ¥9 / 命中 ¥0.9 / 输出 ¥54。
-    price: { currency: 'CNY', input: 9, cacheHit: 0.9, output: 54 },
-    // 附加计价维度（纯展示，估算计费仍走主价三桶；128K-256K 档为 15/90）：
-    // 显式缓存按百炼统一惯例 创建 = 输入价 125%、命中 = 10%；官方未标 Batch 调用。
-    extraRows: [
-      { label: '显式缓存创建', input: 11.25 },
-      { label: '显式缓存命中', input: 0.9 },
-    ],
-  },
-  {
-    key: 'qwen3-coder-plus',
-    name: 'Qwen3-Coder Plus',
-    provider: '阿里通义',
-    colorVar: 'dsw-static-orange-400',
-    // 官方刊例价（元 / 每百万 token，0-32K 档）：输入 ¥4 / 命中 ¥0.8 / 输出 ¥16。
-    price: { currency: 'CNY', input: 4, cacheHit: 0.8, output: 16 },
-    // 附加计价维度（纯展示，估算计费仍走主价三桶；0-32K 档官方价目）：
-    // 该模型不支持批量推理，无 Batch 档可列。
-    extraRows: [
-      { label: '显式缓存创建', input: 5 },
-      { label: '显式缓存命中', input: 0.4 },
-    ],
-  },
-  {
-    key: 'qwen3-coder',
-    name: 'Qwen3-Coder 480B',
-    provider: '阿里通义',
-    colorVar: 'dsw-static-orange-300',
-    price: { currency: 'CNY', input: 4, cacheHit: 0.8, output: 16 },
-    estimated: true,
-  },
-  {
-    key: 'glm-4.5-x',
-    name: 'GLM-4.5-X',
-    provider: '智谱 AI',
-    colorVar: 'dsw-static-blue-400',
-    price: { currency: 'CNY', input: 4, cacheHit: 1, output: 16 },
-    estimated: true,
-  },
-  {
-    key: 'glm-5.2-fast',
-    name: 'GLM-5.2 Fast',
-    provider: '智谱 AI',
-    colorVar: 'dsw-static-blue-300',
-    price: { currency: 'CNY', input: 6, cacheHit: 1.2, output: 24 },
-    estimated: true,
-  },
-  {
-    key: 'kimi-k3-fast',
-    name: 'Kimi K3 Fast',
-    provider: '月之暗面',
-    colorVar: 'dsw-static-cyan-400',
-    price: { currency: 'CNY', input: 20, cacheHit: 2, output: 100 },
-    estimated: true,
-  },
-  {
-    key: 'kimi-k2.7-code-fast',
-    name: 'Kimi K2.7 Code Fast',
-    provider: '月之暗面',
-    colorVar: 'dsw-static-cyan-400',
-    price: { currency: 'CNY', input: 6.5, cacheHit: 1.3, output: 27 },
-    estimated: true,
-  },
-  {
-    key: 'kimi-k2.8-preview',
-    name: 'Kimi K2.8 Preview',
-    provider: '月之暗面',
-    colorVar: 'dsw-static-cyan-400',
-    // 官方未公布按量单价：该型号是 kimi.com 会员侧的预览模型，开放平台未上架
-    // （官方文档索引只有 K3 / K2.7 Code / K2.6 / Moonshot V1）。按 K2.7 Code 同价估算。
-    price: { currency: 'CNY', input: 6.5, cacheHit: 1.3, output: 27 },
-    estimated: true,
-  },
-  {
-    key: 'kimi-k2.6-fast',
-    name: 'Kimi K2.6 Fast',
-    provider: '月之暗面',
-    colorVar: 'dsw-static-cyan-300',
-    price: { currency: 'CNY', input: 6.5, cacheHit: 1.1, output: 27 },
-    estimated: true,
-  },
-  {
-    key: 'kimi-k2.6-turbo',
-    name: 'Kimi K2.6 Turbo',
-    provider: '月之暗面',
-    colorVar: 'dsw-static-cyan-300',
-    price: { currency: 'CNY', input: 6.5, cacheHit: 1.1, output: 27 },
-    estimated: true,
-  },
-  {
-    key: 'kimi-k2-thinking-turbo',
-    name: 'Kimi K2 Thinking Turbo',
-    provider: '月之暗面',
-    colorVar: 'dsw-static-cyan-300',
-    // 官方：输入 ¥8（未命中）/ ¥1（命中）/ 输出 ¥58。
-    price: { currency: 'CNY', input: 8, cacheHit: 1, output: 58 },
-  },
-  {
-    key: 'doubao-seed-2.0-code',
-    name: 'Doubao Seed-2.0 Code',
-    provider: '字节豆包',
-    colorVar: 'dsw-static-red-500',
-    price: { currency: 'CNY', input: 3.2, cacheHit: 0.64, output: 16 },
-  },
-  {
-    key: 'doubao-seed-2.0-lite',
-    name: 'Doubao Seed-2.0 Lite',
-    provider: '字节豆包',
-    colorVar: 'dsw-static-red-300',
-    price: { currency: 'CNY', input: 0.6, cacheHit: 0.12, output: 3.6 },
-  },
-  {
-    key: 'other',
-    name: '其他模型',
-    provider: 'Custom',
-    colorVar: 'dsw-static-neutral-bluish-500',
-    // Fallback for any stats key absent from the catalog: unknown models carry no price.
-    // 未知模型不估算费用：价格全部为 0，费率表显示「—」，计费引擎产出 0。
-    price: { currency: 'CNY', input: 0, cacheHit: 0, cacheMiss: 0, output: 0 },
-  },
-]
+let builtinCatalog: readonly ModelEntry[] = []
+let builtinAliases: Readonly<Record<string, string>> = {}
 
 /**
- * 真实 provider model id → 计费目录键（`MODEL_CATALOG[].key`）的映射。未知 id
- * 原样保留并落回 `other`（未知模型不估算费用）。聚合层（aggregate.ts）在折叠时
- * 用同一张表把日志里的 model id 归并为目录键，客户端渲染（`modelOf`）也按它
- * 解析，两侧共用一份映射，避免同一模型两侧不一致导致「未收录」。
+ * 注入内置目录与别名表（两侧各调用一次：宿主 activate、客户端首个 pricing 响应）。
+ * 重复注入整体替换并重建归一化索引。
+ * @param catalog - 内置目录条目（BUILTIN_MODEL_CATALOG 全量）。
+ * @param aliases - 内置别名表（BUILTIN_MODEL_KEY_ALIASES 全量）。
  */
-export const MODEL_KEY_ALIASES: Readonly<Record<string, string>> = {
-  'deepseek-v4-flash': 'flash',
-  'deepseek-v4-flash-vision-exp': 'flash-vision-exp',
-  // V4.1 Flash 正式版 id（官方公告 2026-09-10 前后发布）：计费同 flash 系时间线。
-  'deepseek-v4.1-flash': 'flash',
-  // V4.1 Flash 限时内测端点（expires-on-0910，09-10 过期）：内测价 = flash 同价，
-  // 收录它让存量账单的内测用量按 flash 时间线正确归并计费（issue #40 反馈）。
-  'deepseek-v4.1-flash-expires-on-0910': 'flash',
-  // 官方价目页 09-10 更新后的新规范名 deepseek-flash（模型版本 V4.1-Flash，
-  // 含图像理解——vision 并入 flash 主线）：计费同 flash 时间线。
-  'deepseek-flash': 'flash',
-  'deepseek-v4-pro': 'pro',
-  'glm-5.2': 'glm',
-  // 智谱 GLM 其余按量变体：独立目录键（点/横杠/大小写变体归一）。
-  'glm-4.5-air': 'glm-4.5-air',
-  'glm-4.5air': 'glm-4.5-air',
-  'glm-4.7': 'glm-4.7',
-  'glm-5-turbo': 'glm-5-turbo',
-  'glm-5.1': 'glm-5.1',
-  'glm-5.3-flash': 'glm-5.3-flash',
-  'glm-5v-turbo': 'glm-5v-turbo',
-  'glm-5v.1': 'glm-5v-turbo',
-  // Anthropic Claude / Mistral / Cohere：id 变体归一（点/横杠/短名）。
-  'claude-opus-4-6': 'claude-opus-4-6',
-  'claude-opus-4.6': 'claude-opus-4-6',
-  'claude-sonnet-4-6': 'claude-sonnet-4-6',
-  'claude-sonnet-4.6': 'claude-sonnet-4-6',
-  'claude-haiku-4-5': 'claude-haiku-4-5',
-  'claude-haiku-4.5': 'claude-haiku-4-5',
-  'claude-opus-5': 'claude-opus-5',
-  'claude-sonnet-5': 'claude-sonnet-5',
-  'mistral-large-2512': 'mistral-large-2512',
-  'mistral-large-3': 'mistral-large-2512',
-  'mistral-small-2603': 'mistral-small-2603',
-  'mistral-small-4': 'mistral-small-2603',
-  'ministral-8b-latest': 'ministral-8b-latest',
-  'ministral-8b': 'ministral-8b-latest',
-  'command-a-03-2025': 'command-a-03-2025',
-  'command-a': 'command-a-03-2025',
-  'command-r-08-2024': 'command-r-08-2024',
-  'command-r': 'command-r-08-2024',
-  // 国产新兴/开源模型 id 变体。
-  // 腾讯混元 TokenHub 短 id（控制台/网关常用形态；价格口径 = hunyuan 条目）。
-  'hy3': 'hunyuan',
-  'longcat-2.0': 'longcat-2.0',
-  'longcat-2': 'longcat-2.0',
-  'minicpm-v-4.5': 'minicpm-v-4.5',
-  'minicpm-v-4.5-thinking': 'minicpm-v-4.5',
-  'ernie-4.5': 'ernie-4.5',
-  'ernie-4.5-300b': 'ernie-4.5',
-  'dots-3-note-preview': 'dots-3-note-preview',
-  'dots-3-note': 'dots-3-note-preview',
-  'dots3-note-preview': 'dots-3-note-preview',
-  'rednote-dots3': 'dots-3-note-preview',
-  // 字节豆包新模型 id 变体（点/横杠/短名）。
-  'doubao-seed-evolving': 'doubao-seed-evolving',
-  'doubao-seed-evolve': 'doubao-seed-evolving',
-  'doubao-seed-2.1-pro': 'doubao-seed-2.1-pro',
-  'doubao-seed-2.1-pro-290000': 'doubao-seed-2.1-pro',
-  'doubao-seed-2.1-turbo': 'doubao-seed-2.1-turbo',
-  'doubao-seed-2-1-turbo': 'doubao-seed-2.1-turbo',
-  'qwen3.8-max': 'qwen-3.8-max',
-  'qwen3.8-flash': 'qwen-3.8-flash',
-  'qwen3.7-max': 'qwen-max',
-  // 主流缺失/新增模型别名（点/横杠/短名）。
-  'qwen3.6-max': 'qwen3.6-max',
-  'qwen3.6-max-preview': 'qwen3.6-max',
-  'qwen3-coder-plus': 'qwen3-coder-plus',
-  'qwen3-coder': 'qwen3-coder',
-  'qwen3-coder-480b': 'qwen3-coder',
-  'glm-4.5-x': 'glm-4.5-x',
-  'glm-4.5x': 'glm-4.5-x',
-  'glm-5.2-fast': 'glm-5.2-fast',
-  'glm-5.2f': 'glm-5.2-fast',
-  'kimi-k3-fast': 'kimi-k3-fast',
-  'kimi-k3f': 'kimi-k3-fast',
-  'kimi-k2.7-code-fast': 'kimi-k2.7-code-fast',
-  'kimi-k2.7-code-f': 'kimi-k2.7-code-fast',
-  'kimi-k2.6-fast': 'kimi-k2.6-fast',
-  'kimi-k2.6-turbo': 'kimi-k2.6-turbo',
-  'kimi-k2-thinking-turbo': 'kimi-k2-thinking-turbo',
-  'doubao-seed-2.0-code': 'doubao-seed-2.0-code',
-  'doubao-seed-2-0-code': 'doubao-seed-2.0-code',
-  'doubao-seed-2.0-lite': 'doubao-seed-2.0-lite',
-  'doubao-seed-2-0-lite': 'doubao-seed-2.0-lite',
-  'qwen-max': 'qwen-max',
-  'hunyuan-t1': 'hunyuan-t1',
-  'step-3.7-flash': 'step',
-  'seed-2.0-mini': 'doubao-mini',
-  // 月之暗面 Kimi：coding plan 通道的 model id 是短名 k3。
-  'k3': 'kimi-k3',
-  'kimi-k3': 'kimi-k3',
-  // Kimi K2.8 Preview：会员侧预览模型，日志里的 id 形态因通道而异，统一归一化。
-  'kimi-k2.8-preview': 'kimi-k2.8-preview',
-  'kimi-k2.8': 'kimi-k2.8-preview',
-  'kimi-k2-8-preview': 'kimi-k2.8-preview',
-  'kimi-k2-8': 'kimi-k2.8-preview',
-  'k2.8-preview': 'kimi-k2.8-preview',
-  'k2.8': 'kimi-k2.8-preview',
-  // MiniMax：官方 OpenAI 兼容 id 为 `MiniMax-M3`（目录键 `minimax`）。日志里大小写/型号后缀
-  // 各异，统一归一化到目录键，避免「厂商计费与订阅」把 MiniMax-M3 标成未收录。
-  'minimax-m1': 'minimax',
-  'minimax-m2': 'minimax',
-  'minimax-m3': 'minimax',
-  // MiniMax-M2.7 / M2.7-highspeed：按量通道的独立目录键（点/横杠/大小写变体归一）。
-  'minimax-m2.7': 'minimax-m2.7',
-  'minimax-m2.7-highspeed': 'minimax-m2.7-highspeed',
-  'minimax-m2.7-high-speed': 'minimax-m2.7-highspeed',
-  'minimax-m2-7': 'minimax-m2.7',
-  'minimax-m2-7-highspeed': 'minimax-m2.7-highspeed',
-  'minimax-m2-7-high-speed': 'minimax-m2.7-highspeed',
-  // OpenAI GPT-6 Astra：官方 id 为 `gpt-6-astra`（2026-09-03 发布），短名形态一并归一。
-  'gpt-6': 'gpt-6-astra',
-  'gpt-6-astra': 'gpt-6-astra',
+export function applyBuiltinCatalog(
+  catalog: readonly ModelEntry[],
+  aliases: Readonly<Record<string, string>>,
+): void {
+  builtinCatalog = catalog
+  builtinAliases = aliases
+  canonIndexCache = undefined
 }
+
+/** 内置目录当前快照：未注入为空数组（client 首帧前渲染加载态）。 */
+export function modelCatalog(): readonly ModelEntry[] {
+  return builtinCatalog
+}
+
+/** 内置别名表当前快照：未注入为空对象。 */
+export function modelKeyAliases(): Readonly<Record<string, string>> {
+  return builtinAliases
+}
+
+/** 未注入时的目录兜底条目：与内置 other 条目同价（零价，不计费）。 */
+const UNSEEDED_OTHER: ModelEntry = {
+  key: 'other',
+  name: '其他模型',
+  provider: 'Custom',
+  colorVar: 'dsw-static-neutral-bluish-500',
+  price: { currency: 'CNY', input: 0, cacheHit: 0, cacheMiss: 0, output: 0 },
+}
+
+// ==== 以下为原目录 JSDoc 保留（条目结构说明），数据见 src/builtin-catalog.ts ====
+
 
 /**
  * 模型 id 归一化：小写、去括号附注（如 `gpt5.6 luna(go)` 只看主体）、再去所有
@@ -1456,18 +689,58 @@ export function canonModelId(id: string): string {
 /**
  * 目录常量键的归一化索引：归一化键 → 真实计费键。只索引静态来源（内置目录、
  * 别名表、dsh-spend 兜底键）；models.dev 补充条目是运行时注入，单独实时匹配。
+ * 惰性构建：注入前目录为空，构建无意义；每次 applyBuiltinCatalog 后重建。
  */
-const CATALOG_CANON_INDEX: ReadonlyMap<string, string> = (() => {
+let canonIndexCache: ReadonlyMap<string, string> | undefined
+
+function canonIndex(): ReadonlyMap<string, string> {
+  if (canonIndexCache !== undefined) return canonIndexCache
   const map = new Map<string, string>()
   const add = (candidate: string, target: string): void => {
     const canon = canonModelId(candidate)
     if (canon !== '' && !map.has(canon)) map.set(canon, target)
   }
-  for (const entry of MODEL_CATALOG) add(entry.key, entry.key)
-  for (const [alias, key] of Object.entries(MODEL_KEY_ALIASES)) add(alias, key)
+  for (const entry of builtinCatalog) add(entry.key, entry.key)
+  for (const [alias, key] of Object.entries(builtinAliases)) add(alias, key)
   for (const rate of FALLBACK_RATES) add(rate.key, rate.key)
+  canonIndexCache = map
   return map
-})()
+}
+
+/**
+ * models.dev 补充条目的索引（归一化键 / 精确键各一份）：补充列表可达数千条，
+ * 聚合折叠每条事件都查一次（此前是逐元素跑正则归一化的线性扫描），索引把
+ * 单次查询降到 O(1)。惰性构建，`applyLivePricing` 替换数组后按引用失效重建。
+ */
+let extraIndexSource: readonly ExtraModelPrice[] | undefined
+let extraCanonCache: ReadonlyMap<string, ExtraModelPrice> | undefined
+let extraKeyCache: ReadonlyMap<string, ExtraModelPrice> | undefined
+
+function buildExtraIndex(): void {
+  if (extraIndexSource === liveExtraModels) return
+  const byCanon = new Map<string, ExtraModelPrice>()
+  const byKey = new Map<string, ExtraModelPrice>()
+  for (const item of liveExtraModels ?? []) {
+    if (!byKey.has(item.key)) byKey.set(item.key, item)
+    const canon = canonModelId(item.key)
+    if (canon !== '' && !byCanon.has(canon)) byCanon.set(canon, item)
+  }
+  extraIndexSource = liveExtraModels
+  extraCanonCache = byCanon
+  extraKeyCache = byKey
+}
+
+/** 补充条目的归一化键索引（宽松匹配日志模型 id）。 */
+function extraModelByCanon(): ReadonlyMap<string, ExtraModelPrice> {
+  buildExtraIndex()
+  return extraCanonCache ?? new Map()
+}
+
+/** 补充条目的精确键索引（目录键直查）。 */
+function extraModelByKey(): ReadonlyMap<string, ExtraModelPrice> {
+  buildExtraIndex()
+  return extraKeyCache ?? new Map()
+}
 
 /**
  * 解析真实日志模型 id → 计费目录键。先精确别名映射（既有行为）；未命中时做
@@ -1511,25 +784,24 @@ function derivedKeyCandidates(id: string): string[] {
 
 /** 查一个候选 id（用户别名 → 内置别名 → 目录归一化 → models.dev 补充）；未命中返回 undefined。 */
 function lookupCandidate(candidate: string): string | undefined {
-  const alias = userModelAliases?.[candidate] ?? MODEL_KEY_ALIASES[candidate]
+  const alias = userModelAliases?.[candidate] ?? modelKeyAliases()[candidate]
   if (alias !== undefined) return alias
   const canon = canonModelId(candidate)
   if (canon === '') return undefined
-  const hit = CATALOG_CANON_INDEX.get(canon)
+  const hit = canonIndex().get(canon)
   if (hit !== undefined) return hit
-  const extraHit = (liveExtraModels ?? []).find(item => canonModelId(item.key) === canon)
-  return extraHit?.key
+  return extraModelByCanon().get(canon)?.key
 }
 
 export function resolveCatalogKey(id: string): string {
-  const exact = userModelAliases?.[id] ?? MODEL_KEY_ALIASES[id] ?? id
+  const exact = userModelAliases?.[id] ?? modelKeyAliases()[id] ?? id
   if (exact === id) {
     // 精确别名未命中：做归一化匹配；命中即返回目标键。
     const canon = canonModelId(id)
     if (canon !== '') {
-      const hit = CATALOG_CANON_INDEX.get(canon)
+      const hit = canonIndex().get(canon)
       if (hit !== undefined) return hit
-      const extraHit = (liveExtraModels ?? []).find(item => canonModelId(item.key) === canon)
+      const extraHit = extraModelByCanon().get(canon)
       if (extraHit !== undefined) return extraHit.key
     }
     // 派生候选（剥组织前缀 / 尾部日期段）按同一口径匹配；全部未命中保持原样
@@ -1556,14 +828,10 @@ function livePriceOf(key: string): LivePrice | undefined {
 export function modelOf(key: string): ModelEntry {
   // 先按别名/归一化归并为目录键（catalog key 本身不在别名表里，原样通过）。
   const resolved = resolveCatalogKey(key)
-  const found = MODEL_CATALOG.find(entry => entry.key === resolved)
+  const found = modelCatalog().find(entry => entry.key === resolved)
   // 目录未命中时查 models.dev 补充条目（与宿主预制提供方对齐的实时价）。
-  const extra = liveExtraModels?.find(item => item.key === resolved)
-  const base = found ?? (extra !== undefined ? extraEntryOf(extra) : (() => {
-    const fallback = MODEL_CATALOG.at(-1)
-    if (fallback !== undefined) return fallback
-    throw new Error('MODEL_CATALOG must not be empty')
-  })())
+  const extra = extraModelByKey().get(resolved)
+  const base = found ?? (extra !== undefined ? extraEntryOf(extra) : modelCatalog().find(entry => entry.key === 'other') ?? UNSEEDED_OTHER)
   // 用户自定义价优先级最高：整表替换；带 offPeak 时保留峰谷分档，否则平档。
   const user = userPriceOf(resolved)
   if (user !== undefined) {
@@ -1581,6 +849,9 @@ export function modelOf(key: string): ModelEntry {
   }
   const live = livePriceOf(resolved)
   if (live === undefined) return base
+  // 分档条目（峰谷/延迟档）不适用实时平档：路由器美元单价无时段区分，整表替换
+  // 会把官方峰谷规则抹平（峰档 = 谷档 × 2 的计费口径丢失）。平档条目才整表替换。
+  if (base.price.offPeak !== undefined) return base
   // 实时价是路由器的美元单价（平档、无时段区分）：整表替换并走汇率换算。
   // Router prices already include current promotions, so do not discount twice.
   const { promo: _promo, ...unpromoted } = base
@@ -1609,21 +880,21 @@ function extraEntryOf(extra: ExtraModelPrice): ModelEntry {
  */
 export function isPriced(key: string): boolean {
   const resolved = resolveCatalogKey(key)
-  if (MODEL_CATALOG.some(entry => entry.key === resolved)) return true
-  if ((liveExtraModels ?? []).some(item => item.key === resolved)) return true
+  if (modelCatalog().some(entry => entry.key === resolved)) return true
+  if (extraModelByKey().has(resolved)) return true
   return FALLBACK_RATES.some(rate => rate.key.toLowerCase() === resolved.toLowerCase())
 }
 
 /**
- * 促销在 nowMs 是否生效：factor 必须落在 (0,1) 区间，截止时刻及之后视为过期；
- * endsAtMs 缺省表示长期活动，在 factor 合法期间持续生效。
+ * 促销在 nowMs 是否生效：factor 必须落在 [0,1) 区间（0 = 活动期免费，issue #86），
+ * 截止时刻及之后视为过期；endsAtMs 缺省表示长期活动，在 factor 合法期间持续生效。
  * 导出供测试：纯函数。
  * @param promo - 待判定的促销窗口。
  * @param nowMs - 判定时刻（epoch ms）。
  */
 export function isPromoActive(promo: PricePromo, nowMs: number): boolean {
   const expired = promo.endsAtMs !== undefined && nowMs >= promo.endsAtMs
-  return Number.isFinite(nowMs) && !expired && promo.factor > 0 && promo.factor < 1
+  return Number.isFinite(nowMs) && !expired && promo.factor >= 0 && promo.factor < 1
 }
 
 /**
@@ -1637,9 +908,12 @@ export function isPromoActive(promo: PricePromo, nowMs: number): boolean {
 export function applyPromo(entry: ModelEntry, nowMs: number): ModelEntry {
   const { promo } = entry
   if (promo === undefined || !isPromoActive(promo, nowMs)) return entry
-  // 分档覆盖只在厂商逐档给不同折扣时填写；未填档位沿用 factor。
-  const factorOf = (field: 'input' | 'cacheHit' | 'cacheMiss' | 'output'): number =>
-    promo.factors?.[field] ?? promo.factor
+  // 分档覆盖只在厂商逐档给不同折扣时填写；未填档位沿用 factor。分档值与 factor
+  // 同窗口 [0,1)（0 = 该档免费），非法值回落 factor（与 PricePromo 契约一致）。
+  const factorOf = (field: 'input' | 'cacheHit' | 'cacheMiss' | 'output'): number => {
+    const perBand = promo.factors?.[field]
+    return perBand !== undefined && perBand >= 0 && perBand < 1 ? perBand : promo.factor
+  }
   const scaled = (band: PriceBand): PriceBand => ({
     input: band.input * factorOf('input'),
     cacheHit: band.cacheHit * factorOf('cacheHit'),
@@ -1668,7 +942,7 @@ export function applyPromo(entry: ModelEntry, nowMs: number): ModelEntry {
  */
 export function catalogEntries(nowMs: number = Date.now()): readonly ModelEntry[] {
   const entries: ModelEntry[] = [
-    ...MODEL_CATALOG
+    ...modelCatalog()
       .filter(entry => entry.retired !== true)
       .map(entry => applyPromo(entry, nowMs)),
   ]
@@ -1678,7 +952,7 @@ export function catalogEntries(nowMs: number = Date.now()): readonly ModelEntry[
     const rawKey = model.id.toLowerCase()
     const builtin = (() => {
       const aliasKey = resolveCatalogKey(model.id)
-      return MODEL_CATALOG.find(item => item.key === aliasKey)
+      return modelCatalog().find(item => item.key === aliasKey)
     })()
     // 内置目录收录：跳过，避免与内置行重复（key 用内置目录键）。
     if (builtin !== undefined) continue
@@ -1687,7 +961,7 @@ export function catalogEntries(nowMs: number = Date.now()): readonly ModelEntry[
     if (known.has(rawKey) || (idCanon !== '' && knownCanon.has(idCanon))) continue
     // 目录外但有 models.dev 价：直接复用其 USD 价（按归一化 id 匹配），否则走
     // dsh-spend 官方价兜底；两者都没有才标「未收录」。
-    const extra = (liveExtraModels ?? []).find(item => canonModelId(item.key) === idCanon)
+    const extra = extraModelByCanon().get(idCanon)
     let entry: ModelEntry
     if (extra !== undefined) {
       entry = extraEntryOf(extra)
@@ -1845,6 +1119,14 @@ export function computeCostAt(
     return priceBandCost(band, buckets, 'CNY')
   }
   if (priced.price.offPeak === undefined) return priceBandCost(priced.price, buckets, priced.price.currency)
+  // 延迟档语义（Gemini Standard/Flex）与调用时刻无关：逐调用档位从日志不可判定，
+  // 两档按 peakShare 混合估算——不套 DeepSeek 的北京时段窗口与中国法定节假日
+  // （Google 不遵守这些窗口，套用会把高峰时段的 Gemini 流量虚抬到 2 倍价）。
+  if (entry.tierSemantics === 'latency') {
+    const peak = priceBandCost(priced.price, buckets, priced.price.currency)
+    const off = priceBandCost(priced.price.offPeak, buckets, priced.price.currency)
+    return peak * peakShare + off * (1 - peakShare)
+  }
   // 档位判定按事件时刻分段适用规则：v1 窗口不豁免周末，分界起周末全谷。
   const tier = timeMs < WEEKEND_OFFPEAK_START_MS ? tariffV1At(timeMs) : tierAt(timeMs)
   const band = tier === 'peak' ? priced.price : priced.price.offPeak
@@ -1859,6 +1141,22 @@ export function cnyToUsd(cny: number): number {
 }
 
 /**
+ * 人民币金额换算到展示币种。目录以 CNY/USD 为原生币种，费用统一以
+ * 人民币累计，展示层再按所选币种换算——EUR 与 USD 同一口径，不改变存储与聚合。
+ * @param cny - 人民币金额。
+ * @param currency - 目标展示币种。
+ * @returns 换算后的金额（汇率不可用时原值返回）。
+ */
+export function convertFromCny(cny: number, currency: CostCurrency): number {
+  if (currency === 'usd') return cnyToUsd(cny)
+  if (currency === 'eur') {
+    const rate = currentEurRate()
+    return rate > 0 ? cny / rate : cny
+  }
+  return cny
+}
+
+/**
  * Format an amount with adaptive precision and the given currency symbol.
  * @param amount - the amount (CNY by default; pass `usd` for dollar display).
  * @param currency - display currency; default `cny`.
@@ -1867,8 +1165,8 @@ export function formatMoney(amount: number, currency: CostCurrency = 'cny'): str
   // 外部统计 JSON 的数字字段可能被写成字符串/非法值：先归一化，避免
   // toFixed 抛 TypeError 把整个渲染树打崩（插件 surface 会被卸载）。
   const value = Number(amount)
-  if (!Number.isFinite(value)) return currency === 'cny' ? '¥0' : '$0'
-  const symbol = currency === 'cny' ? '¥' : '$'
+  const symbol = currency === 'usd' ? '$' : currency === 'eur' ? '€' : '¥'
+  if (!Number.isFinite(value)) return `${symbol}0`
   if (value <= 0) return `${symbol}0`
   if (value >= 1000) return `${symbol}${value.toFixed(0)}`
   if (value >= 10) return `${symbol}${value.toFixed(1)}`
@@ -1880,14 +1178,9 @@ export function formatMoney(amount: number, currency: CostCurrency = 'cny'): str
  * Format a per-1M-token price in its native currency (free when the rate is
  * zero): CNY for domestic models, USD for overseas ones.
  */
-export function formatUnitPrice(price: number, currency: 'CNY' | 'USD' = 'CNY'): string {
-  if (price === 0) return '免费'
-  if (currency === 'USD') {
-    if (price >= 10) return `$${price.toFixed(1)}`
-    return `$${price.toFixed(2)}`
-  }
-  if (price >= 10) return `¥${price.toFixed(1)}`
-  return `¥${price.toFixed(2)}`
+export function formatUnitPrice(price: number, currency: 'CNY' | 'USD' | 'EUR' = 'CNY'): string {
+  const symbol = currency === 'USD' ? '$' : currency === 'EUR' ? '€' : '¥'
+  return `${symbol}${price.toFixed(price >= 10 ? 1 : 2)}`
 }
 
 /**
@@ -1901,9 +1194,20 @@ export function formatUnitPrice(price: number, currency: 'CNY' | 'USD' = 'CNY'):
  */
 export function convertUnitPrice(price: number, native: 'CNY' | 'USD', target: CostCurrency, rate: number): number {
   if (rate <= 0 || !Number.isFinite(rate)) return price
-  const targetCurrency: 'CNY' | 'USD' = target === 'usd' ? 'USD' : 'CNY'
-  if (native === targetCurrency) return price
-  return target === 'usd' ? price / rate : price * rate
+  // 先归一到人民币，再换算到目标币种；三种币种走同一条路径，避免两两组合的分支爆炸。
+  const cny = native === 'USD' ? price * rate : price
+  if (target === 'cny') return cny
+  if (target === 'usd') return cny / rate
+  const eur = getEurRateInfo().rate
+  return eur > 0 ? cny / eur : cny
+}
+
+/** 本地时区日期戳 `YYYY-MM-DD`（与服务端 aggregate.ts 的 dayStamp 同口径）；
+ *  触发卡/热力图/Token 面板共用一个实现（此前三处各抄一份）。 */
+export function localDayStamp(time = Date.now()): string {
+  const date = new Date(time)
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
 }
 
 /** Format a large token count with B/M/K suffix. */

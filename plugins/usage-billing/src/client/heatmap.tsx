@@ -14,7 +14,7 @@
 
 import { useMemo, useState } from 'react'
 import css from './UsageBilling.module.css'
-import { cnyToUsd, formatMoney, type CostCurrency } from './pricing.ts'
+import { convertFromCny, formatMoney, formatTokens, localDayStamp, type CostCurrency } from './pricing.ts'
 
 /** One heatmap day. */
 export interface HeatmapDay {
@@ -35,22 +35,22 @@ interface Cell {
   placeholder: boolean
 }
 
+/* v1.5 光谱：青(轻)→蓝(中)→蓝实(高)→琥珀(爆量)。
+   level 0 = 无活动（浅灰占位 / 未来日）。
+   与 hero 渐变弧、subscription 蓝底卡形成「数据光谱」统一设计语言。 */
 const LEVEL_COLORS: readonly string[] = [
-  'var(--dsw-alias-bg-layer-2)',
-  'color-mix(in srgb, var(--dsw-static-green-500) 22%, var(--dsw-alias-bg-layer-2))',
-  'color-mix(in srgb, var(--dsw-static-green-500) 45%, var(--dsw-alias-bg-layer-2))',
-  'color-mix(in srgb, var(--dsw-static-green-500) 70%, var(--dsw-alias-bg-layer-2))',
-  'var(--dsw-static-green-500)',
+  'color-mix(in srgb, var(--dsb-3) 70%, transparent)',
+  'color-mix(in srgb, var(--ds-cyan) 30%, var(--dsb-3))',
+  'color-mix(in srgb, var(--ds-blue) 60%, var(--dsb-3))',
+  'var(--ds-blue)',
+  'var(--ds-amber)',
 ]
 
 /** 月份缩写（年度热力图横轴标签，GitHub 风格）。 */
 const MONTH_ABBR: readonly string[] = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
 /** Local-time `YYYY-MM-DD` stamp (matches the dashboard's day keys). */
-function dayStamp(date: Date): string {
-  const pad = (n: number): string => String(n).padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
-}
+const dayStamp = (date: Date): string => localDayStamp(date.getTime())
 
 /**
  * Build the current-month cells arranged in week rows (Sunday-first).
@@ -114,10 +114,12 @@ function buildMonthWeeks(days: readonly HeatmapDay[], now: Date): Cell[][] {
 
 /**
  * Build the GitHub-style year cells (column = week, row = Sunday..Saturday),
- * covering the last 52 weeks up to the current week. Future days render as
- * level-0 gray; the column-flow grid lays each week's 7 cells vertically.
+ * covering the last `weekCount` weeks up to the current week. Future days
+ * render as level-0 gray; the column-flow grid lays each week's 7 cells
+ * vertically. The half-year view (Codex-style shareable image) reuses this
+ * with `weekCount = 26`.
  */
-function buildYearWeeks(days: readonly HeatmapDay[], now: Date): Cell[][] {
+function buildYearWeeks(days: readonly HeatmapDay[], now: Date, weekCount = 52): Cell[][] {
   const byDate = new Map<string, number>()
   for (const day of days) byDate.set(day.date, day.value)
   let max = 0
@@ -128,10 +130,10 @@ function buildYearWeeks(days: readonly HeatmapDay[], now: Date): Cell[][] {
   thisSunday.setHours(0, 0, 0, 0)
   thisSunday.setDate(thisSunday.getDate() - thisSunday.getDay())
   const firstSunday = new Date(thisSunday)
-  firstSunday.setDate(thisSunday.getDate() - 51 * 7)
+  firstSunday.setDate(thisSunday.getDate() - (weekCount - 1) * 7)
 
   const weeks: Cell[][] = []
-  for (let week = 0; week < 52; week += 1) {
+  for (let week = 0; week < weekCount; week += 1) {
     const row: Cell[] = []
     for (let dow = 0; dow < 7; dow += 1) {
       const date = new Date(firstSunday)
@@ -152,22 +154,33 @@ function buildYearWeeks(days: readonly HeatmapDay[], now: Date): Cell[][] {
 }
 
 /**
- * Render the month or year heatmap.
- * @param props.days - daily cost rows (keys are `YYYY-MM-DD`).
- * @param props.currency - display currency for the hover amount.
+ * Render the month or week-column heatmap.
+ * @param props.days - daily value rows (keys are `YYYY-MM-DD`); the value's
+ *   meaning follows `props.unit` (CNY cost or raw token count).
+ * @param props.currency - display currency for the hover amount (cost unit).
  * @param props.now - anchor date (defaults to today); injectable for tests.
  * @param props.t - locale function (used for the legend labels).
- * @param props.range - `month` (calendar month) or `year` (last 52 weeks, GitHub style).
+ * @param props.range - `month` (calendar month), `half` (last 26 weeks, large
+ *   cells — the screenshot-friendly Codex-style view) or `year` (last 52
+ *   weeks, GitHub style).
+ * @param props.unit - value metric: `cost` (default, money formatting) or
+ *   `tokens` (compact token formatting).
  */
-export function UsageHeatmap({ days, currency, now, t, range = 'month' }: { days: readonly HeatmapDay[]; currency: CostCurrency; now?: Date; range?: 'month' | 'year'; t: (key: 'costAbbr' | 'noData' | 'heatmapLess' | 'heatmapMore') => string }): React.ReactNode {
+export function UsageHeatmap({ days, currency, now, t, range = 'month', unit = 'cost' }: { days: readonly HeatmapDay[]; currency: CostCurrency; now?: Date; range?: 'month' | 'half' | 'year'; unit?: 'cost' | 'tokens'; t: (key: 'costAbbr' | 'noData' | 'heatmapLess' | 'heatmapMore') => string }): React.ReactNode {
   const [hover, setHover] = useState<Cell | null>(null)
-  const money = (cny: number): string => formatMoney(currency === 'usd' ? cnyToUsd(cny) : cny, currency)
+  const money = (cny: number): string => formatMoney(convertFromCny(cny, currency), currency)
+  const fmt = (value: number): string => (unit === 'tokens' ? formatTokens(value) : money(value))
   // monthWeeks 无条件计算，保证跨 range 切换时 hooks 顺序稳定。
   const monthWeeks = useMemo(() => buildMonthWeeks(days, now ?? new Date()), [days, now])
+  /* v1.5：当日格子加琥珀描边。提前 dayStamp(now) 一次，渲染时字符串相等
+     比对；跨日刷新（轮询 30s）会自然重算，cell 重新挂载 data-today。 */
+  const todayKey = dayStamp(now ?? new Date())
 
-  if (range === 'year') {
-    // Year view: compact per-week column grid (GitHub style); tooltip via title.
-    const yearWeeks = buildYearWeeks(days, now ?? new Date())
+  if (range !== 'month') {
+    // Week-column views (half/year): compact per-week column grid; the half
+    // view enlarges cells via the CSS `.heatmapHalf` overrides.
+    const weekCount = range === 'half' ? 26 : 52
+    const yearWeeks = buildYearWeeks(days, now ?? new Date(), weekCount)
     // 月份标签：每列一周，月初列标注月份缩写（与参考图的横轴月份一致）。
     const monthLabels: { index: number; label: string }[] = []
     let lastMonth = -1
@@ -185,7 +198,10 @@ export function UsageHeatmap({ days, currency, now, t, range = 'month' }: { days
       { label: 'Fri', row: 5 },
     ]
     return (
-      <div className={css.heatmapYear} data-testid="heatmap-year">
+      <div
+        className={css.heatmapYear + (range === 'half' ? ' ' + css.heatmapHalf : '')}
+        data-testid={range === 'half' ? 'heatmap-half' : 'heatmap-year'}
+      >
         <div className={css.heatmapYearBody}>
           <div className={css.heatmapYearWeekdays} aria-hidden="true">
             {weekdayRows.map(item => (
@@ -206,20 +222,24 @@ export function UsageHeatmap({ days, currency, now, t, range = 'month' }: { days
                   className={css.heatmapYearCell}
                   data-testid="heatmap-year-cell"
                   data-level={cell.level}
+                  data-today={cell.date === todayKey ? 'true' : undefined}
                   style={{ background: LEVEL_COLORS[cell.level] }}
-                  title={`${cell.date} · ${money(cell.value)}`}
-                  aria-label={`${cell.date}: ${money(cell.value)}`}
+                  title={`${cell.date} · ${fmt(cell.value)}`}
+                  aria-label={`${cell.date}: ${fmt(cell.value)}`}
+                  /* 无 onClick 的纯展示格：移出 Tab 序列（半年/年视图 371 个格子，
+                  否则逐格都是无操作停留点）；屏幕阅读器经 role=img 容器读汇总。 */
+                  tabIndex={-1}
                 />
               ))}
             </div>
           </div>
         </div>
         <div className={css.heatmapFooter}>
-          <span className={css.heatmapLegendText}>{t('heatmapLess')}</span>
+          <span>{t('heatmapLess')}</span>
           <span className={css.heatmapLegend}>
             {LEVEL_COLORS.map((color, level) => <i key={level} style={{ background: color }} />)}
           </span>
-          <span className={css.heatmapLegendText}>{t('heatmapMore')}</span>
+          <span>{t('heatmapMore')}</span>
         </div>
       </div>
     )
@@ -238,9 +258,10 @@ export function UsageHeatmap({ days, currency, now, t, range = 'month' }: { days
                 className={css.heatmapCell}
                 data-testid="heatmap-cell"
                 data-level={cell.level}
+                data-today={cell.date === todayKey ? 'true' : undefined}
                 style={{ background: LEVEL_COLORS[cell.level] }}
-                title={`${cell.date} · ${money(cell.value)}`}
-                aria-label={`${cell.date}: ${money(cell.value)}`}
+                title={`${cell.date} · ${fmt(cell.value)}`}
+                aria-label={`${cell.date}: ${fmt(cell.value)}`}
                 onMouseEnter={() => { setHover(cell) }}
                 onMouseLeave={() => { setHover(null) }}
                 onFocus={() => { setHover(cell) }}
@@ -253,14 +274,14 @@ export function UsageHeatmap({ days, currency, now, t, range = 'month' }: { days
         )}
       </div>
       <div className={css.heatmapFooter}>
-        <span className={css.heatmapLegendText}>{t('heatmapLess')}</span>
+        <span>{t('heatmapLess')}</span>
         <span className={css.heatmapLegend}>
           {LEVEL_COLORS.map((color, level) => <i key={level} style={{ background: color }} />)}
         </span>
-        <span className={css.heatmapLegendText}>{t('heatmapMore')}</span>
+        <span>{t('heatmapMore')}</span>
         {hover !== null && (
           <span className={css.heatmapHover} data-testid="heatmap-hover">
-            {hover.date} · {money(hover.value)}
+            {hover.date} · {fmt(hover.value)}
           </span>
         )}
       </div>

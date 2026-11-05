@@ -25,16 +25,18 @@ import type { UserConfig } from 'tsdown'
 import { transform } from 'lightningcss'
 
 /**
- * The host's eight-entry platform seed, copied verbatim from packages/client/web/src/platform.ts.
+ * The host's eleven-entry platform seed, copied verbatim from packages/client/web/src/platform.ts.
  * These are the specifiers the loader module table answers at runtime, so the browser
  * bundle keeps them external (require) instead of inlining. If the monorepo seed grows,
  * mirror it here.
  */
 const PLATFORM_MODULES = [
   'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client', '@deepseek-ai/cordis',
+  'zod', '@tanstack/react-virtual',
   '@deepseek-ai/dsh-client-store',
   '@deepseek-ai/dsh-client-ui-slots',
   '@deepseek-ai/dsh-client-ui-primitives',
+  '@deepseek-ai/dsh-client-ui-dockkit',
 ] as const
 
 /**
@@ -194,11 +196,14 @@ function clientConfig(id: string, entry: string): UserConfig {
     // Plugin code is fetched outside Vite's module graph, so its own bundle
     // must carry the TS/TSX mapping consumed by browser profiling tools.
     sourcemap: true,
-    // DSH Store 的固定 Commit 审查对运行时文件有 256 KiB 单文件硬上限；
-    // 未压缩 bundle 含内联 CSS/双语字典远超此值，浏览器分发面统一压缩。
-    // (DSH Store fixed-commit review caps a single runtime file at 256 KiB;
-    // the uncompressed bundle inlines CSS and bilingual dictionaries, so ship
-    // the browser artifact minified.)
+    // 浏览器分发面统一压缩。注意口径：DSH Store 对插件 JS bundle **无审查上限**
+    // （仅图标文件 icon.* 设 256 KiB 上限），本仓 256/500 KiB 两道阈值是
+    // sync.sh 自设的体积成本线、非上游强制。压缩的真实理由是浏览器加载性能
+    // 与该成本线（未压缩 bundle 内联 CSS/双语字典，体积数倍于此）。
+    // (The DSH Store caps no plugin JS bundle — only icon.* files at 256 KiB.
+    // The repo's own 256/500 KiB lines are a self-imposed cost guard, not an
+    // upstream gate. The real reasons to minify are browser load latency and
+    // that guard; the uncompressed bundle inlines CSS and bilingual dicts.)
     minify: true,
     clean: false,
     external: [...CLIENT_EXTERNALS],

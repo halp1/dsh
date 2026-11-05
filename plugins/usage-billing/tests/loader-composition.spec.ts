@@ -30,12 +30,22 @@ import * as UsageBilling from '../src/index.ts'
 let root: string | undefined
 let context: Context | undefined
 
+/** 余额上游替身开关：开启后 fetch 桩回答 DeepSeek 官方余额接口（issue #104）。 */
+let balanceUpstreamEnabled = false
+
 beforeEach(() => {
   // 外网一律拒绝（定价拉取降级 builtin）；本地回环放行给断言用 fetch。
   const realFetch = globalThis.fetch
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input instanceof Request ? input.url : input)
     if (url.startsWith('http://127.0.0.1')) return realFetch(input, init)
+    // 余额上游替身：只回答 DeepSeek 官方余额接口，其余外网仍拒绝。
+    if (balanceUpstreamEnabled && url === 'https://api.deepseek.com/user/balance') {
+      return new Response(JSON.stringify({
+        is_available: true,
+        balance_infos: [{ currency: 'CNY', total_balance: '100', granted_balance: '0', topped_up_balance: '100' }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
     throw new Error(`offline in test: ${url}`)
   }))
 })
@@ -43,7 +53,9 @@ beforeEach(() => {
 afterEach(async () => {
   await context?.fiber.dispose()
   context = undefined
-  if (root !== undefined) await rm(root, { recursive: true, force: true })
+  // dispose 触发的账本/快照落盘可能仍在飞（本文件新增的用例更早返回），
+  // Windows 上会以 ENOTEMPTY 与 rm 竞争——给删除加重试而不是放宽断言。
+  if (root !== undefined) await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   root = undefined
   vi.unstubAllGlobals()
 })
@@ -96,12 +108,57 @@ const slowPersistenceDouble = {
   },
 }
 
+/**
+ * 插件注册的 adapter 通道（issue #91）：provider 由别的插件经
+ * `ctx.llm.registerAdapter` 注册（这里用 llm 服务替身扮演宿主注册表），
+ * 日志里该通道调用的模型仍按官方目录键计价。固定用低谷时刻，成本可精确断言。
+ */
+/** 2026-10-14 02:00 北京时间（周三）：低谷档，flash 谷价 = 1 / 0.02 / 4。 */
+const OFF_PEAK_MS = Date.parse('2026-10-13T18:00:00Z')
+
+const REGISTERED_CHANNEL_EVENTS = [
+  { type: 'request/header', time: OFF_PEAK_MS, data: { header: { config: { model: 'deepseek/deepseek-v4.1-flash', provider: 'commandcode' } } } },
+  { type: 'assistant/message', time: OFF_PEAK_MS, data: { usage: { inputTokens: 1_000_000, cacheReadTokens: 1_000_000, outputTokens: 1_000 } } },
+] as unknown as SessionEvent[]
+
+/** 插件注册通道的持久化替身：单会话、单次 commandcode 调用。 */
+const registeredChannelPersistenceDouble = {
+  name: 'test-billing-persistence',
+  apply(ctx: Context): void {
+    ctx.provide('sessionPersistence', {
+      list: async () => [{ id: 's1' as SessionId }],
+      readFrom: async () => ({ meta: { id: 's1' as SessionId }, events: REGISTERED_CHANNEL_EVENTS }),
+    } as unknown as SessionPersistence)
+  },
+}
+
+/** llm 服务替身：扮演宿主注册表——已注册 adapter 的路由清单（issue #91 的读取来源）。 */
+const llmRegistryDouble = {
+  name: 'test-billing-llm',
+  apply(ctx: Context): void {
+    ctx.provide('llm', {
+      listProviders: () => [{ id: 'commandcode', name: 'Command Code' }, { id: 'deepseek', name: 'DeepSeek' }],
+    })
+  },
+}
+
 /** credentials 能力替身：任何引用都解析不到（余额走 unconfigured，不触网）。 */
 const credentialsDouble = {
   name: 'test-billing-credentials',
   apply(ctx: Context): void {
     ctx.provide('credentials', {
       resolve: async () => undefined,
+    } as unknown as CredentialProvider)
+  },
+}
+
+/** credentials 能力替身（可解析）：任何引用都解析出同一个假 key——余额上游
+ *  替身据此给出真实余额行（issue #104：对账路径需要可对账的官方余额行）。 */
+const resolvedCredentialsDouble = {
+  name: 'test-billing-credentials',
+  apply(ctx: Context): void {
+    ctx.provide('credentials', {
+      resolve: async () => ({ value: 'sk-test-key' }),
     } as unknown as CredentialProvider)
   },
 }
@@ -123,6 +180,25 @@ const settingsDouble = {
   },
 }
 
+/** settings 能力替身（新世代，issue #80）：模拟宿主 0.1.7+ 的 SettingsForms——
+ *  register 已移除、只剩 describe/update 表单面；update 记录调用供断言写回寻址。
+ *  update 按宿主真实契约依赖 this.write（服务类方法），防止实现裸摘函数引用脱绑 this。 */
+function liveSettingsDouble(onUpdate: (ns: string, patch: Record<string, unknown>) => void) {
+  return {
+    name: 'test-billing-settings-live',
+    apply(ctx: Context): void {
+      ctx.provide('settings', {
+        describe: () => [],
+        write: () => {},
+        update(this: { write?: unknown }, ns: string, patch: Record<string, unknown>) {
+          if (typeof this?.write !== 'function') throw new TypeError('this.write is not a function')
+          onUpdate(ns, patch)
+        },
+      } as unknown as SettingsProvider)
+    },
+  }
+}
+
 /** Write the four-row cordis.yml, then boot it through the real Loader. */
 async function loadComposition(): Promise<Context> {
   return loadCompositionWith({})
@@ -130,8 +206,29 @@ async function loadComposition(): Promise<Context> {
 
 /** 参数化组装：默认用正常 persistence；`corrupt` 时注入 readFrom 抛错的替身，
  *  `slow` 时注入 list 延迟 3 秒的替身；`statsPath` 写入配置指向回退快照文件
- * （聚合失败/超预算时走该文件）。 */
-async function loadCompositionWith(options: { corrupt?: boolean; slow?: boolean; statsPath?: string } = {}): Promise<Context> {
+ * （聚合失败/超预算时走该文件）；`omitPersistPaths` 省略三个持久化路径——
+ * 配合 vi.stubEnv('DSH_HOME', …) 验证默认路径跟随宿主 harness home（issue #52）；
+ * `settings: 'live'` 换新世代 settings 替身（issue #80），`entryId`/`entryConfig`
+ * 给插件条目写显式 id 与追加 config 行（无 id 条目会拿随机 id，无法断言写回寻址）。 */
+async function loadCompositionWith(options: {
+  corrupt?: boolean
+  slow?: boolean
+  statsPath?: string
+  omitPersistPaths?: boolean
+  settings?: 'legacy' | 'live'
+  entryId?: string
+  entryConfig?: string[]
+  onUpdate?: (ns: string, patch: Record<string, unknown>) => void
+  /** 换用「插件注册通道」的会话日志替身（issue #91）。 */
+  registeredChannel?: boolean
+  /** 是否提供扮演宿主 llm 注册表的 `llm` 服务（缺省不提供＝旧宿主/服务缺失）。 */
+  llmRegistry?: boolean
+  /** credentials 替身：'unresolved'（默认，余额走 unconfigured）/ 'resolved'（可解析）。 */
+  credentials?: 'unresolved' | 'resolved'
+  /** 余额上游替身：fetch 桩回答 DeepSeek 官方余额接口（issue #104）。 */
+  balanceUpstream?: boolean
+} = {}): Promise<Context> {
+  balanceUpstreamEnabled = options.balanceUpstream === true
   root = await mkdtemp(join(tmpdir(), 'dsh-usage-billing-'))
   const configPath = join(root, 'cordis.yml')
   await writeFile(configPath, [
@@ -140,17 +237,29 @@ async function loadCompositionWith(options: { corrupt?: boolean; slow?: boolean;
     "    host: '127.0.0.1'",
     '    port: 0',
     "- name: 'virtual:test-billing-persistence'",
+    ...(options.llmRegistry === true ? ["- name: 'virtual:test-billing-llm'"] : []),
     "- name: 'virtual:test-billing-credentials'",
-    "- name: 'virtual:test-billing-settings'",
-    "- name: '@kenz1117/dsh-ui-usage-billing'",
+    `- name: 'virtual:test-billing-settings${options.settings === 'live' ? '-live' : ''}'`,
+    // 显式 id 与 name 必须是同一个列表项（name 用 2 空格缩进续行），拆成两行
+    // 会生成一个无 name 的空条目导致 import 失败。
+    ...(options.entryId === undefined ? ["- name: '@kenz1117/dsh-ui-usage-billing'"] : ["- id: 'usage-billing-test'", "  name: '@kenz1117/dsh-ui-usage-billing'"]),
     '  config:',
     '    monthlyBudget: 100',
+    // 组合测试验证的是完整折叠管线（聚合内容/快照兜底/预算回落/余额不等待），
+    // 全部是 full 模式语义——关掉默认 20s 冷phase（issue #105，单元层在
+    // aggregate-replay-gate.spec.ts 覆盖），否则路由回账本轻文档、断言全空。
+    '    replayDelayMs: 0',
+    // 追加的 config 行统一补 4 空格缩进，调用方只写裸字段行。
+    ...(options.entryConfig ?? []).map(line => `    ${line}`),
     // 隔离持久化路径：快照/账本/对账基准都写入本测试临时目录，避免读/写
     // 宿主家目录下的使用统计与账本等真实持久化数据（由宿主服务运行产生，
-    // 测试硬编码读取会导致断言污染值而失败）。
-    `    snapshotPath: '${join(root, 'usage-stats.json')}'`,
-    `    ledgerPath: '${join(root, 'usage-ledger.json')}'`,
-    `    reconcilePath: '${join(root, 'usage-reconcile.json')}'`,
+    // 测试硬编码读取会导致断言污染值而失败）。omitPersistPaths 用例必须先
+    // stub DSH_HOME，默认根才落在临时目录而不碰真实 ~/.dsh。
+    ...(options.omitPersistPaths ? [] : [
+      `    snapshotPath: '${join(root, 'usage-stats.json')}'`,
+      `    ledgerPath: '${join(root, 'usage-ledger.json')}'`,
+      `    reconcilePath: '${join(root, 'usage-reconcile.json')}'`,
+    ]),
     ...(options.statsPath === undefined ? [] : [`    statsPath: '${options.statsPath}'`]),
     '',
   ].join('\n'))
@@ -161,9 +270,21 @@ async function loadCompositionWith(options: { corrupt?: boolean; slow?: boolean;
   context.loader.builtins.include = Include
   const modules = new Map<string, unknown>([
     ['@deepseek-ai/dsh-host-webserver', HttpServer],
-    ['virtual:test-billing-persistence', options.slow ? slowPersistenceDouble : options.corrupt ? corruptPersistenceDouble : persistenceDouble],
-    ['virtual:test-billing-credentials', credentialsDouble],
-    ['virtual:test-billing-settings', settingsDouble],
+    [
+      'virtual:test-billing-persistence',
+      options.slow
+        ? slowPersistenceDouble
+        : options.corrupt
+          ? corruptPersistenceDouble
+          : options.registeredChannel === true
+            ? registeredChannelPersistenceDouble
+            : persistenceDouble,
+    ],
+    ...(options.llmRegistry === true ? [['virtual:test-billing-llm', llmRegistryDouble] as const] : []),
+    ['virtual:test-billing-credentials', options.credentials === 'resolved' ? resolvedCredentialsDouble : credentialsDouble],
+    ...(options.settings === 'live'
+      ? [['virtual:test-billing-settings-live', liveSettingsDouble(options.onUpdate ?? (() => {}))] as const]
+      : [['virtual:test-billing-settings', settingsDouble] as const]),
     ['@kenz1117/dsh-ui-usage-billing', UsageBilling],
   ])
   context.loader.internal = {
@@ -206,6 +327,20 @@ async function postClaim(port: number, key: string): Promise<{ status: number; j
   }
 }
 
+/** 等待文件出现：账本/快照在 aggregateOnce 内 await 写入，通常早于响应返回；
+ *  小轮询只容忍文件系统可见性时序，不改变断言语义。 */
+async function pollForFile(path: string, attempts = 20): Promise<boolean> {
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      await readFile(path)
+      return true
+    } catch {
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+  }
+  return false
+}
+
 describe('usage-billing real Loader composition', () => {
   it('serves aggregated usage, injected budget, degraded pricing, and releases routes on disposal', { timeout: 60_000 }, async () => {
     const loaded = await loadComposition()
@@ -234,10 +369,31 @@ describe('usage-billing real Loader composition', () => {
     expect(doc.bySession).toHaveLength(1)
     expect(doc.bySession[0]).toMatchObject({ id: 's1', calls: 2 })
 
-    // pricing：外网被拒绝，降级为内置定价文档。
+    // pricing：外网被拒绝，降级为内置定价文档；syncedAt 记录这次已完成的同步动作。
     const pricing = await getJson(port, '/api/billing/pricing')
     expect(pricing.status).toBe(200)
-    expect((pricing.json as { source: string }).source).toBe('builtin')
+    const pricingDoc = pricing.json as { source: string; syncedAt: number }
+    expect(pricingDoc.source).toBe('builtin')
+    expect(pricingDoc.syncedAt).toBeGreaterThan(0)
+
+    // 手动同步端点：回环 POST 放行，返回新目录与不早于上次的同步时间；
+    // GET 拒绝（405）、跨站 Origin 拒绝（403，写防护与 usage-tool 开关同规则）。
+    const refresh = await fetch(`http://127.0.0.1:${String(port)}/api/billing/pricing/refresh`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${String(port)}` },
+      body: '{}',
+    })
+    expect(refresh.status).toBe(200)
+    const refreshed = JSON.parse(await refresh.text()) as { source: string; syncedAt: number }
+    expect(refreshed.source).toBe('builtin')
+    expect(refreshed.syncedAt).toBeGreaterThanOrEqual(pricingDoc.syncedAt)
+    expect((await getJson(port, '/api/billing/pricing/refresh')).status).toBe(405)
+    const crossSite = await fetch(`http://127.0.0.1:${String(port)}/api/billing/pricing/refresh`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: 'http://evil.example' },
+      body: '{}',
+    })
+    expect(crossSite.status).toBe(403)
 
     // usage_stats 工具开关节点接口：组合 base 缺省关闭 → 返回 enabled=false。
     const usageTool = await getJson(port, '/api/billing/usage-tool')
@@ -269,8 +425,43 @@ describe('usage-billing real Loader composition', () => {
     await billingEntry!.fiber?.dispose()
     expect((await getJson(port, '/api/billing/usage-stats')).status).toBe(404)
     expect((await getJson(port, '/api/billing/pricing')).status).toBe(404)
+    expect((await getJson(port, '/api/billing/pricing/refresh')).status).toBe(404)
     expect((await getJson(port, '/api/billing/balance')).status).toBe(404)
     expect((await getJson(port, '/api/billing/notify-claim')).status).toBe(404)
+  })
+
+  it('projects the usage-tool toggle through the new-generation settings model (issue #80)', { timeout: 60_000 }, async () => {
+    // 新世代组合：settings 替身没有 register（宿主 0.1.7+ 形态），条目 config
+    // 显式 enableUsageStatsTool: true——经真实 Loader 的 Config schema 校验，
+    // apply 收到的是 volatile 引用而非普通布尔。
+    const updateCalls: { ns: string; patch: Record<string, unknown> }[] = []
+    const loaded = await loadCompositionWith({
+      settings: 'live',
+      entryId: 'usage-billing-test',
+      entryConfig: ['enableUsageStatsTool: true'],
+      onUpdate: (ns, patch) => { updateCalls.push({ ns, patch }) },
+    })
+    const port = loaded.webServer.port
+
+    // GET：读 Config 校验后的 volatile 引用，反映 yml 配置的 true。
+    const initial = await getJson(port, '/api/billing/usage-tool')
+    expect(initial.status).toBe(200)
+    expect((initial.json as { enabled: boolean }).enabled).toBe(true)
+
+    // POST 写回：ns 是本条目显式 id（fiber.entry 自发现），补丁只含布尔字段。
+    const posted = await fetch(`http://127.0.0.1:${String(port)}/api/billing/usage-tool`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${String(port)}` },
+      body: JSON.stringify({ enabled: false }),
+    })
+    expect(posted.status).toBe(200)
+    expect(await posted.json()).toEqual({ ok: true, enabled: false })
+    expect(updateCalls).toEqual([{ ns: 'usage-billing-test', patch: { enableUsageStatsTool: false } }])
+
+    // GET 仍读引用：替身未提交（真实宿主由 configEditor 提交），值保持 true——
+    // 证明响应不是 POST 回显，而是读 Config 解析出的引用。
+    const after = await getJson(port, '/api/billing/usage-tool')
+    expect((after.json as { enabled: boolean }).enabled).toBe(true)
   })
 
   it('claims notification keys first-come-first-served across instances (issue #44)', { timeout: 60_000 }, async () => {
@@ -311,6 +502,27 @@ describe('usage-billing real Loader composition', () => {
     await rm(snapshotDir, { recursive: true, force: true })
   })
 
+  it('follows DSH_HOME for the default persistence root (issue #52)', { timeout: 60_000 }, async () => {
+    // 默认路径跟随宿主 harness home：config 未显式指定三个持久化路径时，
+    // DSH_HOME 环境变量优先于 ~/.dsh（resolveDshHome 语义），多套隔离环境
+    // 互不污染账本 / 快照 / 对账基准。stub 必须先于插件加载（apply 读 env）。
+    const home = await mkdtemp(join(tmpdir(), 'dsh-usage-billing-home-'))
+    vi.stubEnv('DSH_HOME', home)
+    try {
+      const loaded = await loadCompositionWith({ omitPersistPaths: true })
+      const port = loaded.webServer.port
+      const stats = await getJson(port, '/api/billing/usage-stats')
+      expect(stats.status).toBe(200)
+      expect((stats.json as { total: { calls: number } }).total.calls).toBe(2)
+      // 聚合响应返回后，账本与快照都应落在 DSH_HOME 根下（而不是 ~/.dsh）。
+      await expect(pollForFile(join(home, '.dsh-usage-ledger.json'))).resolves.toBe(true)
+      await expect(pollForFile(join(home, '.dsh-usage-stats.json'))).resolves.toBe(true)
+    } finally {
+      vi.unstubAllEnvs()
+      await rm(home, { recursive: true, force: true })
+    }
+  })
+
   it('serves the recent snapshot while a slow first fold keeps running in the background', { timeout: 60_000 }, async () => {
     // stale-while-revalidate（重度用户启动卡顿修复）：全量折叠要 3 秒（远超
     // 1.5s 响应预算）时，路由必须快速回最近快照而不是把请求（和宿主单进程的
@@ -343,5 +555,125 @@ describe('usage-billing real Loader composition', () => {
     const fresh = await getJson(port, '/api/billing/usage-stats')
     expect((fresh.json as { total: { calls: number } }).total.calls).toBe(2)
     await rm(snapshotDir, { recursive: true, force: true })
+  })
+
+  it('serves the last completed aggregation when every fold exceeds the response budget', { timeout: 60_000 }, async () => {
+    // issue #103：折叠一直慢于响应预算时，落盘快照（节流 5 分钟）会落后好几分钟，
+    // 面板于是把「上一次计算」的值当最新值读（重命名前的会话标题等）。
+    // 回落顺序：内存里最近一次**已完成**的聚合文档 → 落盘快照；两者都带
+    // staleSnapshot 标记，面板据此提示「数据来自上一次计算」。
+    const snapshotDir = await mkdtemp(join(tmpdir(), 'dsh-usage-billing-snap-'))
+    const statsFile = join(snapshotDir, 'usage-stats.snapshot.json')
+    await writeFile(statsFile, JSON.stringify({
+      version: 3,
+      source: 'session-logs',
+      total: { calls: 42, input: 1, output: 1, cacheHit: 0, cacheMiss: 1, cost: 0 },
+      byModel: {}, byDay: {}, byDayModels: {}, bySession: [],
+    }))
+    const loaded = await loadCompositionWith({ slow: true, statsPath: statsFile })
+    const port = loaded.webServer.port
+
+    // 首轮：尚无已完成的聚合 → 回落落盘快照，并标记为滞后数据。
+    const first = await getJson(port, '/api/billing/usage-stats')
+    expect((first.json as { total: { calls: number } }).total.calls).toBe(42)
+    expect((first.json as { staleSnapshot?: boolean }).staleSnapshot).toBe(true)
+
+    // 等后台折叠完成（此后内存里有「最近一次完成的聚合文档」）。
+    const liveSnapshotPath = join(root!, 'usage-stats.json')
+    await vi.waitFor(async () => {
+      const doc = JSON.parse(await readFile(liveSnapshotPath, 'utf8')) as { total?: { calls?: number } }
+      expect(doc.total?.calls).toBe(2)
+    }, { timeout: 15_000, interval: 200 })
+
+    // 聚合 TTL（5s）过期后再请求：新的一轮折叠仍然慢 → 超预算 → 回落内存文档
+    // （真实值 2 次调用），而不是落后 5 分钟的落盘快照（42 次）。
+    await new Promise(resolve => setTimeout(resolve, 6_000))
+    const second = await getJson(port, '/api/billing/usage-stats')
+    const doc = second.json as { total: { calls: number }; staleSnapshot?: boolean }
+    expect(doc.total.calls).toBe(2)
+    expect(doc.staleSnapshot).toBe(true)
+    await rm(snapshotDir, { recursive: true, force: true })
+  })
+
+  it('serves the balance without waiting for a full fold (issue #104)', { timeout: 60_000 }, async () => {
+    // 根因：余额刷新里 await 一次全量聚合——重度用户（数百会话、GB 级日志）
+    // 的一次折叠要几十秒，响应被挂在折叠上（报告者实测 45.9s，最长 >60s）。
+    // 浏览器对同源最多 6 条并发连接，多标签页各挂一条即占满连接池，宿主自己的
+    // 资源请求排队——用户看到的是「整个 DSH 界面卡死」。
+    // 修法：对账基线改读「最近一次**已完成**的聚合文档」，余额响应不再等折叠。
+    const loaded = await loadCompositionWith({ slow: true, credentials: 'resolved', balanceUpstream: true })
+    const port = loaded.webServer.port
+
+    // 先跑一轮聚合：usage-stats 请求触发后台折叠（3s），等它落盘即内存里有了
+    // 「最近一次完成的聚合文档」（对账基线的数据源）。
+    await getJson(port, '/api/billing/usage-stats')
+    const liveSnapshotPath = join(root!, 'usage-stats.json')
+    await vi.waitFor(async () => {
+      const doc = JSON.parse(await readFile(liveSnapshotPath, 'utf8')) as { total?: { calls?: number } }
+      expect(doc.total?.calls).toBe(2)
+    }, { timeout: 15_000, interval: 200 })
+
+    // 等聚合 TTL（5s）过期：此时若余额刷新仍去 await 一次聚合，就会触发新一轮
+    // 3 秒的折叠——正是报告者遇到的「余额响应 45s+」。
+    await new Promise(resolve => setTimeout(resolve, 6_000))
+
+    // 余额请求必须自己就绪：不等新的一轮折叠（3s），否则浏览器连接被长期占住。
+    const startedAt = Date.now()
+    const balance = await getJson(port, '/api/billing/balance')
+    const elapsed = Date.now() - startedAt
+    expect(balance.status).toBe(200)
+    expect(elapsed).toBeLessThan(2_800)
+    const doc = balance.json as {
+      balances: { provider: string; totalBalance?: number }[]
+      reconcile?: { kind?: string }
+    }
+    expect(doc.balances.find(row => row.provider === 'deepseek')?.totalBalance).toBe(100)
+    // 对账路径确实跑到了（基线取自内存里最近一次完成的聚合文档）。
+    expect(doc.reconcile?.kind).toBe('baseline')
+  })
+})
+
+describe('plugin-registered adapter channels (issue #91)', () => {
+  it('homes them to direct:<provider> at the official catalog price via the host llm registry', { timeout: 60_000 }, async () => {
+    // 真实组装（Loader + webserver + 被测插件）：日志里 provider=commandcode 的调用，
+    // 宿主 llm 注册表报告该路由已注册 adapter → 归位 direct:commandcode，按官方目录键
+    // flash 的低谷价计费。1.4.31 用属性访问 ctx.llm（服务不在 inject 里）读注册表，
+    // 异常被吞掉后退化成空集合 → 本用例会得到 unknown + 费用 0。
+    const loaded = await loadCompositionWith({ registeredChannel: true, llmRegistry: true })
+    const port = loaded.webServer.port
+    const stats = await getJson(port, '/api/billing/usage-stats')
+    expect(stats.status).toBe(200)
+    const doc = stats.json as {
+      bySite: Record<string, { calls: number; cost: number }>
+      byModel: Record<string, { calls: number; cost: number }>
+    }
+    const channel = doc.bySite['direct:commandcode']
+    expect(channel).toBeDefined()
+    expect(channel?.calls).toBe(1)
+    // miss 1M×1 + hit 1M×0.02 + out 1K×4/1e6 = 1.024（官方 CNY 低谷价，无汇率）。
+    expect(channel?.cost).toBeCloseTo(1.024, 6)
+    expect(doc.bySite.unknown).toBeUndefined()
+    expect(doc.byModel.flash).toMatchObject({ calls: 1 })
+  })
+
+  it('keeps the unknown bucket with fork estimates and warns when the registry cannot be read', { timeout: 60_000 }, async () => {
+    // 负向对照：宿主没有 llm 注册表（服务缺失）时，通道仍按 issue #82 的 unknown 口径
+    // 记 0，但必须留下可观察信号——静默退化正是 1.4.31 事故无法自查的原因。
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const loaded = await loadCompositionWith({ registeredChannel: true })
+      const port = loaded.webServer.port
+      const stats = await getJson(port, '/api/billing/usage-stats')
+      expect(stats.status).toBe(200)
+      const doc = stats.json as { bySite: Record<string, { calls: number; cost: number }> }
+      expect(doc.bySite.unknown).toMatchObject({ calls: 1 })
+      expect(doc.bySite.unknown?.cost).toBeGreaterThan(0)
+      expect(doc.bySite['direct:commandcode']).toBeUndefined()
+      const logged = warn.mock.calls.flat().map(String).join(' ')
+      expect(logged).toMatch(/llm registry|llm service is not registered/)
+      expect(logged).toMatch(/issue #91/)
+    } finally {
+      warn.mockRestore()
+    }
   })
 })

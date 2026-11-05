@@ -75,7 +75,7 @@ describe('queryRelayQuota', () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({
       ok: true, status: 200, json: async () => ({ balance: 10.5, quota: 100, used_quota: 30 }),
     })))
-    const row = await queryRelayQuota(ctx, { route: 'r', baseURL: 'https://relay.example.com', apiKeyEnv: 'STUB_KEY' })
+    const row = await queryRelayQuota(ctx, { route: 'r', baseURL: 'https://relay.example.com', apiKeyRefs: ['STUB_KEY'] })
     expect(row).toMatchObject({ route: 'r', origin: 'https://relay.example.com', kind: 'sub2api', status: 'ok', balance: 10.5 })
     expect(row.windows?.[0]).toMatchObject({ usedPercent: 30 })
   })
@@ -89,7 +89,7 @@ describe('queryRelayQuota', () => {
         : { ok: true, status: 200, json: async () => ({ data: { ratio: 0.5 } }) }
     }))
     // 用不同 origin 隔离缓存：同 origin 的指纹识别会命中缓存，影响后续用例。
-    const row = await queryRelayQuota(ctx, { route: 'r2', baseURL: 'https://relay2.example.com', apiKeyEnv: 'STUB_KEY' })
+    const row = await queryRelayQuota(ctx, { route: 'r2', baseURL: 'https://relay2.example.com', apiKeyRefs: ['STUB_KEY'] })
     expect(row).toMatchObject({ kind: 'new-api', status: 'ok', origin: 'https://relay2.example.com' })
     expect(row.windows?.[0]).toMatchObject({ usedPercent: 50 })
   })
@@ -98,7 +98,7 @@ describe('queryRelayQuota', () => {
     const ctx = fakeContext(undefined)
     const fetchSpy = vi.fn()
     vi.stubGlobal('fetch', fetchSpy)
-    const row = await queryRelayQuota(ctx, { route: 'r', baseURL: 'https://relay.example.com', apiKeyEnv: 'STUB_KEY' })
+    const row = await queryRelayQuota(ctx, { route: 'r', baseURL: 'https://relay.example.com', apiKeyRefs: ['STUB_KEY'] })
     expect(row).toMatchObject({ status: 'not-configured' })
     expect(fetchSpy).not.toHaveBeenCalled()
   })
@@ -107,7 +107,7 @@ describe('queryRelayQuota', () => {
     const ctx = fakeContext('k')
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 401 })))
     // 用不同 origin 隔离缓存。
-    const row = await queryRelayQuota(ctx, { route: 'r3', baseURL: 'https://relay3.example.com', apiKeyEnv: 'STUB_KEY' })
+    const row = await queryRelayQuota(ctx, { route: 'r3', baseURL: 'https://relay3.example.com', apiKeyRefs: ['STUB_KEY'] })
     expect(row).toMatchObject({ status: 'unauthorized' })
   })
 
@@ -115,7 +115,45 @@ describe('queryRelayQuota', () => {
     const ctx = fakeContext('k')
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404 })))
     // 用不同 origin 隔离缓存。
-    const row = await queryRelayQuota(ctx, { route: 'r4', baseURL: 'https://relay4.example.com', apiKeyEnv: 'STUB_KEY' })
+    const row = await queryRelayQuota(ctx, { route: 'r4', baseURL: 'https://relay4.example.com', apiKeyRefs: ['STUB_KEY'] })
     expect(row).toMatchObject({ kind: 'unknown', status: 'unavailable' })
+  })
+
+  it('resolves the key from a conventional ref when no explicit apiKeyEnv exists (new-host shape)', async () => {
+    // 新版宿主把路由 key 存成凭据 refs（<ROUTE>_API_KEY 约定名），路由配置里没有
+    // apiKeyEnv——探测应按约定 ref 找回 key 并正常读出额度。
+    const ctx = {
+      credentials: {
+        resolve: vi.fn(async (ref: unknown) => {
+          return ref === 'MYRELAY_API_KEY' ? { value: 'sk-relay' } : undefined
+        }),
+      },
+    } as never
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true, status: 200, json: async () => ({ balance: 7.5 }),
+    })))
+    const row = await queryRelayQuota(ctx, { route: 'myrelay', baseURL: 'https://relay5.example.com', apiKeyRefs: ['MYRELAY_API_KEY'] })
+    expect(row).toMatchObject({ kind: 'sub2api', status: 'ok', balance: 7.5 })
+  })
+
+  it('falls through an unresolvable explicit ref to the conventional ref', async () => {
+    const ctx = {
+      credentials: {
+        resolve: vi.fn(async (ref: unknown) => {
+          return ref === 'R6_API_KEY' ? { value: 'sk-convention' } : undefined
+        }),
+      },
+    } as never
+    const fetchSpy = vi.fn(async () => ({
+      ok: true, status: 200, json: async () => ({ balance: 1 }),
+    }))
+    vi.stubGlobal('fetch', fetchSpy)
+    const row = await queryRelayQuota(ctx, { route: 'r6', baseURL: 'https://relay6.example.com', apiKeyRefs: ['GONE_REF', 'R6_API_KEY'] })
+    expect(row).toMatchObject({ status: 'ok', balance: 1 })
+    // 发出的请求带的是约定 ref 解析出的 key。
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'https://relay6.example.com/v1/usage',
+      expect.objectContaining({ headers: expect.objectContaining({ authorization: 'Bearer sk-convention' }) }),
+    )
   })
 })

@@ -13,16 +13,16 @@
  * dashboard shows zeros, never fabricated samples.
  */
 
-import { mkdir, readFile } from 'node:fs/promises'
+import { lstat, mkdir, readFile, rm } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
-import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
+// 引入 loader 的声明合并：loader/volatile-update 事件与 Fiber.entry 属性。
+import type {} from '@deepseek-ai/cordis-plugin-loader'
 // Type-only: merges the ctx.sessionPersistence service declaration.
 import type {} from '@deepseek-ai/dsh-session-persistence'
-import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session/types'
-import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session/types'
+import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session/types'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 // Type-only: merges the ctx.settings / ctx.credentials service declarations.
 import type {} from '@deepseek-ai/dsh-settings'
@@ -32,19 +32,53 @@ import type {} from '@deepseek-ai/dsh-tools'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { writeFileAtomic, withFileLock } from '@deepseek-ai/dsh-atomic-write'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import type { CredentialProvider } from '@deepseek-ai/dsh-credentials'
-import type { SettingsProvider, SettingsScope } from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
-import { createUsageAggregator, dayStamp, type UsageLedgerStore, type UsagePersistence } from './aggregate.ts'
-import { applyLivePricing, applyUserModelAliases, formatMoney, formatTokens } from './client/pricing.ts' 
+import { createUsageAggregator, dayStamp, DEFAULT_SUBSCRIPTION_PROVIDERS, mergeUsageLedgerDocuments, sessionLogOffsetOf, sumSiteBuckets, type UsageLedgerDocument, type UsageLedgerStore, type UsagePersistence } from './aggregate.ts'
+import { applyBuiltinCatalog, applyLivePricing, applyUserModelAliases, formatMoney, formatTokens } from './client/pricing.ts'
+import { BUILTIN_MODEL_CATALOG, BUILTIN_MODEL_KEY_ALIASES } from './builtin-catalog.ts'
 import { queryBalances, queryCustomBalances } from './balance.ts'
 import { queryDeclaredEndpoints } from './declarative.ts'
 import { reconcileBalanceDelta, type BalanceRef, type ReconcileEvent } from './reconcile.ts'
 import { fetchLivePricing } from './pricing-fetch.ts'
-import type { CustomBalanceConfig, DeclaredEndpointConfig, LivePricing, RelayQuota, SubscriptionPlanConfig, SubscriptionQuota } from './pricing-shared.ts'
-import { collectSubscriptions, EMPTY_SUBSCRIPTION_KEYS, identifySubscriptionPlans, type IdentifiedSubscriptionPlan, type SubscriptionKeys } from './subscriptions.ts'
+import type { LivePricing, RelayQuota, SubscriptionQuota } from './pricing-shared.ts'
+import type { UsageBillingConfig } from './config.ts'
+import { classifyMiniMaxPlanRoutes, collectSubscriptions, identifySubscriptionPlans, parseOpenCodeAuthDocument, resolveSubscriptionAccess, type IdentifiedSubscriptionPlan, type SubscriptionKeys } from './subscriptions.ts'
 import { isOfficialBaseUrl, queryRelayQuotas, type RelayRoute } from './relay.ts'
+import { firstResolvedRef, routeKeyRefCandidates } from './route-keys.ts'
 import { planTypeOf, subscriptionFeeCnyOf } from './client/plan-knowledge.ts'
+import { swallowed } from './silent.ts'
+// v1.5.2 抽出：共享 loopback 守卫 + 9 条 HTTP 路由的注册块各自独立成文件，apply() 收缩为装配器。
+import { normalizeTrustedHosts } from './guard.ts'
+import { registerNotifyClaimRoute } from './routes/notify-claim.ts'
+import { registerPricingRoutes } from './routes/pricing.ts'
+import { registerBalanceRoute } from './routes/balance.ts'
+import { registerUsageToolRoute } from './routes/usage-tool.ts'
+import { registerSubscriptionsRoute } from './routes/subscriptions.ts'
+import { registerRelayQuotasRoute } from './routes/relay-quotas.ts'
+import { registerUsageStatsRoute } from './routes/usage-stats.ts'
+import { registerTaskQueueRoute } from './routes/task-queue.ts'
+import { TaskQueueEngine, type TaskQueueController } from './task-queue.ts'
+
+// Re-export guard helpers for backward compat with tests/clients that import
+// from src/index.ts (e.g. tests/trusted-hosts.spec.ts).
+export { guardLoopback, isLoopbackOrigin, isLoopbackHost, isLoopbackPeer, hostNameOf, normalizeTrustedHosts } from './guard.ts'
+
+// 宿主 0.1.7 重构 dsh-settings：SettingsProvider/SettingsScope 类型不再导出（服务类
+// 更名 SettingsForms，describe 表单面保留；register 从运行时移除，命名空间持久化
+// 改走 plugin config 投影）。插件运行时横跨 0.1.2（register 可用）与 0.1.7+（仅
+// describe）两代宿主，按结构本地声明，不 import 任何世代的宿主类型名。
+/** 设置服务的读取面：两代宿主运行时都提供 describe（条目键为 profile entry id）。 */
+interface SettingsReader {
+  describe(options?: { redactSecrets?: boolean }): readonly { ns: string; value: unknown }[]
+}
+
+/** 旧世代（≤0.1.6 宿主）`settings.register` 返回的命名空间 scope。 */
+interface SettingsNamespaceScope<T> {
+  get(): T
+  update(patch: Partial<T>): Promise<void>
+}
 import {
   BILLING_SETTINGS_NAMESPACE,
   DEFAULT_ENABLE_USAGE_STATS_TOOL,
@@ -52,66 +86,10 @@ import {
   type UsageBillingSettings,
 } from './client/usage-billing-settings.ts'
 
-/** Peer 地址是否为回环（本地）。回环防护：本插件的端点只供本机浏览器用，
- *  局域网/远端请求一律拒绝，避免面板数据（含中转站 origin 与余额）外泄。 */
-function isLoopbackPeer(req: IncomingMessage): boolean {
-  const address = req.socket.remoteAddress
-  if (address === undefined) return false
-  // IPv4 127.0.0.0/8、IPv6 ::1、以及 IPv4-mapped IPv6（::ffff:127.x.x.x）。
-  return address === '::1' || address.startsWith('127.') || address.startsWith('::ffff:127.')
-}
+/** 设置命名空间 id：register 已从 0.1.7 运行时移除，按 string 探测调用，宿主 branded 名不再引用。 */
+type NamespaceArg = string
 
-/** 校验 Host 头是本机回环（精确 127.0.0.0/8 / ::1 / localhost 或空，供 curl 不带 Host 的极简请求）。
- *  拒绝 `127.0.0.1.attacker.com` 这类以 `127.` 开头但解析到外部的 DNS rebinding 域名：
- *  只用 `startsWith('127.')` 会被它穿透，必须精确匹配回环 IP 的字面量。 */
-function isLoopbackHost(req: IncomingMessage): boolean {
-  const host = req.headers.host
-  if (host === undefined || host === '') return true
-  const name = host.split(':')[0]
-  // 精确匹配：localhost、IPv6 回环、或字面量 IPv4 回环地址（127.0.0.0/8）。
-  return name === 'localhost' || name === '::1' || (name !== undefined && /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(name))
-}
-
-/** 校验 Origin 头是否回环（写操作用，防止跨站表单/fetch 改写设置）。Origin 缺失
- *  （curl 或同源 fetch 不带）视为放行，交给下方的 Content-Type 校验兜底；Origin 存在
- *  但主机非回环则拒绝——跨站脚本发起的写请求必带攻击者域名的 Origin。 */
-function isLoopbackOrigin(origin: string | undefined): boolean {
-  if (origin === undefined || origin === '') return true
-  try {
-    const host = new URL(origin).hostname
-    return host === 'localhost' || host === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)
-  } catch {
-    return false
-  }
-}
-
-/**
- * 回环防护守卫：仅接受回环 GET 请求（peer socket 地址 + Host 头同时校验）。
- * 不满足时返回 403 并结束响应；调用方在 handler 顶部调用，返回 false 即已拒绝。
- * @param req - 当前请求。
- * @param res - 当前响应。
- * @returns 是否放行；false = 已拒绝并结束响应。
- */
-export function guardLoopback(req: IncomingMessage, res: ServerResponse): boolean {
-  // GET 读取 + POST（usage-tool 的开关写入）都在回环内允许；其他方法一律拒绝。
-  const methodOk = req.method === 'GET' || req.method === 'POST'
-  if (!methodOk || !isLoopbackPeer(req) || !isLoopbackHost(req)) {
-    res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' })
-    res.end(JSON.stringify({ error: 'forbidden: loopback only' }))
-    return false
-  }
-  return true
-}
-
-/**
- * 设置命名空间校验（上游 alpha.1 `settingsNamespace` 的本地化，issue #28）：
- * alpha.2 起该函数不再从 `@deepseek-ai/dsh-settings` 导出，但上游内部保留
- * 同一 pattern——本地按同一规则校验，预览宿主 API 漂移不再影响插件装载。
- */
 const SETTINGS_NAMESPACE_PATTERN = /^[a-z][a-z0-9-]*$/
-
-/** 从宿主 `SettingsProvider.register` 签名反推命名空间参数类型（跟随宿主版本，不 import 已移除的 branded 名）。 */
-type NamespaceArg = Parameters<SettingsProvider['register']>[0]
 
 /** 校验并透过合法命名空间 id；非法值 fail-loud（与上游原行为一致）。 */
 function validateSettingsNamespace(value: string): NamespaceArg {
@@ -129,68 +107,56 @@ const UsageBillingSettingsSchema: z<UsageBillingSettings> = z.object({
   [ENABLE_USAGE_STATS_TOOL_FIELD]: z.boolean().default(DEFAULT_ENABLE_USAGE_STATS_TOOL),
 })
 
-/** Plugin configuration. */
-export interface UsageBillingConfig {
-  /** Absolute path to a `.dsh-usage-stats.json` fallback file. */
-  statsPath?: string
-  /** 统计快照的持久化路径；默认 `~/.dsh/.dsh-usage-stats.json`。
-   *  测试注入临时目录以隔离真实家目录（聚合失败回退与快照落盘都走此路径）。 */
-  snapshotPath?: string
-  /** 独立持久用量账本的绝对路径；默认 `~/.dsh/.dsh-usage-ledger.json`。
-   *  账本与会话日志解耦，因此永久删除会话不会抹掉已经观测到的用量。 */
-  ledgerPath?: string
-  /** 余额差对账基准的持久化路径；默认 `~/.dsh/.dsh-usage-reconcile.json`。 */
-  reconcilePath?: string
-  /** 订阅制（coding / token / agent plan）provider id 列表；默认 kimi-coding、xiaomi-token-plan-cn。 */
-  subscriptionProviders?: string[]
-  /** 订阅套餐额度适配器（kimi / zai / opencode-go）；默认全部内置。 */
-  subscriptionPlans?: readonly SubscriptionPlanConfig[]
-  /** 余额查询用的 DeepSeek 凭据引用（环境变量名）；默认 DEEPSEEK_API_KEY。 */
-  balanceApiKeyEnv?: string
-  /** 月度预算（人民币元）；设置后随 usage-stats 下发，仪表盘显示预算进度条。 */
-  monthlyBudget?: number
-  /** 余额不足告警阈值（人民币元）：余额低于此值时仪表盘每天提醒一次；
-      不设置则客户端按默认阈值（50 元）兜底。 */
-  lowBalanceThreshold?: number
-  /** 自定义 Provider 余额查询（任意 HTTP 端点 + extract 规则，适配 NewApi/LiteLLM 等）。 */
-  customBalances?: readonly CustomBalanceConfig[]
-  /**
-   * 声明端点（declarative endpoints）：为内置表没有的供应商自声明余额/额度接口。
-   * 绑定到某条已配置 provider 的同源地址，`fields` / `windows` 写响应里的取值路径；
-   * 安全边界（origin 绑定、单斜杠 path、只 GET、跨源重定向失败、凭据取自 apiKeyEnv）
-   * 写死在 declarative.ts。缺省空。
-   */
-  declaredEndpoints?: readonly DeclaredEndpointConfig[]
-  /** `usage_stats` 工具注入的组合 base（默认 false：不注入）；与设置命名空间同字段，
-   *  作为用户设置（设置 Tab 开关）的组合兜底。该工具占用每次请求的上下文，coding 场景多在仪表盘查看。 */
-  enableUsageStatsTool?: boolean
-  /**
-   * 联网搜索请求（`web/deepseek-search-llm-request`，日志只有请求、无用量事件）
-   * 的单次费用估算（人民币元）。这类调用直连官方 api.deepseek.com，开放平台照常
-   * 计费但本地日志无 usage，按次估值计入今日/本月费用；默认 0.02 元/次，设 0 关闭。
-   */
-  searchCallEstimateCny?: number
-  /**
-   * 历史路由别名（旧 provider 路由名 → 当前路由名）：改过名/删除过的路由，其
-   * 历史用量原会落「未知路由」桶且站点/订阅/官方判定全部失效；配置别名后按
-   * 目标路由归位。例：`{ "deepseek-official": "tencent", "tencent-cloud": "tencent" }`。
-   */
-  routeAliases?: Record<string, string>
-  /**
-   * 用户自定义模型别名（真实日志 model id → 计费目录键）：目录外的新模型无需
-   * 等发版，配置一条别名即完成识别与计价（值必须是 MODEL_CATALOG 的既有 key，
-   * 如 `{ "hy4-preview": "hunyuan" }`）。聚合折叠与客户端渲染共用同一映射。
-   */
-  modelKeyAliases?: Record<string, string>
-}
-
+export type { UsageBillingConfig } from './config.ts'
+// ⚠️ 运行时 Config 必须从本入口 re-export（issue #98）：宿主 dsh-settings 的写回
+// 与 volatile 投影都从插件运行时模块的 `Config` 导出发现 schema；v1.6.0 拆分时
+// 退化成纯类型导致「注入用量查询」开关在 0.2.1-rc.2 上失效（No configurable
+// plugin entry）。schema 定义与详细说明见 src/config.ts。
+export { Config } from './config.ts'
+/** 实时定价的后台刷新间隔（毫秒）：汇率/模型价低频变化，6 小时一次足够。 */
 /** 实时定价的后台刷新间隔（毫秒）：汇率/模型价低频变化，6 小时一次足够。 */
 const PRICING_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000
+
+/** 启动后延迟全量折叠的默认时长（毫秒，issue #105）：冷phase内 /api/billing/*
+ *  只出账本轻文档（不读日志），到点后预热定时器照常完整折叠——UI 一加载的
+ *  轮询不再把全量折叠拉进启动关键路径。可用 config.replayDelayMs 覆盖；0 = 旧
+ *  行为（随到随折）。20 秒的取值：小账本用户只损失十几秒新鲜度，重账本用户的
+ *  启动高峰（插件加载/索引/首批会话写入）已经过去；配合聚合器的墙钟分片让出
+ *  （FOLD_SLICE_MS），折叠真跑起来时单片阻塞也被压在 ~8ms。
+ */
+const DEFAULT_REPLAY_DELAY_MS = 20_000
+
+/** 手写收窄（schemastery 不能当形状校验器，S-7）：非有限非负数字回落默认值。 */
+function readReplayDelayMs(value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return value
+  return DEFAULT_REPLAY_DELAY_MS
+}
 
 /** 订阅套餐额度缓存时长（毫秒）：上游配额 API 低频变化，5 分钟足够。 */
 const SUBSCRIPTION_CACHE_MS = 5 * 60 * 1000
 // 余额接口缓存：与订阅 / 中转站配额一致，5 分钟，避免每 30 秒后台轮询打官方余额 API。
 const BALANCE_CACHE_MS = 5 * 60 * 1000
+
+/**
+ * 余额路由的总等待预算（毫秒）：超预算立刻回上一次成功的余额（stale 标记），
+ * 刷新在后台继续。取 8s——与上游单次查询超时（FETCH_TIMEOUT_MS）对齐：上游
+ * 真的不可达时多等没有意义，先把响应还给浏览器，别占着同源连接（issue #104）。
+ */
+const BALANCE_RESPONSE_BUDGET_MS = 8_000
+
+/**
+ * 订阅 / 中转站额度路由的总等待预算（毫秒）：与余额路由同口径（issue #104）。
+ * 上游额度接口不可达时（8s 超时 × 重试 ≈ 10~16s），响应被长期挂住会占满浏览器
+ * 的同源连接池——多标签页各挂一条即让宿主自己的资源请求排队，界面整体卡死。
+ */
+const QUOTA_RESPONSE_BUDGET_MS = 8_000
+
+/**
+ * 对账基线的最大可用年龄（毫秒）：超过则「今日官方费用」偏小，用它对账会
+ * 报假漂移——此时跳过本轮对账，等后台补算完成后再恢复（issue #104）。
+ * 取 5 分钟：与 usage-stats 的 30s 轮询 + 5 分钟快照节流同一量级。
+ */
+const RECONCILE_BASIS_MAX_AGE_MS = 5 * 60 * 1000
 
 /** DeepSeek 余额查询的默认凭据引用（与 llm-deepseek 的默认引用一致）。 */
 const DEFAULT_BALANCE_API_KEY_ENV = 'DEEPSEEK_API_KEY'
@@ -201,8 +167,10 @@ const DEFAULT_BALANCE_API_KEY_ENV = 'DEEPSEEK_API_KEY'
  */
 const PACKAGE_VERSION = (createRequire(import.meta.url)('../package.json') as { version?: string }).version ?? '0.0.0'
 
-/** 统计快照的落盘节流（毫秒）：前端 30 秒轮询，快照最多每 30 秒写一次。 */
-const SNAPSHOT_INTERVAL_MS = 30_000
+/** 统计快照的落盘节流（毫秒）：快照只服务聚合失败回退与重启首屏（展示级
+ *  新鲜度即可），降到 5 分钟一次——原子写含上一版备份是两次全量 JSON 落盘，
+ *  重度用户快照上百 KB，跟随前端轮询 30 秒写一次纯属写放大。 */
+const SNAPSHOT_INTERVAL_MS = 300_000
 
 /** usage-stats 响应的等待预算（毫秒）：聚合在此预算内完成就回实时数据，
  *  超预算立即回最近快照（stale-while-revalidate），后台折叠继续跑。
@@ -226,6 +194,36 @@ function warnAuthOnce(source: string, provider: string, displayName: string): vo
   console.warn(`[usage-billing] ${displayName}（${provider}）鉴权失败：请检查 llm-pi-ai 设置中该 provider 的凭据环境变量是否正确/有效。`)
 }
 
+/** 锁等待上限：账本提交是毫秒级 read-render-commit，2s 已数倍于正常持锁时长。 */
+const LEDGER_LOCK_WAIT_MS = 2_000
+
+/**
+ * 锁年龄超过该值判为崩溃残留的孤儿锁。正常持锁是毫秒级文件提交，没有活跃
+ * writer 会合法持有 60s；库层刻意不做年龄判定（它无法假设调用方的操作时长），
+ * 本调用方知道自己操作的上界，可以给出有依据的清理阈值。
+ */
+const STALE_LEDGER_LOCK_MS = 60_000
+
+/**
+ * 锁等待超时后的孤儿锁自愈（issue #48）：仅当锁文件年龄超过
+ * STALE_LEDGER_LOCK_MS 才清理，避免误删慢 writer 的活跃锁。
+ * @param ledgerPath - 账本文件路径（锁为其 `.lock` 兄弟文件）。
+ * @returns 是否清理了孤儿锁；false = 锁已消失或太新鲜，调用方上抛原错误。
+ */
+async function reclaimStaleLedgerLock(ledgerPath: string): Promise<boolean> {
+  let ageMs: number
+  try {
+    ageMs = Date.now() - (await lstat(`${ledgerPath}.lock`)).mtimeMs
+  } catch {
+    // 锁在超时前后已消失（慢 writer 完成）：无可清理对象。
+    return false
+  }
+  if (ageMs < STALE_LEDGER_LOCK_MS) return false
+  console.warn(`[usage-billing] 账本锁已存在 ${Math.round(ageMs / 1000)}s（崩溃残留），清理后重试：${ledgerPath}.lock`)
+  await rm(`${ledgerPath}.lock`, { force: true })
+  return true
+}
+
 /**
  * Create the atomic file-backed durable-ledger store. The previous complete file
  * is retained as `.bak`; a malformed/missing main file falls back to that backup.
@@ -242,6 +240,7 @@ export function createFileUsageLedgerStore(ledgerPath: string): UsageLedgerStore
           }
         } catch {
           // Main file missing/corrupt: try the backup; both absent means a new ledger.
+          swallowed('ledger-main-unreadable')
         }
       }
       return undefined
@@ -255,17 +254,37 @@ export function createFileUsageLedgerStore(ledgerPath: string): UsageLedgerStore
       // 的 mkdir 在其之后才执行，故此处先建父目录，否则 ledgerPath 在未创建的子目录
       // 下时开锁会抛 ENOENT。
       await mkdir(dirname(ledgerPath), { recursive: true, mode: 0o700 })
-      await withFileLock(ledgerPath, async () => {
+      const commit = async (): Promise<void> => {
+        let existing: string | undefined
+        let existingDoc: UsageLedgerDocument | undefined
         try {
-          const existing = await readFile(ledgerPath, 'utf8')
-          // Never replace a known-good backup with malformed main-file bytes.
-          JSON.parse(existing)
-          await writeFileAtomic(`${ledgerPath}.bak`, existing, { mode: 0o600, dirMode: 0o700 })
+          existing = await readFile(ledgerPath, 'utf8')
+          const parsed = JSON.parse(existing) as { version?: unknown; sessions?: unknown }
+          // 版本/形状校验：不是本插件账本形状的旧文件只做备份基线，不做合并基线。
+          if (parsed.version === 1 && Array.isArray(parsed.sessions)) existingDoc = parsed as UsageLedgerDocument
         } catch {
-          // First write or unreadable old ledger: atomically write the new document.
+          existing = undefined // First write or unreadable old ledger: no merge base.
         }
-        await writeFileAtomic(ledgerPath, JSON.stringify(document), { mode: 0o600, dirMode: 0o700 })
-      })
+        if (existing !== undefined) {
+          // Never replace a known-good backup with malformed main-file bytes.
+          await writeFileAtomic(`${ledgerPath}.bak`, existing, { mode: 0o600, dirMode: 0o700 })
+        }
+        // 多实例合并（自审计延期项：save 路径 last-writer-wins 丢写）：锁内重读
+        // 磁盘现存文档，与本进程要落的文档按会话 id 行级合并（foldedAt 新者胜）。
+        // 同一 DSH_HOME 下两个宿主实例交替保存时，后写者不再抹掉先写者刚写入的行；
+        // 跨实例即时可见性仍靠重启重载，此处保证的是磁盘数据不丢（最终一致）。
+        const merged = existingDoc === undefined ? document : mergeUsageLedgerDocuments(document, existingDoc)
+        await writeFileAtomic(ledgerPath, JSON.stringify(merged), { mode: 0o600, dirMode: 0o700 })
+      }
+      try {
+        await withFileLock(ledgerPath, commit, { waitMs: LEDGER_LOCK_WAIT_MS })
+      } catch (error) {
+        // 仅锁等待超时进入孤儿锁自愈（issue #48）：锁持有者崩溃后残留的锁无人
+        // 释放，库层竞争者永不删除已存在的锁，账本写入会永久超时。其余错误原样上抛。
+        if (!(error instanceof Error) || !error.message.includes('timed out waiting for the writer lock')) throw error
+        if (!(await reclaimStaleLedgerLock(ledgerPath))) throw error
+        await withFileLock(ledgerPath, commit, { waitMs: LEDGER_LOCK_WAIT_MS })
+      }
     },
   }
 }
@@ -274,35 +293,19 @@ export function createFileUsageLedgerStore(ledgerPath: string): UsageLedgerStore
 export const inject = ['webServer', 'sessionPersistence', 'credentials', 'settings']
 
 /**
- * 订阅 provider id（llm-pi-ai 设置键）→ billing 适配器 key 的映射。
- * 复用 dsh 既有的 llm-pi-ai provider 配置（apiKeyEnv 引用），不引入新配置面。
- */
-/** key 只取字符串凭据字段：zaiRegion 是区域枚举，由下方区域逻辑单独赋值。 */
-const SUBSCRIPTION_KEY_SOURCES: ReadonlyArray<{ provider: string; key: Exclude<keyof SubscriptionKeys, 'zaiRegion'> }> = [
-  { provider: 'kimi-coding', key: 'kimiApiKey' },
-  { provider: 'zai-coding-cn', key: 'zaiApiKey' },
-  { provider: 'opencode', key: 'opencodeApiKey' },
-  { provider: 'opencode-go', key: 'opencodeApiKey' },
-  { provider: 'minimax', key: 'minmaxApiKey' },
-  { provider: 'minimax-token-plan', key: 'minmaxApiKey' },
-  { provider: 'minimax-token-plan-cn', key: 'minmaxApiKey' },
-  { provider: 'minimax-cn', key: 'minmaxApiKey' },
-  { provider: 'openrouter', key: 'openrouterApiKey' },
-  { provider: 'tencent-token-plan', key: 'tencentCloudApi' },
-]
-
-/**
  * 读取 llm-pi-ai 设置的 `providers` 字典（`<route> → { apiKeyEnv? }`）。
  * 余额查询复用同一份来源：部署为某个 provider 配一次 key，多个 surface 共享。
  * @param settings - the settings service (reads the llm-pi-ai namespace).
  * @returns the providers dict; empty when the namespace is unreadable.
  */
-/** 一个 llm-pi-ai provider 路由的读取视图：只取三块——apiKeyEnv（凭据引用）、
- *  baseURL（中转站零配置发现的来源）、displayName（站点显示名）。 */
+/** 一个 llm-pi-ai provider 路由的读取视图：apiKeyEnv（凭据引用）、baseURL（中转站
+ *  零配置发现）、displayName（站点显示名）、hasModels（新版宿主设置页保存的
+ *  models 列表——订阅识别的第二配置信号）。 */
 export interface PiAiProviderRoute {
   apiKeyEnv?: string
   baseURL?: string
   displayName?: string
+  hasModels?: boolean
 }
 
 /** 读 llm-pi-ai 设置的 `providers` 字典（`<route> → { apiKeyEnv?, baseURL?, displayName? }`）。
@@ -310,7 +313,7 @@ export interface PiAiProviderRoute {
  * @param settings - the settings service (reads the llm-pi-ai namespace).
  * @returns the providers dict; empty when the namespace is unreadable.
  */
-async function readPiAiProviders(settings: SettingsProvider): Promise<Readonly<Record<string, PiAiProviderRoute>>> {
+async function readPiAiProviders(settings: SettingsReader): Promise<Readonly<Record<string, PiAiProviderRoute>>> {
   try {
     const descriptors = settings.describe({ redactSecrets: true })
     const pi = descriptors.find(descriptor => descriptor.ns === 'llm-pi-ai')?.value
@@ -319,10 +322,14 @@ async function readPiAiProviders(settings: SettingsProvider): Promise<Readonly<R
     for (const [route, entry] of Object.entries(providers ?? {})) {
       if (entry === null || typeof entry !== 'object') continue
       const { apiKeyEnv, baseURL, displayName } = entry
+      // models 是新版宿主设置页保存路由配置的主要落点（key 走凭据 refs）；
+      // 非空数组才算「已配置」，空数组等价于未声明。
+      const models = (entry as { models?: unknown }).models
       out[route] = {
         ...(typeof apiKeyEnv === 'string' ? { apiKeyEnv } : {}),
         ...(typeof baseURL === 'string' ? { baseURL } : {}),
         ...(typeof displayName === 'string' ? { displayName } : {}),
+        ...(Array.isArray(models) && models.length > 0 ? { hasModels: true } : {}),
       }
     }
     return out
@@ -339,7 +346,7 @@ async function readPiAiProviders(settings: SettingsProvider): Promise<Readonly<R
  * @param settings - the settings service (reads the llm-pi-ai namespace).
  * @returns `<route> → { baseURL? }`；命名空间不可读时返回空。
  */
-export function readPiAiProviderRoutes(settings: SettingsProvider): Readonly<Record<string, { baseURL?: string }>> {
+export function readPiAiProviderRoutes(settings: SettingsReader): Readonly<Record<string, { baseURL?: string }>> {
   try {
     const descriptors = settings.describe({ redactSecrets: true })
     const pi = descriptors.find(descriptor => descriptor.ns === 'llm-pi-ai')?.value
@@ -353,6 +360,42 @@ export function readPiAiProviderRoutes(settings: SettingsProvider): Readonly<Rec
     return out
   } catch {
     return {}
+  }
+}
+
+/**
+ * 读取宿主 llm 注册表里「已注册 adapter」的 provider id（issue #91）。
+ *
+ * 必须经 `ctx.get('llm')`，**不能**用属性访问 `ctx.llm`：cordis 的服务代理要求
+ * 服务名出现在插件 `inject` 里，否则抛 `cannot get property "llm" without inject`
+ * ——1.4.31 把这个异常吞掉后退化成空集合，结果是「修复发版了但完全不生效」且无任何
+ * 可观察信号（issue #91 follow-up）。本函数把「读不到」与「读到了空集合」都显式
+ * 回报给调用方，让上层能告警而不是静默降级。
+ * @param get - 宿主上下文的 `get(name)` 访问器（cordis 的免 inject 读取口）。
+ * @returns `ids` = 已注册 provider id 集合（读不到时为空集）；
+ *  `reason` = 读取失败或结果不可用的原因；成功时缺省。
+ */
+export function readRegisteredProviderIds(
+  get: ((name: string) => unknown) | undefined,
+): { ids: ReadonlySet<string>; reason?: string } {
+  if (typeof get !== 'function') return { ids: new Set(), reason: 'the host context exposes no get() accessor' }
+  try {
+    const llm = get('llm') as { listProviders?: () => readonly { id?: unknown }[] } | undefined
+    if (llm === undefined) return { ids: new Set(), reason: 'the host llm service is not registered' }
+    if (typeof llm.listProviders !== 'function') {
+      return { ids: new Set(), reason: 'the host llm service exposes no listProviders()' }
+    }
+    const providers = llm.listProviders()
+    if (providers.length === 0) return { ids: new Set(), reason: 'the host llm registry reports no registered providers' }
+    const ids = new Set<string>()
+    for (const provider of providers) {
+      if (typeof provider?.id === 'string' && provider.id !== '') ids.add(provider.id)
+    }
+    if (ids.size === 0) return { ids, reason: 'the host llm registry returned no usable provider ids' }
+    return { ids }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    return { ids: new Set(), reason: `the host llm registry could not be read (${detail})` }
   }
 }
 
@@ -392,61 +435,138 @@ function buildWorkspaceTitleResolver(ctx: Context): ((cwd: string) => string | u
 }
 
 /**
-  * 解析订阅适配器需要的 API Key：从 llm-pi-ai 设置的 `providers.<id>.apiKeyEnv`
- * 读引用（如 kimi-coding → KIMI_CODING_API_KEY），再经凭据 seam 解析成实际值。
- * 同时识别出用户配置了 key 的订阅套餐（供面板只显示已识别的）。
+ * 构造「会话头 → 宿主侧会话标题」解析器（issue #103，可选依赖）。
+ *
+ * 插件的会话标题取自日志里的 `session/title` 事件——**日志读不动**时（宿主拒绝
+ * 该格式/代际，插件折叠失败），只能吃账本旧行，标题会永远停在重命名前的值。
+ * 宿主自己的会话投影缓存仍可能记得这个标题（`cachedSnapshot` / 既有能力
+ * `cachedPredecessorTitle`：格式代际边缘的标题仍能跨边缘存活），用它兜底可让
+ * 账单明细的标题跟随工作区。
+ *
+ * 宿主没有该服务（0.1.x 代际）或读取失败都返回 undefined：绝不抛错，行为与
+ * 现状一致（可选依赖，不影响主流程）。
+ * @param ctx - host context carrying the optional session projection cache.
+ * @returns 标题解析函数；服务不可用时 undefined。
+ */
+function buildSessionTitleResolver(ctx: Context): ((header: SessionHeader) => string | undefined) | undefined {
+  interface ProjectionCacheFace {
+    cachedSnapshot?: (header: SessionHeader, keys?: readonly string[]) => { values?: Record<string, unknown> } | undefined
+    cachedPredecessorTitle?: (header: SessionHeader) => { values?: Record<string, unknown> } | undefined
+  }
+  let cache: ProjectionCacheFace | undefined
+  try {
+    cache = ctx.get('sessionProjectionCache') as ProjectionCacheFace | undefined
+  } catch {
+    return undefined
+  }
+  if (cache === undefined) return undefined
+  const titleOf = (values: Record<string, unknown> | undefined): string | undefined => {
+    const title = values?.title
+    return typeof title === 'string' && title !== '' ? title : undefined
+  }
+  const cachedSnapshot = cache.cachedSnapshot
+  const cachedPredecessorTitle = cache.cachedPredecessorTitle
+  if (typeof cachedSnapshot !== 'function' && typeof cachedPredecessorTitle !== 'function') return undefined
+  return (header) => {
+    try {
+      // 当前代际的存档行优先；旧代际（宿主读不动的那些）走既有能力的前代标题。
+      if (typeof cachedSnapshot === 'function') {
+        const title = titleOf(cachedSnapshot(header, ['title'])?.values)
+        if (title !== undefined) return title
+      }
+      if (typeof cachedPredecessorTitle === 'function') {
+        return titleOf(cachedPredecessorTitle(header)?.values)
+      }
+      return undefined
+    } catch {
+      return undefined
+    }
+  }
+}
+
+/**
+ * 凭据 seam 的宽容解析：ref 名 → 非空值；失败/缺失返回 undefined（多 surface 共用，
+ * 失败按结构化静默记录）。
+ */
+function refResolver(credentials: CredentialProvider): (name: string) => Promise<string | undefined> {
+  return async (name) => {
+    try {
+      const resolved = await credentials.resolve(credentialRef(name))
+      return resolved?.value !== undefined && resolved.value !== '' ? resolved.value : undefined
+    } catch (error) {
+      // 单个 ref 解析失败视为未配置（查询走「未读出」兜底，不抛错）。
+      swallowed('credential-resolve-failed', error)
+      return undefined
+    }
+  }
+}
+
+/**
+ * 解析订阅适配器需要的 API Key：经典形态从 llm-pi-ai 设置的 `providers.<id>.apiKeyEnv`
+ * 读引用（如 kimi-coding → KIMI_CODING_API_KEY）；新版宿主设置页把 key 直接存成
+ * 凭据 refs（路由约定名 `<ROUTE>_API_KEY`，pi-ai 目录 ambient 名补充），显式引用
+ * 解析不到时按约定名找回。同时识别出已配置的订阅套餐（供面板只显示已识别的）。
  * @param settings - the settings service (reads the llm-pi-ai namespace).
  * @param credentials - the credentials service (resolves the env refs).
  */
 export async function resolveSubscriptionKeys(
-  settings: SettingsProvider,
+  settings: SettingsReader,
   credentials: CredentialProvider,
 ): Promise<{ keys: SubscriptionKeys; identified: IdentifiedSubscriptionPlan[] }> {
-  const keys: SubscriptionKeys = { ...EMPTY_SUBSCRIPTION_KEYS }
-  let providers: Record<string, { apiKeyEnv?: string }> | undefined
-  try {
-    const descriptors = settings.describe({ redactSecrets: true })
-    const pi = descriptors.find(descriptor => descriptor.ns === 'llm-pi-ai')?.value
-    providers = (pi as { providers?: Record<string, { apiKeyEnv?: string }> } | null | undefined)?.providers
-  } catch {
-    // 设置服务异常时按全空 key 处理（订阅面板显示未配置）。
-    return { keys, identified: [] }
-  }
-  for (const { provider, key } of SUBSCRIPTION_KEY_SOURCES) {
-    const env = providers?.[provider]?.apiKeyEnv
-    if (typeof env !== 'string' || env === '') continue
-    try {
-      const resolved = await credentials.resolve(credentialRef(env))
-      if (resolved?.value !== undefined && resolved.value !== '') keys[key] = resolved.value
-    } catch {
-      // 凭据解析失败跳过该 provider（保持未配置）。
-    }
-  }
-  // zai-coding-cn 是智谱国内域：跟随它时区域固定为 bigmodel-cn。
-  if (providers?.['zai-coding-cn']?.apiKeyEnv !== undefined && keys.zaiApiKey !== '') {
-    keys.zaiRegion = 'bigmodel-cn'
-  }
-  // OpenCode 便捷回退：opencode(opencode-go) 路由没配 apiKeyEnv 时，读本机 OpenCode
+  const providers = await readPiAiProviders(settings)
+  const resolve = refResolver(credentials)
+  const { keys, keyConfigured } = await resolveSubscriptionAccess(providers, resolve)
+  // zai-coding-cn 是智谱国内域：CN key 在手即跟随 bigmodel-cn。只影响未显式
+  // 声明 region 的声明式 plan 配置——identify 出的两条 Z.ai 路由各带固定区域。
+  if (keys.zaiCnApiKey !== '') keys.zaiRegion = 'bigmodel-cn'
+  // OpenCode 便捷回退：opencode(opencode-go) 路由没解析出 key 时，读本机 OpenCode
   // 客户端自存的凭据文件（~/.local/share/opencode/auth.json）。文件不存在/读不动/格式变
   // 一律视为「没有凭据」安静退回，绝不报错——这只是一次便利，不是必须具备。
   if (keys.opencodeApiKey === '') {
     keys.opencodeApiKey = await readOpenCodeToken()
   }
-  return { keys, identified: identifySubscriptionPlans(providers) }
+  // Claude Code 登录态自动发现：读 ~/.claude/.credentials.json 的 OAuth token，
+  // 发现到凭据时把 Claude 订阅行补进识别结果（anthropic 不在 SUBSCRIPTION_ID_RE，
+  // 不补行的话自动发现永远没机会展示）。文件不存在/未登录安静退回，绝不报错。
+  keys.anthropicApiKey = await readClaudeOAuthToken()
+  // 识别视图：显式 apiKeyEnv / models 已配置 / 约定 ref 解析出 key，三信号任一即识别。
+  const identified = identifySubscriptionPlans(Object.fromEntries(Object.entries(providers).map(([route, entry]) => [
+    route,
+    {
+      ...(entry.apiKeyEnv !== undefined ? { apiKeyEnv: entry.apiKeyEnv } : {}),
+      ...(entry.hasModels === true ? { hasModels: true } : {}),
+      ...(keyConfigured.has(route) ? { refResolved: true } : {}),
+    },
+  ])))
+  if (keys.anthropicApiKey !== '' && !identified.some(plan => plan.provider === 'anthropic')) {
+    identified.push({ provider: 'anthropic', displayName: 'Claude (Anthropic)', adapter: true })
+  }
+  return { keys, identified }
 }
 
 /** 读本机 OpenCode 客户端的凭据 token；取不到返回空串（安静退回）。 */
 async function readOpenCodeToken(): Promise<string> {
   try {
     const auth = JSON.parse(await readFile(join(homedir(), '.local', 'share', 'opencode', 'auth.json'), 'utf8')) as unknown
-    if (typeof auth === 'string' && auth !== '') return auth
-    if (auth !== null && typeof auth === 'object') {
-      const record = auth as Record<string, unknown>
-      const token = record.token ?? record.key ?? record.apiKey
-      if (typeof token === 'string' && token !== '') return token
-    }
+    return parseOpenCodeAuthDocument(auth)
   } catch {
     // 文件不存在 / 读不动 / JSON 解析失败 → 视为没有凭据，不报错。
+    swallowed('opencode-auth-missing')
+  }
+  return ''
+}
+
+/**
+ * 从本机 Claude Code 登录态自动发现 Anthropic OAuth access token；取不到返回
+ * 空串（安静退回）。与 OpenCode auth.json 兜底同款姿态：只是一次便利，绝不报错。
+ */
+async function readClaudeOAuthToken(): Promise<string> {
+  try {
+    const cred = JSON.parse(await readFile(join(homedir(), '.claude', '.credentials.json'), 'utf8')) as unknown
+    const token = (cred as { claudeAiOauth?: { accessToken?: unknown } } | null)?.claudeAiOauth?.accessToken
+    if (typeof token === 'string' && token !== '') return token
+  } catch {
+    // 未登录 Claude Code / 文件不可读 → 视为没有凭据。
   }
   return ''
 }
@@ -508,8 +628,8 @@ export function adaptSessionPersistence(raw: unknown): UsagePersistence {
           : (slice as HostReadSlice013).events
         return {
           meta: handle.header,
-          fromSeq: SessionLogOffset(fromSeq),
-          inheritedEventCount: SessionLogOffset(handle.inheritedEventCount),
+          fromSeq: sessionLogOffsetOf(fromSeq),
+          inheritedEventCount: sessionLogOffsetOf(handle.inheritedEventCount),
           events,
         }
       } finally {
@@ -521,16 +641,42 @@ export function adaptSessionPersistence(raw: unknown): UsagePersistence {
 }
 
 /**
+ * 读取 usage_stats 工具开关的当前生效值：宿主 0.1.7+ 经 Config 解析后是 volatile
+ * 引用（.get() 即时反映设置写入，无需重载），直连 apply（测试）与未导出 Config 的
+ * 旧宿主组合是普通布尔；缺省/非法值一律回 DEFAULT。
+ * @param config - apply 收到的插件 config。
+ * @returns 开关当前生效值。
+ */
+function readUsageStatsToggle(config: UsageBillingConfig): boolean {
+  const field = config[ENABLE_USAGE_STATS_TOOL_FIELD]
+  if (typeof field === 'boolean') return field
+  if (typeof field === 'object' && field !== null && typeof field.get === 'function') {
+    const current = field.get()
+    return typeof current === 'boolean' ? current : DEFAULT_ENABLE_USAGE_STATS_TOOL
+  }
+  return DEFAULT_ENABLE_USAGE_STATS_TOOL
+}
+
+/**
  * Host plugin body: serve real aggregated usage to the browser dashboard.
  * @param ctx - host context carrying webServer and sessionPersistence.
  * @param config - optional statsPath override.
  */
 export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
-  // usage_stats 工具开关的设置命名空间 scope：settings 服务就绪后注册；HTTP 路由据此读写。
-  let usageSettingsScope: SettingsScope<UsageBillingSettings> | undefined
+  // 反向代理主机名白名单：归一化一次，所有端点共用同一守卫路径（含 POST 写入）。
+  const trustedHosts = normalizeTrustedHosts(config.trustedHosts)
+  // usage_stats 工具开关的双世代通道：旧宿主 ≤0.1.6 走 settings.register 命名空间
+  // scope（usageSettingsScope）；宿主 0.1.7+ 注册面已移除，走 volatile config 投影
+  // （liveSettings：经 settings.update 写回本条目 config）。HTTP 路由据此读写。
+  let usageSettingsScope: SettingsNamespaceScope<UsageBillingSettings> | undefined
+  let liveSettings: { update(ns: string, patch: object): Promise<void>; ns: string } | undefined
   const cwd = process.cwd()
-  const snapshotPath = config.snapshotPath ?? join(homedir(), '.dsh/.dsh-usage-stats.json')
-  const ledgerPath = config.ledgerPath ?? join(homedir(), '.dsh/.dsh-usage-ledger.json')
+  // 持久化文件的默认根跟随宿主 harness home：DSH_HOME 环境变量优先，回退
+  // `~/.dsh`（resolveDshHome 的解析语义与宿主一致）。自定义 DSH_HOME 的多套
+  // 隔离环境互不污染账本 / 快照 / 对账基准（issue #52）；config 显式路径仍最高。
+  const dshHome = resolveDshHome()
+  const snapshotPath = config.snapshotPath ?? join(dshHome, '.dsh-usage-stats.json')
+  const ledgerPath = config.ledgerPath ?? join(dshHome, '.dsh-usage-ledger.json')
 
   // 独立持久账本：主文件损坏时读 `.bak`，写入使用宿主的原子写工具并限制为
   // 当前用户可读。账本保存每个已成功折叠的会话；删除会话日志不删除账本行。
@@ -538,7 +684,7 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
 
   // 余额差对账基准：持久化到独立文件（跨重启保留当日基准），随每次 balance
   // 轮询刷新。仅官方 DeepSeek 方向对账，见 reconcile.ts。
-  const reconcilePath = config.reconcilePath ?? join(homedir(), '.dsh/.dsh-usage-reconcile.json')
+  const reconcilePath = config.reconcilePath ?? join(dshHome, '.dsh-usage-reconcile.json')
   let reconcileRef: BalanceRef | null = null
   void (async () => {
     try {
@@ -554,6 +700,7 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
       }
     } catch {
       // 基准文件缺失/损坏：视为首次，重新打基准。
+      swallowed('reconcile-ref-missing')
     }
   })()
   const persistReconcileRef = (): void => {
@@ -567,25 +714,107 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
   // 前端 30 秒轮询只重算写过的会话。
   // 项目归属用工作区标题（host workspaceRegistry 可选；缺失时 resolver 为 undefined，回退目录名）。
   const workspaceTitleResolver = buildWorkspaceTitleResolver(ctx)
+  // 读不动的会话的标题兜底（host sessionProjectionCache 可选；缺失时 undefined，行为不变）。
+  const sessionTitleResolver = buildSessionTitleResolver(ctx)
   // 用户自定义模型别名：聚合启动前注入（与客户端渲染共用一张表，见 pricing.ts）。
+  applyBuiltinCatalog(BUILTIN_MODEL_CATALOG, BUILTIN_MODEL_KEY_ALIASES)
   applyUserModelAliases(config.modelKeyAliases)
+  // 已注册 adapter 的 provider 集合（宿主 llm 注册表）：llm-pi-ai 之外的插件路由
+  // （ctx.llm.registerAdapter，issue #91 的 commandcode）经此归位 direct 桶按官方价
+  // 计费。读取经 readRegisteredProviderIds（免 inject 声明，绝不属性访问 ctx.llm）
+  // ——软依赖：llm 服务缺失/异常时 warn 一次并退化为空集，unknown 口径不变；不能
+  // 静默，否则「修复上线但不生效」无法自查（1.4.31 的实际故障形态）。
+  let llmRegistryWarned = false
+  const registeredProvidersOf = (): ReadonlySet<string> => {
+    const { ids, reason } = readRegisteredProviderIds(
+      (ctx as { get?: (name: string) => unknown }).get?.bind(ctx),
+    )
+    if (reason === undefined) {
+      llmRegistryWarned = false
+      return ids
+    }
+    if (!llmRegistryWarned) {
+      llmRegistryWarned = true
+      console.warn(
+        `[usage-billing] ${reason}; plugin-registered adapter channels (e.g. commandcode) stay in the`
+        + ' unknown bucket and are billed at 0 (issue #91). Channel grouping falls back to llm-pi-ai routes only.',
+      )
+    }
+    return ids
+  }
+  // 订阅豁免集合（引用语义传入聚合器）：基础 = 显式配置或默认基线；MiniMax 系路由
+  // 按 key 前缀动态增删（`sk-cp-` = Coding Plan 豁免，普通 `sk-` = 按量计费）——同一
+  // 官方路由 id 两类用户两用，此前默认集合干脆不含 minimax，套餐用户被无条件按量
+  // 计费。集合内容变化经聚合器指纹自动触发历史行全量重折。
+  const subscriptionRoutes = new Set<string>(config.subscriptionProviders ?? DEFAULT_SUBSCRIPTION_PROVIDERS)
+  // 显式配置是下限：用户明写进 subscriptionProviders 的路由不被 key 分类移除
+  //（只自动补入 sk-cp- 的路由，不自动踢出用户的显式声明）。
+  const explicitSubscriptionRoutes = new Set<string>(config.subscriptionProviders ?? [])
+  const refreshMiniMaxPlanRoutes = async (): Promise<void> => {
+    try {
+      const providers = await readPiAiProviders(ctx.settings)
+      const classified = await classifyMiniMaxPlanRoutes(providers, refResolver(ctx.credentials))
+      for (const [route, isPlan] of classified) {
+        if (isPlan) subscriptionRoutes.add(route)
+        else if (!explicitSubscriptionRoutes.has(route)) subscriptionRoutes.delete(route)
+      }
+    } catch (error) {
+      // 分类失败保持现状（不豁免），下一轮配额刷新再试。
+      swallowed('minimax-plan-classify-failed', error)
+    }
+  }
+  const replayDelayMs = readReplayDelayMs(config.replayDelayMs)
   const aggregator = createUsageAggregator(adaptSessionPersistence(ctx.sessionPersistence), {
-    ...(config.subscriptionProviders === undefined
-      ? {}
-      : { subscriptionProviders: config.subscriptionProviders }),
+    subscriptionMatcher: subscriptionRoutes,
     // 历史路由别名：改名/删除路由的历史用量按别名归位（站点/订阅/官方判定同步生效）。
     ...(config.routeAliases === undefined ? {} : { routeAliases: config.routeAliases }),
     // 中转站零配置发现：每次聚合读 llm-pi-ai providers 的 baseURL（路由→站点映射）。
     resolveRoutes: () => readPiAiProviderRoutes(ctx.settings),
+    // 插件注册的 adapter 通道（llm-pi-ai 之外）按直连归位计价（issue #91）。
+    resolveRegisteredProviders: registeredProvidersOf,
+    // 用户模型别名进折叠指纹：别名改动让历史行按新目录键重折（issue #91 P2）。
+    ...(config.modelKeyAliases === undefined ? {} : { modelKeyAliases: config.modelKeyAliases }),
     // 项目归属用工作区标题命名（host workspaceRegistry 为可选依赖，缺失时回退目录名）。
     ...(workspaceTitleResolver === undefined ? {} : { resolveWorkspaceTitle: workspaceTitleResolver }),
+    // 读不动的会话：标题取宿主侧（投影缓存）的值，避免停在重命名前的旧值（issue #103）。
+    ...(sessionTitleResolver === undefined ? {} : { resolveSessionTitle: sessionTitleResolver }),
     // 联网搜索请求的单次费用估算（issue #15）；缺省 0.02 元/次，配置可覆盖/关闭。
     ...(config.searchCallEstimateCny === undefined ? {} : { searchCallEstimateCny: config.searchCallEstimateCny }),
+    // 冷phase闸门（issue #105）：与下面的预热定时器同源——闸门内的请求只吃账本
+    // 轻文档，把「UI 一加载就全量折叠」从启动关键路径上摘掉。
+    // Fork: retain estimates for historical routes, while keeping them in the unknown bucket.
+    estimateUnknownRoutes: true,
+    deferFoldMs: replayDelayMs,
     ledger: ledgerStore,
   })
+  // 启动即按 key 分类一次 MiniMax 路由（凭据 seam 内存解析，毫秒级），首轮聚合通常
+  // 已能拿到正确豁免；万一首轮抢先，集合变化会在下一轮触发重折自愈。
+  void refreshMiniMaxPlanRoutes()
   // 插件卸载时把落盘节流窗口内的账本改动 flush 掉（fire-and-forget：
   // disposer 不能阻塞关闭流程，等不起进行中的长折叠）。
   ctx.effect(() => () => { void aggregator.flush() }, 'usage-billing: ledger flush on dispose')
+  // 安装/升级后的历史回放预热：宿主就绪即后台全量折叠一次（聚合器有 in-flight
+  // 去重与账本幂等，与首次面板请求并发也无副作用）。不预热的话聚合只在前端轮询
+  // 到达时触发，新用户首次打开面板要等一遍全量折叠，观感是「装完没数据」。
+  // 延迟与聚合器的冷phase闸门同源（config.replayDelayMs，默认 20s，issue #105）：
+  // 闸门内的面板请求只吃账本轻文档（不读日志），到点后由本定时器补上完整折叠
+  // ——启动期不再被折叠挤占 CPU，预热仍保证「装完几分钟内数据一定补齐」。
+  // 预热重放必须等首次价格拉取 settle：refreshPricing() 是 fire-and-forget，冷
+  // 启动时 models.dev（数 MB）可能比延迟更慢。一旦重放先跑，整份历史会以内置
+  // 目录价折叠，而折叠复用键（stamp + configFingerprint）不含价格，价格随后到
+  // 达也不会让它失效（惰性重折通道会兜住 cost=0 的行）。拉取失败同样继续（等
+  // 价于现状的内置价回退），不会把预热卡住。
+  let pricingReady: Promise<void> | undefined
+  const warmupTimer = setTimeout(() => {
+    void Promise.resolve(pricingReady)
+      .catch(() => {})
+      .then(() => aggregator.aggregate())
+      .then(() => { console.info('[usage-billing] historical replay warmed up; ledger ready') })
+      .catch((error: unknown) => {
+        console.warn('[usage-billing] historical replay warmup failed; will fold on first dashboard request:', error)
+      })
+  }, replayDelayMs)
+  ctx.effect(() => () => { clearTimeout(warmupTimer) }, 'usage-billing: historical replay warmup timer')
   const candidates = [
     config.statsPath,
     process.env.DSH_USAGE_STATS,
@@ -609,11 +838,13 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
         await writeFileAtomic(`${snapshotPath}.bak`, existing, { mode: 0o600, dirMode: 0o700 })
       } catch {
         // 旧快照不存在（首次运行）或不可读：无需备份，直接写新快照。
+        swallowed('snapshot-bak-missing')
       }
       try {
         await writeFileAtomic(snapshotPath, payload, { mode: 0o600, dirMode: 0o700 })
       } catch {
         // 快照写失败不影响服务：内存聚合值已下发。
+        swallowed('snapshot-write-failed')
       }
     })()
   }
@@ -625,6 +856,7 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
         return JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>
       } catch {
         // 文件不存在或 JSON 损坏：尝试下一个（主文件失败 → `.bak`；都失败返回 null）。
+        swallowed('snapshot-candidate-unreadable')
       }
     }
     return null
@@ -637,87 +869,62 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
   // 键自带日期戳/切换点粒度，无需过期，超上限裁掉最旧的键。两实例同毫秒认领同一
   // 键的窗口极窄，最坏退化为一重复弹，与文件锁的残留误判相比是更好的取舍。
   const notifyClaimsPath = `${snapshotPath}.notify-claims.json`
-  const notifyClaims: { loaded: boolean; keys: string[] } = { loaded: false, keys: [] }
-  ctx.effect(
-    () => ctx.webServer.register({
-      kind: 'exact',
-      path: '/api/billing/notify-claim',
-      handler: async (req, res) => {
-        if (!guardLoopback(req, res)) return
-        if (req.method !== 'POST') {
-          res.writeHead(405, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify({ error: 'method not allowed' }))
-          return
-        }
-        // 跨站写保护与 usage-tool 同口径：Origin 必须回环 + Content-Type 必须 JSON。
-        if (!isLoopbackOrigin(req.headers.origin)
-          || !(req.headers['content-type'] ?? '').toLowerCase().includes('application/json')) {
-          res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify({ error: 'forbidden: loopback only' }))
-          return
-        }
-        try {
-          // body 只承载一个认领键，2 KiB 上限已足够，防坏/恶意 body 拖住 handler。
-          let body = ''
-          for await (const chunk of req) {
-            body += String(chunk)
-            if (body.length > 2048) {
-              res.end(JSON.stringify({ error: 'body too large' }))
-              return
-            }
-          }
-          const parsed = JSON.parse(body === '' ? '{}' : body) as { key?: unknown }
-          if (typeof parsed.key !== 'string' || parsed.key === '' || parsed.key.length > 200) {
-            res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
-            res.end(JSON.stringify({ error: 'invalid key' }))
-            return
-          }
-          if (!notifyClaims.loaded) {
-            notifyClaims.loaded = true
-            try {
-              const stored = JSON.parse(await readFile(notifyClaimsPath, 'utf8')) as { keys?: unknown }
-              if (Array.isArray(stored.keys)) notifyClaims.keys = stored.keys.filter((k): k is string => typeof k === 'string')
-            } catch {
-              // 首次运行或文件损坏：从空表开始（去重退化为进程内，下次认领重建文件）。
-            }
-          }
-          if (notifyClaims.keys.includes(parsed.key)) {
-            res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-            res.end(JSON.stringify({ claimed: false }))
-            return
-          }
-          notifyClaims.keys.push(parsed.key)
-          if (notifyClaims.keys.length > 400) notifyClaims.keys = notifyClaims.keys.slice(-200)
-          // 认领表写失败不阻塞通知：去重退化为进程内，多实例下该键可能重复一次。
-          void writeFileAtomic(notifyClaimsPath, JSON.stringify({ keys: notifyClaims.keys }), { mode: 0o600, dirMode: 0o700 })
-            .catch(() => {})
-          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify({ claimed: true }))
-        } catch {
-          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify({ error: 'invalid' }))
-        }
-      },
-    }),
-    'usage-billing: notify-claim route',
-  )
+  // 进程内认领表（`notifyClaims`）由 src/routes/notify-claim.ts 内的模块级单例持有。
+  registerNotifyClaimRoute(ctx, { trustedHosts, claimsPath: notifyClaimsPath })
+
+  // 低谷任务队列（issue #106，新宿主能力预览）：sessionController 是可选能力，
+  // 一律 ctx.get 特性探测，不进 inject——老宿主照常启动，面板明确显示不可用。
+  // 文件锁 + owner lease 防止同一 DSH_HOME 的多个实例重复提交同一任务。
+  const taskQueue = new TaskQueueEngine({
+    filePath: config.taskQueuePath ?? join(dshHome, '.dsh-usage-task-queue.json'),
+    getController: () => {
+      try {
+        return ctx.get('sessionController') as TaskQueueController | undefined
+      } catch {
+        return undefined
+      }
+    },
+    getWorkspaces: () => {
+      try {
+        const registry = ctx.get('workspaceRegistry') as {
+          list?: () => readonly { path: string; title: string }[]
+        } | undefined
+        return (registry?.list?.() ?? [])
+          .filter(workspace => typeof workspace.path === 'string' && workspace.path !== '')
+          .map(workspace => ({ path: workspace.path, title: workspace.title || workspace.path }))
+      } catch {
+        return []
+      }
+    },
+  })
+  registerTaskQueueRoute(ctx, { trustedHosts, engine: taskQueue })
+  taskQueue.start()
+  ctx.effect(() => () => { taskQueue.stop() }, 'usage-billing: task queue scheduler')
 
   // usage_stats 动态工具（默认关闭）：模型可主动查询用量费用（今天 / 本月 / 当前会话 / 累计）。
   // 该工具占用每次请求的上下文，而 coding 场景多在仪表盘看用量，属可关的打扰项。
-  // 开关持久化在设置命名空间 `ui-usage-billing.enableUsageStatsTool`（默认 false），
-  // 用户可在「设置」Tab 切换；工具注入是启动期决策，改开关后重载应用生效。
-  // cordis.yml 的 `enableUsageStatsTool` config 作为组合 base 兜底。
-  ctx.inject(['settings'], (sctx) => {
-    const scope = sctx.settings.register(usageBillingSettingsNs, UsageBillingSettingsSchema, {
-      base: { enableUsageStatsTool: config.enableUsageStatsTool ?? DEFAULT_ENABLE_USAGE_STATS_TOOL },
-    })
-    usageSettingsScope = scope
-    // 命名空间注册与工具注册解耦：tools 服务缺席/延迟就绪时命名空间仍尽早注册，
-    // 前端可从本插件的 HTTP 路由读到开关状态。工具仅在可用且开启时注入。
-    ctx.inject(['tools'], (toolsCtx) => {
-      if (scope.get().enableUsageStatsTool) {
-        toolsCtx.tools.register(defineTool({
-          name: 'usage_stats',
+  // 开关双世代持久化：旧宿主 ≤0.1.6 存设置命名空间 `ui-usage-billing.enableUsageStatsTool`；
+  // 宿主 0.1.7+ 存本条目 config 的 volatile 字段（Config schema 投影）。工具注册由
+  // syncUsageTool 驱动：初始一次 + 每次 volatile 提交（loader/volatile-update，不重载
+  // 插件）+ 旧世代写回后显式调用，切换即时生效；cordis.yml 的 `enableUsageStatsTool`
+  // config 作为组合 base 兜底。
+  let usageToolDisposer: (() => void) | undefined
+  // 工具注册动作由 tools 服务就绪时填充；注册前 sync 是无操作（组合期 tools 缺席安全）。
+  let usageToolRegister: (() => () => void) | undefined
+  const syncUsageTool = (): void => {
+    if (usageToolRegister === undefined) return
+    if (readUsageStatsToggle(config)) {
+      if (usageToolDisposer === undefined) usageToolDisposer = usageToolRegister()
+      return
+    }
+    if (usageToolDisposer !== undefined) {
+      usageToolDisposer()
+      usageToolDisposer = undefined
+    }
+  }
+  ctx.inject(['tools'], (toolsCtx) => {
+    usageToolRegister = () => toolsCtx.tools.register(defineTool({
+      name: 'usage_stats',
       description: '查询本机 DeepSeek Harness 的模型用量与估算费用（人民币，按官方目录价估算，非账单）。range 取值：today=今天，month=本月，session=当前会话，all=累计。',
       parameters: {
         range: {
@@ -757,19 +964,9 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
           }
         }
         if (args.range === 'bySite' || args.range === 'relay') {
-          // 按站点归组：bySite 维度（中转站/直连/未知路由）累计；relay 只看中转站部分。
-          const bySite = stats.bySite ?? {}
-          let cost = 0
-          let calls = 0
-          let input = 0
-          let output = 0
-          for (const usage of Object.values(bySite)) {
-            cost += usage.cost
-            calls += usage.calls
-            input += usage.input
-            output += usage.output
-          }
-          return { range: args.range, cost, calls, input, output }
+          // 按站点归组：bySite 全量；relay 只计中转站桶（site:<origin> 键），
+          // direct/unknown 不计入（口径实现见 sumSiteBuckets）。
+          return { range: args.range, ...sumSiteBuckets(stats.bySite ?? {}, args.range) }
         }
         if (args.range === 'today') {
           const day = stats.byDay[dayStamp(Date.now())]
@@ -790,10 +987,13 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
           }
           return { range: args.range, cost, calls, input, output }
         }
-        // session：按当前会话 id 从每轮明细汇总（byTurn 封顶 200 行，当前会话
-        // 恒为最近轮次，覆盖完整）。
+        // session：直接从聚合器读该会话的完整折叠——doc 的 byTurn 封顶 200 行，
+        // 用户回到旧会话续聊时其轮次已被最近轮次挤出，遍历 byTurn 会低估。
         const sessionId = exec.agent?.id
         if (sessionId === undefined) throw new Error('usage_stats 的 session 范围需要 agent 会话上下文')
+        const summary = await aggregator.sessionUsageOf(String(sessionId))
+        if (summary !== undefined) return { range: args.range, ...summary }
+        // 兜底：日志与账本均无该会话（理论仅发生在日志与账本同时缺失时），回退 doc 遍历。
         let cost = 0
         let calls = 0
         let input = 0
@@ -808,19 +1008,89 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
         return { range: args.range, cost, calls, input, output }
       }
     }))
+    syncUsageTool()
+    // 事件只在本插件 fiber 上发射（兄弟插件的 volatile 提交沿 ctx 树向上冒泡，互不可见）。
+    ctx.on('loader/volatile-update', syncUsageTool)
+  })
+
+  // 设置开关的双世代读写面：settings 服务就绪后按宿主世代接线。
+  ctx.inject(['settings'], (sctx) => {
+    const legacy = sctx.settings as unknown as SettingsReader & {
+      register?: (ns: string, schema: unknown, options?: { base?: unknown }) => SettingsNamespaceScope<UsageBillingSettings>
+      update?: (ns: string, patch: object) => Promise<void>
     }
-    })
+    if (typeof legacy.register === 'function') {
+      // 宿主 ≤0.1.6：注册命名空间并持有读写 scope（GET/POST 都经 scope）。
+      usageSettingsScope = legacy.register(usageBillingSettingsNs, UsageBillingSettingsSchema, {
+        base: { enableUsageStatsTool: readUsageStatsToggle(config) },
+      })
+      return
+    }
+    // 宿主 0.1.7+：register 已从 SettingsForms 移除，写回走 SettingsForms.update——
+    // 目标 ns 是本插件条目 id（loader 把 fiber.entry 注入本 fiber；仅直接挂载的
+    // 测试组合会缺失，回退约定 ns）。读取不在此处：volatile 引用覆盖 GET 与工具同步。
+    // update 是服务类方法（内部依赖 this.write 持久化），必须以方法调用形式包一层，
+    // 不能裸摘函数引用（this 脱绑后真机 TypeError: this.write is not a function）。
+    const forms = legacy
+    if (typeof forms.update !== 'function') return
+    const entryId: string | undefined = ctx.fiber.entry?.options.id
+    liveSettings = {
+      update: (ns, patch) => forms.update!(ns, patch),
+      ns: entryId ?? usageBillingSettingsNs,
+    }
   })
 
   // 后台拉取实时定价（汇率 + OpenRouter 模型价 + models.dev 目录外补充），
   // 失败自动降级内置目录；之后每 6 小时刷新一次，汇率/价格无需重启进程就能
   // 保持最新。host 侧同步应用：聚合计价与客户端展示同源（含目录外补充条目）。
   let live: LivePricing = { source: 'builtin' }
+  // 上次同步完成的本机时间戳：每次刷新尝试完成即更新（live 或降级 builtin 都是
+  // 一次完成的同步动作），随 pricing 响应下发供费率条展示「上次同步」。
+  let pricingSyncedAt = 0
+  /** 价目表代际：extraModels 的 key 集合稳定序列化。fetchLivePricing 每次都重建
+   *  数组（引用必不同），引用比较恒真会退化成「每次刷新都跑一轮 reprice」；
+   *  key 集合变化才代表真的出现了「此前未收录、现在可计价」的模型。 */
+  const priceGenerationOf = (snapshot: LivePricing): string =>
+    (snapshot.extraModels ?? []).map(model => model.key).sort().join(',')
+  let priceGeneration = priceGenerationOf(live)
   const refreshPricing = async (): Promise<void> => {
     live = await fetchLivePricing()
+    pricingSyncedAt = Date.now()
     applyLivePricing(live)
+    // 响应体缓存失效：live 变了，pricing 响应须重新序列化（含内置目录与别名表）。
+    pricingBodyCache = undefined
+    // 价目表代际变化（builtin→live，或刷新后新增可计价模型）：此前因「折叠时
+    // 价目表不全」而 cost=0 的已收录模型行，须按新价目表重折出 cost，与显示层
+    // 目录价口径对齐（修复「明细 ≈¥38 vs 总额 ¥7」的双口径）。复用判定是惰性的
+    //（aggregate.ts foldNeedsReprice：行内 unpricedModels ∩ 现价目表），只有含
+    // 受影响模型的行重折，其余行依旧零读取复用——不是全量重折。key 集合未变时
+    // 跳过整轮聚合，价格刷新本身不带来额外开销。
+    const nextGeneration = priceGenerationOf(live)
+    if (nextGeneration !== priceGeneration) {
+      priceGeneration = nextGeneration
+      void aggregator.aggregate()
+        .then(() => { console.info('[usage-billing] repriced folds after pricing refresh; ledger aligned with live catalog') })
+        .catch((error: unknown) => {
+          console.warn('[usage-billing] reprice fold after pricing refresh failed; next aggregate retries:', error)
+        })
+    }
   }
-  void refreshPricing()
+  // /api/billing/pricing 响应体缓存：内置目录与别名表在 activate 注入后不变，
+  // 只有 live/syncedAt 随 refresh 变化；缓存整个响应体避免每请求重复序列化
+  // 约 40 KiB 的目录数据。
+  let pricingBodyCache: string | undefined
+  const pricingBody = (): string => {
+    if (pricingBodyCache === undefined) {
+      pricingBodyCache = JSON.stringify({
+        ...live,
+        syncedAt: pricingSyncedAt,
+        catalog: BUILTIN_MODEL_CATALOG,
+        aliases: BUILTIN_MODEL_KEY_ALIASES,
+      })
+    }
+    return pricingBodyCache
+  }
+  pricingReady = refreshPricing()
   ctx.effect(
     () => {
       const timer = setInterval(() => { void refreshPricing() }, PRICING_REFRESH_INTERVAL_MS)
@@ -829,150 +1099,113 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
     'usage-billing: pricing refresh timer',
   )
 
-  ctx.effect(
-    () => ctx.webServer.register({
-      kind: 'exact',
-      path: '/api/billing/pricing',
-      handler: async (req, res) => {
-        if (!guardLoopback(req, res)) return
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-        res.end(JSON.stringify(live))
-      },
-    }),
-    'usage-billing: pricing route',
-  )
+  registerPricingRoutes(ctx, { trustedHosts, body: pricingBody, refresh: refreshPricing })
 
-  let balanceCache: { at: number; doc: { balances: Awaited<ReturnType<typeof queryBalances>>; reconcile?: ReconcileEvent } } = { at: 0, doc: { balances: [] } }
-  ctx.effect(
-    () => ctx.webServer.register({
-      kind: 'exact',
-      path: '/api/billing/balance',
-      handler: async (req, res) => {
-        if (!guardLoopback(req, res)) return
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-        // 余额 key 复用 llm-pi-ai 的 providers（同订阅）：部署为某 provider 配一次即可。
-        // DeepSeek 保留 `balanceApiKeyEnv` 特例：llm-pi-ai 未配 deepseek key 时仍可用该 env 查余额。
-        // 注意不能只看路由是否存在——路由存在但 apiKeyEnv 缺失（只配了 baseURL 之类）时，
-        // 兜底同样要生效，否则余额会错标「未配置」。
-        const piProviders = await readPiAiProviders(ctx.settings)
-        const providers = { ...piProviders }
-        const deepseekKey = providers['deepseek']?.apiKeyEnv
-        if (deepseekKey === undefined || deepseekKey === '') {
-          providers['deepseek'] = { ...providers['deepseek'], apiKeyEnv: config.balanceApiKeyEnv ?? DEFAULT_BALANCE_API_KEY_ENV }
+  // 手动同步价格目录与 GET 价目表同 concern，由 src/routes/pricing.ts 内的
+  // registerPricingRoutes 统一注册两条路由（GET /pricing + POST /pricing/refresh）。
+
+ let balanceCache: { at: number; doc: { balances: Awaited<ReturnType<typeof queryBalances>>; reconcile?: ReconcileEvent } } = { at: 0, doc: { balances: [] } }
+  // in-flight 去重（自审计延期项）：仪表盘、悬浮费用条、usage-stats 工具会并发
+  // 打本路由；缓存过期的瞬间多个请求各自全套上游查询（余额 + 自定义 + 声明端点
+  // + 对账），共享同一次进行中的刷新，上游只被打一遍。
+  let balanceInflight: Promise<void> | undefined
+  const refreshBalance = async (): Promise<void> => {
+    // 余额 key 复用 llm-pi-ai 的 providers（同订阅）：部署为某 provider 配一次即可。
+    // DeepSeek 保留 `balanceApiKeyEnv` 特例：llm-pi-ai 未配 deepseek key 时仍可用该 env 查余额。
+    // 注意不能只看路由是否存在——路由存在但 apiKeyEnv 缺失（只配了 baseURL 之类）时，
+    // 兜底同样要生效，否则余额会错标「未配置」。
+    const piProviders = await readPiAiProviders(ctx.settings)
+    const providers = { ...piProviders }
+    const deepseekKey = providers['deepseek']?.apiKeyEnv
+    if (deepseekKey === undefined || deepseekKey === '') {
+      providers['deepseek'] = { ...providers['deepseek'], apiKeyEnv: config.balanceApiKeyEnv ?? DEFAULT_BALANCE_API_KEY_ENV }
+    }
+    const balances = await queryBalances(ctx, providers)
+    // 自定义 Provider 余额（任意 HTTP 端点）：独立于内置三家，逐个成败。
+    const custom = await queryCustomBalances(ctx, config.customBalances ?? [])
+    // 声明端点（declarative）：为内置表没有的供应商自声明余额/额度接口。
+    // 绑定到某条已配置 provider 的同源地址，安全边界由 declarative.ts 强制执行。
+    const declared = await queryDeclaredEndpoints(ctx, piProviders, config.declaredEndpoints ?? [])
+    // P1-5 鉴权分类告警：区分「配置错了 key」与「上游不可达」，协助定位。
+    for (const row of [...balances, ...custom, ...declared]) {
+      if (row.error === 'unauthorized') warnAuthOnce('balance', row.provider, row.displayName)
+    }
+    // 余额差对账：用官方余额当日变动反推消费，与本地账本今日官方费用比对。
+    // 只对 DeepSeek 官方余额行做（订阅/第三方不动官方余额）；取不到余额时不打扰。
+    // 币种口径：余额差是原生币种，账本费用是人民币——USD 账户直接比对会永久
+    // 虚报漂移（约 6.8 倍差），只在人民币（或未标注币种的历史形状）下对账。
+    const official = balances.find(row => row.provider === 'deepseek')
+    let reconcile: ReconcileEvent | undefined
+    const reconcilable = official !== undefined && official.totalBalance !== undefined
+      && (official.currency === undefined || official.currency.toUpperCase() === 'CNY')
+    if (official !== undefined && reconcilable) {
+      const now = Date.now()
+      const today = dayStamp(now)
+      // 对账基线取「最近一次**已完成**的聚合文档」，既不触发也不等待新的
+      // 全量折叠（issue #104）：重度用户（数百会话、GB 级日志）的一次折叠要
+      // 几十秒，挂在余额路由上会把响应拖到分钟级——浏览器同源连接只有 6 条，
+      // 多标签页各挂一条即占满连接池，宿主界面随之卡死。聚合由 usage-stats
+      // 驱动（自带 1.5s 预算的 stale-while-revalidate），内存里始终留有一份
+      // 最近文档可读。
+      const recent = aggregator.lastDocOf()
+      // 文档够新（≤5 分钟）才可信：过期文档的「今日费用」偏小，用它对账会
+      // 报假漂移。基线不可信时本轮不对账、不动基准（基准过期后重新打点会
+      // 产生假漂移），并在后台补一次聚合，下一轮刷新即可用上新基线。
+      const basisFresh = recent !== undefined && now - recent.updatedAt <= RECONCILE_BASIS_MAX_AGE_MS
+      if (basisFresh) {
+        const todayOfficialCost = recent?.byDay[today]?.officialCost ?? 0
+        const result = reconcileBalanceDelta(reconcileRef, official, todayOfficialCost, today, now)
+        const refChanged = result.ref !== null && result.ref !== reconcileRef
+        reconcileRef = result.ref
+        if (result.event !== null && result.event.kind !== 'flat') {
+          reconcile = { ...result.event, provider: official.displayName, ...(official.currency === undefined ? {} : { currency: official.currency }) }
         }
-        // 外部余额 API 低频变化：缓存 5 分钟，命中直接返回，避免每 30 秒后台轮询都打上游。
-        if (Date.now() - balanceCache.at < BALANCE_CACHE_MS) {
-          res.end(JSON.stringify(balanceCache.doc))
-          return
-        }
-        try {
-          const balances = await queryBalances(ctx, providers)
-          // 自定义 Provider 余额（任意 HTTP 端点）：独立于内置三家，逐个成败。
-          const custom = await queryCustomBalances(ctx, config.customBalances ?? [])
-          // 声明端点（declarative）：为内置表没有的供应商自声明余额/额度接口。
-          // 绑定到某条已配置 provider 的同源地址，安全边界由 declarative.ts 强制执行。
-          const declared = await queryDeclaredEndpoints(ctx, piProviders, config.declaredEndpoints ?? [])
-          // P1-5 鉴权分类告警：区分「配置错了 key」与「上游不可达」，协助定位。
-          for (const row of [...balances, ...custom, ...declared]) {
-            if (row.error === 'unauthorized') warnAuthOnce('balance', row.provider, row.displayName)
-          }
-          // 余额差对账：用官方余额当日变动反推消费，与本地账本今日官方费用比对。
-          // 只对 DeepSeek 官方余额行做（订阅/第三方不动官方余额）；取不到余额时不打扰。
-          const official = balances.find(row => row.provider === 'deepseek')
-          let reconcile: ReconcileEvent | undefined
-          if (official !== undefined && official.totalBalance !== undefined) {
-            const now = Date.now()
-            const today = dayStamp(now)
-            let todayOfficialCost = 0
-            try {
-              const stats = await aggregator.aggregate()
-              todayOfficialCost = stats.byDay[today]?.officialCost ?? 0
-            } catch {
-              // 聚合失败时不阻塞余额查询；对账基准确认可用后仍返回（消费计 0 下次再核）。
-            }
-            const result = reconcileBalanceDelta(reconcileRef, official, todayOfficialCost, today, now)
-            reconcileRef = result.ref
-            if (result.event !== null && result.event.kind !== 'flat') reconcile = { ...result.event, provider: official.displayName }
-            if (result.ref !== null) persistReconcileRef()
-          }
-          const doc = { balances: [...balances, ...custom, ...declared], ...(reconcile === undefined ? {} : { reconcile }) }
-          balanceCache = { at: Date.now(), doc }
-          res.end(JSON.stringify(doc))
-        } catch (error) {
-          // 查询失败：保留上次成功快照（从未成功则为空余额），避免每 30 秒把偶发故障刷成「未配置」。
-          console.warn('[usage-billing] refreshBalances failed; serving cached balances:', error)
-          res.end(JSON.stringify(balanceCache.doc))
-        }
-      },
-    }),
-    'usage-billing: balance route',
-  )
+        // 基准未变（ok/flat 保早间基线）不重复落盘；只在基准真正前移时写。
+        if (refChanged) persistReconcileRef()
+      } else {
+        // 后台补一次聚合（不等待）：下轮刷新才有可信基线。聚合自身有 TTL 与
+        // in-flight 去重，不会叠出多份折叠。
+        void aggregator.aggregate().catch(() => { /* 下一轮刷新再试 */ })
+        swallowed('reconcile-basis-stale')
+      }
+    }
+    const doc = { balances: [...balances, ...custom, ...declared], ...(reconcile === undefined ? {} : { reconcile }) }
+    balanceCache = { at: Date.now(), doc }
+  }
+  const refreshBalanceOnce = (): Promise<void> => {
+    balanceInflight ??= refreshBalance().finally(() => { balanceInflight = undefined })
+    return balanceInflight
+  }
+  registerBalanceRoute(ctx, {
+    trustedHosts,
+    cached: () => balanceCache,
+    refreshOnce: refreshBalanceOnce,
+    cacheMs: BALANCE_CACHE_MS,
+    responseBudgetMs: BALANCE_RESPONSE_BUDGET_MS,
+  })
+
 
   // usage_stats 工具开关：插件自带的读/写接口（不依赖宿主浏览器设置白名单）。
   // GET 返回当前是否注入；POST 写设置命名空间（重启应用后工具注入随新值生效）。
-  ctx.effect(
-    () => ctx.webServer.register({
-      kind: 'exact',
-      path: '/api/billing/usage-tool',
-      handler: async (req, res) => {
-        if (!guardLoopback(req, res)) return
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-        const enabled = usageSettingsScope?.get().enableUsageStatsTool ?? DEFAULT_ENABLE_USAGE_STATS_TOOL
-        if (req.method === 'GET') {
-          res.end(JSON.stringify({ enabled }))
-          return
-        }
-        if (req.method !== 'POST') {
-          res.writeHead(405, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify({ error: 'method not allowed' }))
-          return
-        }
-        // 跨站写保护：POST 是写操作（改写设置命名空间），必须校验 Origin 头是回环，
-        // 且 Content-Type 为 application/json。跨站表单/fetch 的简单请求只能带
-        // text/plain 等，带不了 application/json（会触发 CORS preflight 而被上方
-        // guardLoopback 的 methodOk 拒绝），从两个维度堵住 CSRF。
-        if (!isLoopbackOrigin(req.headers.origin)) {
-          res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify({ error: 'forbidden: loopback only' }))
-          return
-        }
-        if (!(req.headers['content-type'] ?? '').toLowerCase().includes('application/json')) {
-          res.writeHead(415, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify({ error: 'unsupported content-type' }))
-          return
-        }
-        // 读取并解析 JSON body 后写设置命名空间；settings 服务未就绪时拒绝写。
-        // body 只承载一个布尔开关，512 字节上限已足够，防坏/恶意 body 拖住 handler。
-        try {
-          let body = ''
-          for await (const chunk of req) {
-            body += String(chunk)
-            if (body.length > 512) {
-              res.end(JSON.stringify({ error: 'body too large' }))
-              return
-            }
-          }
-          const parsed = JSON.parse(body === '' ? '{}' : body) as { enabled?: unknown }
-          if (usageSettingsScope === undefined) {
-            res.end(JSON.stringify({ error: 'settings unavailable' }))
-            return
-          }
-          const next = parsed.enabled === true
-          await usageSettingsScope.update({ enableUsageStatsTool: next })
-          res.end(JSON.stringify({ ok: true, enabled: next }))
-        } catch {
-          res.end(JSON.stringify({ error: 'invalid' }))
-        }
-      },
-    }),
-    'usage-billing: usage-tool route',
-  )
+  registerUsageToolRoute(ctx, {
+    trustedHosts,
+    read: () => usageSettingsScope !== undefined ? usageSettingsScope.get().enableUsageStatsTool : readUsageStatsToggle(config),
+    write: async (next) => {
+      if (usageSettingsScope !== undefined) await usageSettingsScope.update({ enableUsageStatsTool: next })
+      else if (liveSettings !== undefined) await liveSettings.update(liveSettings.ns, { [ENABLE_USAGE_STATS_TOOL_FIELD]: next })
+      else throw new Error('settings unavailable')
+    },
+    syncTool: syncUsageTool,
+  })
+
 
   // 订阅套餐额度：外部 API 低频变化，缓存 5 分钟避免每次轮询都打上游。
   // 只返回"识别到"的套餐：有额度适配器的查剩余量，无适配器的保留识别行
   //（客户端显示"额度接口未接入"）；用户没配置 key 的 provider 一律不出现。
   let quotaCache: { at: number; quotas: readonly SubscriptionQuota[] } = { at: 0, quotas: [] }
   const refreshQuotas = async (): Promise<void> => {
+    // 每轮配额刷新同步重分类 MiniMax 路由（key 换了 / 新配了路由即时跟上豁免口径）。
+    await refreshMiniMaxPlanRoutes()
     const { keys, identified } = await resolveSubscriptionKeys(ctx.settings, ctx.credentials)
     // 让 llm-pi-ai 的 baseURL 可覆盖订阅查询的 region 默认值（如 MiniMax 国际版需
     // `api.minimax.io`、或自配中转/staging）：带 baseURL 的 plan 会在各 adapter 里
@@ -1009,124 +1242,83 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
     }
     quotaCache = { at: Date.now(), quotas: rows }
   }
-  ctx.effect(
-    () => ctx.webServer.register({
-      kind: 'exact',
-      path: '/api/billing/subscriptions',
-      handler: async (req, res) => {
-        if (!guardLoopback(req, res)) return
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-        if (Date.now() - quotaCache.at >= SUBSCRIPTION_CACHE_MS) {
-          try {
-            await refreshQuotas()
-          } catch (error) {
-            // 刷新意外抛错时仍用旧缓存响应，绝不让已 writeHead 的响应挂起。
-            console.warn('[usage-billing] refreshQuotas failed; serving cached quotas:', error)
-          }
-        }
-        res.end(JSON.stringify({ quotas: quotaCache.quotas }))
-      },
-    }),
-    'usage-billing: subscriptions route',
-  )
+  // in-flight 去重：与 balance 路由同因——并发请求共享同一次进行中的订阅刷新。
+  let quotasInflight: Promise<void> | undefined
+  const refreshQuotasOnce = (): Promise<void> => {
+    quotasInflight ??= refreshQuotas().finally(() => { quotasInflight = undefined })
+    return quotasInflight
+  }
+  registerSubscriptionsRoute(ctx, {
+    trustedHosts,
+    cached: () => quotaCache,
+    refreshOnce: refreshQuotasOnce,
+    cacheMs: SUBSCRIPTION_CACHE_MS,
+    responseBudgetMs: QUOTA_RESPONSE_BUDGET_MS,
+  })
 
-  // 中转站额度：识别配了 baseURL + apiKeyEnv 的路由所指向的中转站程序（New API /
-  // Sub2API），读出「余额 / 额度窗口」。外部 API 低频变化，缓存 5 分钟避免每次
-  // 轮询都打上游；只返回配了 baseURL 的路由，官方直连/未配置路由不出现。
+
+
+  // 中转站额度：识别配了 baseURL 的路由所指向的中转站程序（New API / Sub2API），
+  // 读出「余额 / 额度窗口」。key 候选 = 显式 apiKeyEnv（经典形态）+ 路由约定 ref
+  // （新版宿主把路由 key 存进凭据 refs）；显式引用存在或任一候选解析出值才探测，
+  // 两者皆无不列行。外部 API 低频变化，缓存 5 分钟避免每次轮询都打上游；官方
+  // 直连/未配置路由不出现。
   let relayCache: { at: number; quotas: readonly RelayQuota[] } = { at: 0, quotas: [] }
   const refreshRelay = async (): Promise<void> => {
     const providers = await readPiAiProviders(ctx.settings)
+    const resolve = refResolver(ctx.credentials)
     const routes: RelayRoute[] = []
     for (const [route, entry] of Object.entries(providers)) {
-      if (entry.baseURL === undefined || entry.apiKeyEnv === undefined) continue
+      if (entry.baseURL === undefined) continue
       // 官方厂商端点（DeepSeek/OpenAI 等）卖的是官方按量余额而非中转站额度，
       // 探测其 /v1/usage、/api/status 只会得到 404 或非中转站格式，面板应排除
       // 这类域，避免误判为「未识别」。中转站面板只列真正的第三方中转程序。
       if (isOfficialBaseUrl(entry.baseURL)) continue
+      const apiKeyRefs = [...new Set([
+        ...(entry.apiKeyEnv !== undefined ? [entry.apiKeyEnv] : []),
+        ...routeKeyRefCandidates(route),
+      ])]
+      const hit = await firstResolvedRef(apiKeyRefs, resolve)
+      if (entry.apiKeyEnv === undefined && hit === undefined) continue
       routes.push({
         route,
         baseURL: entry.baseURL,
-        apiKeyEnv: entry.apiKeyEnv,
+        apiKeyRefs,
         ...(entry.displayName === undefined ? {} : { displayName: entry.displayName }),
       })
     }
     relayCache = { at: Date.now(), quotas: await queryRelayQuotas(ctx, routes) }
   }
-  ctx.effect(
-    () => ctx.webServer.register({
-      kind: 'exact',
-      path: '/api/billing/relay-quotas',
-      handler: async (req, res) => {
-        if (!guardLoopback(req, res)) return
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-        if (Date.now() - relayCache.at >= SUBSCRIPTION_CACHE_MS) {
-          try {
-            await refreshRelay()
-          } catch (error) {
-            // 刷新意外抛错时仍用旧缓存响应，绝不让已 writeHead 的响应挂起。
-            console.warn('[usage-billing] refreshRelay failed; serving cached relay quotas:', error)
-          }
-        }
-        // 诊断：每条路由的归类（origin / kind），供「我的中转站为什么不显示」自查。
-        const diagnostics = relayCache.quotas.map(row => ({ route: row.route, origin: row.origin, kind: row.kind }))
-        res.end(JSON.stringify({ quotas: relayCache.quotas, diagnostics }))
-      },
-    }),
-    'usage-billing: relay-quotas route',
-  )
+  // in-flight 去重：与 balance 路由同因——并发请求共享同一次进行中的中转站探测。
+  let relayInflight: Promise<void> | undefined
+  const refreshRelayOnce = (): Promise<void> => {
+    relayInflight ??= refreshRelay().finally(() => { relayInflight = undefined })
+    return relayInflight
+  }
+  registerRelayQuotasRoute(ctx, {
+    trustedHosts,
+    cached: () => relayCache,
+    refreshOnce: refreshRelayOnce,
+    cacheMs: SUBSCRIPTION_CACHE_MS,
+    responseBudgetMs: QUOTA_RESPONSE_BUDGET_MS,
+  })
 
-  ctx.effect(
-    () => ctx.webServer.register({
-      kind: 'exact',
-      path: '/api/billing/usage-stats',
-      handler: async (req, res) => {
-        if (!guardLoopback(req, res)) return
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-        // 宿主配置（月度预算 / 余额告警阈值）与插件版本不是聚合产物：在响应边界
-        // 注入，实时与快照两条路径一致。
-        const decorate = (doc: Record<string, unknown>): Record<string, unknown> => ({
-          ...doc,
-          pluginVersion: PACKAGE_VERSION,
-          ...(config.monthlyBudget === undefined ? {} : { budget: config.monthlyBudget }),
-          ...(config.lowBalanceThreshold === undefined ? {} : { lowBalanceThreshold: config.lowBalanceThreshold }),
-        })
-        // stale-while-revalidate：聚合是全量扫描（重度用户上万条会话的冷启动折叠
-        // 以分钟计），HTTP 请求绝不全程等它——只给 RESPONSE_BUDGET_MS 的等待预算，
-        // 超预算立即回最近一次快照；后台折叠完成后快照随之刷新（挂在聚合 promise
-        // 上，与响应路径解耦）。宿主是单进程，慢响应期间事件循环被折叠占住，
-        // 会话/模型列表 RPC 会一起饿死（用户反馈的启动卡顿）。
-        const aggregating = aggregator.aggregate()
-        void aggregating.then(
-          stats => { persistSnapshot(decorate(stats as unknown as Record<string, unknown>)) },
-          () => { /* 失败路径由下方快照兜底，此处只抑制未处理拒绝 */ },
-        )
-        let fresh: Record<string, unknown> | undefined
-        try {
-          fresh = await Promise.race([
-            aggregating.then(stats => stats as unknown as Record<string, unknown>),
-            new Promise<undefined>(resolve => { setTimeout(() => { resolve(undefined) }, RESPONSE_BUDGET_MS).unref() }),
-          ])
-        } catch (error) {
-          // Persistence read failed; fall through to the JSON-file candidates.
-          // 记录异常尾部（含已折叠会话数），避免「只能靠猜」——聚合失败时用户
-          // 至少能从日志看到原因（单会话损坏已在 aggregate 内跳过并告警）。
-          console.error('[usage-billing] usage-stats aggregate failed, falling back to snapshot:', error)
-        }
-        if (fresh !== undefined) {
-          res.end(JSON.stringify(decorate(fresh)))
-          return
-        }
-        for (const candidate of candidates) {
-          const doc = await readSnapshot(candidate)
-          // Accept only parseable JSON so a stale or partial file never
-          // reaches the dashboard as if it were real.
-          if (doc === null) continue
-          res.end(JSON.stringify(decorate(doc)))
-          return
-        }
-        res.end(JSON.stringify({ error: 'usage stats unavailable' }))
-      },
-    }),
-    'usage-billing: usage-stats route',
-  )
+
+
+  // usage-stats 响应体缓存由 src/routes/usage-stats.ts 内的模块级单例持有
+  // （按 doc 引用 + config 字段缓存，30s 轮询期间复用）。
+  registerUsageStatsRoute(ctx, {
+    trustedHosts,
+    aggregator,
+    config,
+    candidates,
+    persistSnapshot,
+    readSnapshot,
+    packageVersion: PACKAGE_VERSION,
+    responseBudgetMs: RESPONSE_BUDGET_MS,
+    // 超预算时的第一回落：内存里最近一次**已完成**的聚合文档（比落盘快照新——
+    // 落盘受 5 分钟节流约束，内存文档只落后一个聚合周期）。
+    lastDoc: () => aggregator.lastDocOf() as unknown as Record<string, unknown> | undefined,
+  })
+
 }

@@ -7,6 +7,10 @@
   },
   "files": [
     "src/index.ts",
+    "src/silent.ts",
+    "src/config.ts",
+    "src/guard.ts",
+    "src/builtin-catalog.ts",
     "src/declarative.ts",
     "src/reconcile.ts",
     "src/invariant.ts",
@@ -16,11 +20,22 @@
     "src/client/usage-billing-settings.ts",
     "src/pricing-fetch.ts",
     "src/pricing-shared.ts",
+    "src/task-queue-shared.ts",
+    "src/task-queue.ts",
+    "src/route-keys.ts",
     "src/balance.ts",
     "src/subscriptions.ts",
     "src/resilience.ts",
     "src/tc3.ts",
-    "src/relay.ts"
+    "src/relay.ts",
+    "src/routes/notify-claim.ts",
+    "src/routes/pricing.ts",
+    "src/routes/balance.ts",
+    "src/routes/usage-tool.ts",
+    "src/routes/subscriptions.ts",
+    "src/routes/relay-quotas.ts",
+    "src/routes/usage-stats.ts",
+    "src/routes/task-queue.ts"
   ],
   "references": []
 }

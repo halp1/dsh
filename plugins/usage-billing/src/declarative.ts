@@ -14,8 +14,9 @@
  * 2. `path` 必须单斜杠绝对路径：`//evil.example/x` 是协议相对 URL，`new URL()` 会
  *    把它解析到别的主机；构造后还会再校验一次 origin。
  * 3. 只发 GET，无请求体，无自定义 method / headers。
- * 4. 凭据仍从匹配 provider 自己的 `apiKeyEnv` 取，经同一凭据 seam 解析；声明不能
- *    指定任何凭据。
+ * 4. 凭据仍只从匹配 provider 自己的凭据取：显式 `apiKeyEnv` 优先，缺省按路由
+ *    约定 ref（新版宿主的存放形态，见 route-keys.ts）经同一凭据 seam 解析；声明
+ *    不能指定任何凭据。
  * 5. 跨源重定向直接失败，不跟随——那是绕过第 1 条最省事的办法。
  * 6. 响应体有大小上限与共享超时，坏 / 恶意端点拖不住面板。
  * 7. 声明不能覆盖内置读法：只在内置表答不上来时它才轮到。
@@ -28,6 +29,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { DeclaredEndpointConfig, DeclaredWindowConfig, ProviderBalance, SubscriptionWindow } from './pricing-shared.ts'
+import { firstResolvedRef, routeKeyRefCandidates } from './route-keys.ts'
 import { createCooldownGate, withRetry } from './resilience.ts'
 
 /** Abort a declared fetch when the upstream hangs beyond this budget. */
@@ -175,10 +177,19 @@ export async function queryDeclaredEndpoints(
   providers: Readonly<Record<string, { baseURL?: string; apiKeyEnv?: string }>>,
   declarations: readonly DeclaredEndpointConfig[],
 ): Promise<readonly ProviderBalance[]> {
-  const byOrigin = new Map<string, { apiKeyEnv?: string }>()
-  for (const entry of Object.values(providers)) {
+  const byOrigin = new Map<string, { route: string; apiKeyEnv?: string }>()
+  for (const [route, entry] of Object.entries(providers)) {
     const origin = entry.baseURL === undefined ? undefined : normalizeDeclaredOrigin(entry.baseURL)
-    if (origin !== undefined && !byOrigin.has(origin)) byOrigin.set(origin, entry)
+    if (origin !== undefined && !byOrigin.has(origin)) byOrigin.set(origin, { route, ...(entry.apiKeyEnv !== undefined ? { apiKeyEnv: entry.apiKeyEnv } : {}) })
+  }
+  // 宽容解析口：与查询体分离，单条声明的凭据解析失败不拖垮整批。
+  const resolveRef = async (name: string): Promise<string | undefined> => {
+    try {
+      const hit = await ctx.credentials.resolve(credentialRef(name))
+      return hit?.value !== undefined && hit.value !== '' ? hit.value : undefined
+    } catch {
+      return undefined
+    }
   }
   return await Promise.all(declarations.map(async (decl): Promise<ProviderBalance> => {
     const displayName = typeof decl.displayName === 'string' && decl.displayName !== '' ? decl.displayName : '已声明'
@@ -197,8 +208,14 @@ export async function queryDeclaredEndpoints(
     if (!declaredGate.check(gateKey)) {
       return { provider, displayName, declared: true, error: 'unreachable' }
     }
-    const hit = await ctx.credentials.resolve(credentialRef(matched.apiKeyEnv ?? ''))
-    if (hit === undefined || hit.value === '') {
+    // 规则 4：凭据候选（显式 apiKeyEnv 在首，路由约定 ref 补后——新版宿主把路由
+    // key 存进凭据 refs）。全部落空按未配置上报，不发请求。
+    const credentialRefs = [
+      ...(matched.apiKeyEnv !== undefined ? [matched.apiKeyEnv] : []),
+      ...routeKeyRefCandidates(matched.route),
+    ]
+    const hit = await firstResolvedRef(credentialRefs, resolveRef)
+    if (hit === undefined) {
       return { provider, displayName, declared: true, error: 'unconfigured' }
     }
     // URL 由匹配 provider 的 origin 构造，规则 2 再次校验：构造后 origin 必须一致。
@@ -262,7 +279,15 @@ async function fetchDeclaredBody(url: URL, raw: boolean, apiKey: string): Promis
       const text = await response.text()
       // 规则 6：响应体上限。
       if (text.length > MAX_BODY_BYTES) throw new HttpStatusError('body-too-large', 413)
-      return JSON.parse(text) as unknown
+      // 规则 7：响应体必须可被 JSON 解析。上游改 Content-Type（HTML 错误页、空 body、
+      // 编码错位）时，原生 SyntaxError 不带任何诊断信息；显式分类为 parse-error 后，
+      // 调用方仍按 unreachable 处理（保持外层 try/catch 的统一降级），但保留 future
+      // 区分点（鉴权错 / 内容错）的可观察性入口。
+      try {
+        return JSON.parse(text) as unknown
+      } catch (cause) {
+        throw new HttpStatusError('parse-error', 0)
+      }
     } finally {
       clearTimeout(timer)
     }
@@ -273,7 +298,7 @@ async function fetchDeclaredBody(url: URL, raw: boolean, apiKey: string): Promis
 /** HTTP 状态错误：携带 statusCode，供调用方区分 unauthorized / 其它。 */
 class HttpStatusError extends Error {
   readonly statusCode: number
-  readonly kind: 'unauthorized' | 'redirect' | 'http-error' | 'body-too-large'
+  readonly kind: 'unauthorized' | 'redirect' | 'http-error' | 'body-too-large' | 'parse-error'
   constructor(kind: HttpStatusError['kind'], statusCode: number) {
     super(`${kind}:${String(statusCode)}`)
     this.kind = kind

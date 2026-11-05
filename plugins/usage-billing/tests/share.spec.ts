@@ -5,7 +5,9 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { recostWithUserPrices, lastSevenDays, sinceMondayOf, type UsageStats } from '../src/client/UsageBilling.tsx'
+import { recostWithUserPrices } from '../src/client/domain/recost.ts'
+import { lastSevenDays, sinceMondayOf } from '../src/client/domain/week.ts'
+import type { UsageStats } from '../src/client/domain/types.ts'
 import { applyUserPrices, getUserPrices, normalizeOriginInput, originsMatch } from '../src/client/pricing.ts'
 
 /** 最小可用统计文档：day×model 一格 + 同日聚合 + 未计价模型提示列表。 */
