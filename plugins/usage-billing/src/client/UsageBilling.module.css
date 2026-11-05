@@ -34,207 +34,26 @@
   stroke-width: 2;
 }
 
-/* Wide mode: dashboard-style data card — icon badge, month figure, sparkline.
-   向设计「trigger-card」中性卡片看齐：实底 + 1px 边框 + 轻投影，去除重毛玻璃靠模糊，
-   图标徽章保留蓝色渐变为整卡唯一色彩焦点。 */
+/* Match the host's small footer controls, showing only the selected metric. */
 .trigger {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  /* 允许卡片在 footer 横向 flex 行（无 wrap）里收缩，不靠 nowrap 金额撑开兄弟按钮。 */
-  min-width: 0;
-  padding: 9px 12px;
-  overflow: hidden;
-  border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: 14px;
-  background: var(--dsw-alias-bg-layer-2);
-  box-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
-  color: var(--dsw-alias-label-primary);
-  cursor: pointer;
-  text-align: left;
-  transition: border-color 160ms ease, transform 160ms ease, box-shadow 160ms ease;
-}
-
-.trigger:hover,
-.trigger:focus-visible {
-  border-color: var(--dsw-static-blue-500);
-  box-shadow: 0 6px 18px -8px color-mix(in srgb, var(--dsw-static-blue-500) 45%, transparent);
-  transform: translateY(-1px);
-  outline: none;
-}
-
-/* 图标徽章：设计 trigger-icon —— 中性边框方块，取消渐变蓝底（唯一色彩让位给数字）。 */
-.triggerIcon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
   flex: none;
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  border: 1px solid var(--dsw-alias-border-l1);
-  color: var(--dsw-alias-label-secondary);
-  opacity: 0.8;
-}
-
-.triggerIcon svg {
-  width: 16px;
-  height: 16px;
-  stroke-width: 2;
-}
-
-/* 文本主体：当月（标签 + ¥ + 数字分离）+ 今日/本周 副行。 */
-.triggerMain {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.triggerPrimary {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 5px;
-  min-width: 0;
-}
-
-/* 维度标签（当月）：小灰字。
-   FORK PATCH (halp1): `flex: 0 1 auto` —— 空间不足时**标签先让位**。
-   英文 locale 的标签（"This month"）比中文（"当月"）宽得多，原先标签与金额
-   同权收缩，导致金额被截成「54…」。标签截断可接受，金额截断不可接受。 */
-.triggerLabel {
-  font-size: 11px;
-  line-height: 15px;
-  color: var(--dsw-alias-label-tertiary);
-  white-space: nowrap;
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* 币种符号：小号弱化。 */
-.triggerYen {
-  font-size: 12px;
-  line-height: 16px;
   font-weight: 600;
-  color: var(--dsw-alias-label-tertiary);
-  font-variant-numeric: tabular-nums;
-}
-
-/* 当月主数值：等宽主色。
-   FORK PATCH (halp1): `flex: 0 0 auto` —— 金额是这张卡的存在理由，绝不收缩。
-   连同 .triggerLabel 的 `0 1 auto`，压缩顺序变成「标签先截断，金额永远完整」，
-   修掉英文 locale 下把金额截成「54…」的问题。 */
-.triggerMetric {
-  font-size: 20px;
-  line-height: 24px;
-  font-weight: 700;
-  color: var(--dsw-alias-label-primary);
-  letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-  flex: 0 0 auto;
-  overflow: visible;
 }
 
-/* 副行：今日 / 本周 费用，次层级。 */
-.triggerSub {
-  font-size: 10px;
-  line-height: 14px;
-  color: var(--dsw-alias-label-tertiary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.trigger:focus-visible {
+  outline: 2px solid var(--dsw-static-blue-500);
+  outline-offset: 2px;
 }
 
-/* 近 7 天 sparkline：常驻迷你趋势，底对齐。 */
-.triggerSpark {
-  display: flex;
-  align-items: flex-end;
-  gap: 2px;
-  height: 20px;
-  flex: none;
-}
-
-.triggerSparkBar,
-.triggerSparkHot {
-  width: 3px;
-  border-radius: 1px 1px 0 0;
-  background: var(--dsw-static-blue-500);
-  opacity: 0.6;
-}
-
-.triggerSparkHot {
-  opacity: 1;
-}
-
-/* 触发卡外壳：hover 速览卡的定位上下文。
-   footerActions 槽位容器是横向 flex 行（宿主无 wrap 规则）；部分兄弟插件
-   （dsh-cpa-status / dsh-mcp-connector）会用全局 !important 把容器改成
-   column，flex-basis 在 column 下语义变成高度——1.0.26 起的 `flex: 1 1 180px`
-   曾把卡片纵向拉到 180px 高（issue #36 的「漂到侧栏中部」）。因此尺寸语义
-   一律用 width:100%（两个方向下都表示占满可用宽度，高度恒由内容决定）：
-   独占/纵向时满宽；row 共存时 width 作为 basis 参与收缩，兄弟胶囊
-   flex-shrink:0 不可缩，卡片被收到的宽度由 96px 地板 + 容器查询分档降级
-   兜底（issue #32），核心「当月金额」始终可读且不溢出。
-   container-type/name: 以卡片自身实际分配到的宽度为容器，做分档响应式降级——侧边栏
-   变窄或兄弟图标增多导致卡片可用宽度不足时，逐级隐藏次要信息。 */
+/* Keep the trigger content-sized instead of taking over the footer row. */
 .triggerWrap {
   position: relative;
-  display: block;
-  flex: 1 1 auto;
-  width: 100%;
-  min-width: 96px;
+  display: inline-flex;
+  align-items: center;
+  flex: none;
   max-width: 100%;
-  container-type: inline-size;
-  container-name: billing-trigger;
-}
-
-/* 分档降级：按卡片实际分配到的宽度逐级收敛，保证「当月金额」始终可见且不溢出。
-   —— 中档（不足 ~230px）：趋势 sparkline 让位，微收内边距/间距；
-   —— 窄档（不足 ~190px）：副行（今日/本周）与趋势整体隐藏，仅保留 icon + 当月金额。
-
-   FORK PATCH (halp1): 断点从 200/170 上调到 230/190。原值是按中文标签宽度定的
-   （「当月」2 字、「今日 ¥4.5 · 本周」），英文 locale 下同样的内容要宽得多
-   （"This month"、"Today $0.6 · This week"），于是在原断点之上就已经开始截断，
-   出现「This m…」「This w…」这种半个词。上调后英文在侧栏常见宽度下完整显示，
-   真窄时直接整块隐藏，而不是留下截断的残词。 */
-@container billing-trigger (max-width: 230px) {
-  .trigger {
-    gap: 6px;
-    padding: 8px 10px;
-  }
-  .triggerSpark {
-    display: none;
-  }
-}
-
-@container billing-trigger (max-width: 190px) {
-  .triggerSub {
-    display: none;
-  }
-  .triggerLabel {
-    display: none;
-  }
-}
-
-/* 极窄档（不足 ~110px）：仅保留「当月金额」，icon/趋势/标签全部让位，金额居中。
-   极端窄的侧边栏下仍能看到成本数字，不残缺、不溢出。 */
-@container billing-trigger (max-width: 110px) {
-  .triggerIcon,
-  .triggerSpark,
-  .triggerSub,
-  .triggerLabel {
-    display: none;
-  }
-  .trigger {
-    justify-content: center;
-    padding: 8px 6px;
-  }
 }
 
 /* hover 速览卡：实底浮层，悬停触发卡时向上浮现；不抢点击。

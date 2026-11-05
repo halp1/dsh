@@ -15,7 +15,7 @@ import { createPortal } from 'react-dom'
 import clsx from 'clsx'
 import type { InjectFace, PropsLocale, PropsRenderSlots, PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SidebarFooterActionOwnerProps } from '@deepseek-ai/dsh-client-ui-sidebar/client'
-import { IconChevronDownOutline14, Menu, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconChevronDownOutline14, Menu, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import {
   type BillingCardPrefs,
@@ -1007,16 +1007,10 @@ function UsageBillingTrigger(
   props: UsageBillingProps & {
     onOpen: () => void
     monthCost: number
-    todayCost: number
-    weekCost: number
-    /** 近 7 天迷你柱数据：cost=当日费用，tokens=当日消耗 token（input+output）。 */
-    days: readonly { date: string; cost: number; tokens: number }[]
     /** 卡面主指标视角：花费金额 / Token 消耗。 */
     cardPrefs: BillingCardPrefs
-    /** 当月/今日/本周 累计 token（tokens 视角的主副行数字；口径与悬浮窗总 Token 一致）。 */
+    /** Monthly token total for the number-only trigger. */
     monthTokens: number
-    todayTokens: number
-    weekTokens: number
     /** hover 速览「主力直联/订阅消耗」+ 对应余额/配额数值文本与低值标记。 */
     vendorStatus: {
       direct: { name: string; text: string; low: boolean } | undefined
@@ -1039,8 +1033,8 @@ function UsageBillingTrigger(
   },
 ): React.ReactNode {
   const {
-    wide, t, onOpen, monthCost, todayCost, weekCost, days, vendorStatus, dash,
-    floatPrefs, subscriptions, cardPrefs, monthTokens, todayTokens, weekTokens,
+    wide, t, onOpen, monthCost, vendorStatus, dash,
+    floatPrefs, subscriptions, cardPrefs, monthTokens,
     currency,
   } = props
 
@@ -1127,11 +1121,9 @@ function UsageBillingTrigger(
     )
   }
 
-  // 近 7 天 sparkline 高度：随卡面视角取当日费用或当日 token，归一化到 4~16px。
   const tokenView = cardPrefs.metric === 'tokens'
-  const sparkValues = days.map(d => (tokenView ? d.tokens : d.cost))
-  const sparkMax = Math.max(...sparkValues, 0)
-  const sparkHeights = sparkValues.map(v => sparkMax > 0 ? 4 + (v / sparkMax) * 12 : 4)
+  const metric = tokenView ? formatTokens(monthTokens) : money(monthCost)
+  const metricLabel = `${t('title')}: ${tokenView ? t('triggerMonthTokens') : t('triggerMonth')} ${metric}`
 
   return (
     <span
@@ -1142,52 +1134,21 @@ function UsageBillingTrigger(
       onFocusCapture={() => { updatePopPos(); openPop() }}
       onBlurCapture={() => setPopOpen(false)}
     >
-      <button
+      <Button
         type="button"
+        size="sm"
         className={css.trigger}
         data-testid="billing-trigger"
         onClick={onOpen}
-        title={`${t('title')} · ${money(monthCost)}`}
+        title={metricLabel}
+        aria-label={metricLabel}
+        aria-haspopup="dialog"
       >
-        <span className={css.triggerIcon} data-testid="billing-trigger-icon">{cardIcon}</span>
-        {/* 设计 trigger-card：当月 = 标签 + ¥ + 数字(分离)，下方一行 今日/本周 副行。
-            tokens 视角：无币符，主副行均为 K/M/B 缩写（口径与悬浮窗总 Token 一致）。 */}
-        <span className={css.triggerMain}>
-          <span className={css.triggerPrimary}>
-            <span className={css.triggerLabel}>
-              {tokenView ? t('triggerMonthTokens') : t('triggerMonth')}
-            </span>
-            {tokenView ? (
-              <span className={css.triggerMetric} data-testid="billing-trigger-month-tokens">{formatTokens(monthTokens)}</span>
-            ) : (
-              <>
-                <span className={css.triggerYen} aria-hidden="true">{money(monthCost).charAt(0)}</span>
-                <span className={css.triggerMetric}>{money(monthCost).slice(1)}</span>
-              </>
-            )}
-          </span>
-          <span className={css.triggerSub} data-testid="billing-trigger-today">
-            {tokenView
-              ? `${t('triggerToday')} ${formatTokens(todayTokens)} · ${t('weekCost')} ${formatTokens(weekTokens)}`
-              : `${t('triggerToday')} ${money(todayCost)} · ${t('weekCost')} ${money(weekCost)}`}
-          </span>
-        </span>
-        <span className={css.triggerSpark} data-testid="billing-trigger-spark" aria-hidden="true">
-          {sparkHeights.map((h, index) => (
-            <span
-              key={days[index]?.date ?? String(index)}
-              className={index === sparkHeights.length - 1 ? css.triggerSparkHot : css.triggerSparkBar}
-              style={{ height: `${h}px` }}
-            />
-          ))}
-        </span>
-      </button>
-      {/* hover 速览：参考图风格「数据卡」——标题 + 更新时间 + 两列指标网格 + 底部主力消耗/额度提醒。
-          portal 到 body（issue #37）：触发卡的 container-type 使其成为 fixed 后代的
-          包含块，弹层坐标会被容器二次偏移（位置/宽度错乱的根源）；挂 body 后真正
-          相对视口定位，同时脱离侧栏 overflow 裁剪。显隐由 React hover 态驱动，位置
-          在 hover 进入与滚动/缩放时按触发卡 rect 重算；弹层自带 mouseenter/mouseleave
-          与触发卡互为 hover 桥接（120ms 关闭延迟见 schedulePopClose）。 */}
+        <span data-testid={tokenView ? 'billing-trigger-month-tokens' : undefined}>{metric}</span>
+      </Button>
+      {/* Keep the detailed quick view outside the sidebar's overflow clipping.
+          Its viewport position follows the compact button on hover, focus, scroll,
+          and resize. The close delay bridges the pointer into the portal. */}
       {createPortal(
       <span
         className={clsx(css.triggerPop, popOpen && css.triggerPopShown)}
@@ -3660,28 +3621,10 @@ export function UsageBilling(props: UsageBillingProps): React.ReactNode {
     .filter(([date]) => date.startsWith(today.slice(0, 7)))
     .reduce((sum, [, day]) => sum + day.cost, 0)
   const todayCost = stats.byDay[today]?.cost ?? 0
-  // 触发卡 hover 速览：本周累计 + 近 7 天迷你柱。
-  // 「本周」按自然周（周一起算，与标签语义一致，issue #39）：周一时它 ≈ 当日，
-  // 不再是「近 7 天」把上周用量卷进来、与当月几乎相等的错位。
-  const weekCost = sinceMondayOf(stats.byDay, today)
-  // 近 7 天柱状数据（费用 + 当日 token 合并一份，供 trigger 按视角取列）。
-  // token 口径与悬浮窗「总 Token」一致：input + output（缓存读单列，不并入）。
-  const last7 = useMemo(
-    () => lastSevenDays(stats.byDay).map((day) => {
-      const row = stats.byDay[day.date]
-      return { date: day.date, cost: day.cost, tokens: row === undefined ? 0 : row.input + row.output }
-    }),
-    [stats.byDay],
-  )
-  // tokens 视角的主副行数字：当月/今日/本周 累计 token（本周 = 自然周，issue #39）。
+  // Monthly tokens remain the compact trigger's selected token metric.
   const monthTokens = Object.entries(stats.byDay)
     .filter(([date]) => date.startsWith(today.slice(0, 7)))
     .reduce((sum, [, day]) => sum + day.input + day.output, 0)
-  const todayTokens = (() => {
-    const row = stats.byDay[today]
-    return row === undefined ? 0 : row.input + row.output
-  })()
-  const weekTokens = sinceMondayOf(stats.byDay, today, (row) => row.input + row.output)
 
   // 预算偏好：开关与金额经框架 store 读取；用户金额优先，宿主 monthlyBudget
   //（stats.budget）兜底为默认值。
@@ -3898,15 +3841,10 @@ export function UsageBilling(props: UsageBillingProps): React.ReactNode {
         t={t}
         onOpen={openDashboard}
         monthCost={monthCost}
-        todayCost={todayCost}
-        weekCost={weekCost}
-        days={last7}
         vendorStatus={vendorStatus}
         dash={dash}
         cardPrefs={cardPrefs}
         monthTokens={monthTokens}
-        todayTokens={todayTokens}
-        weekTokens={weekTokens}
         floatPrefs={floatPrefs}
         subscriptions={quotas}
         currency={currency}

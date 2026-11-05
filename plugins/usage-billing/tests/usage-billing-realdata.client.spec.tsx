@@ -104,6 +104,33 @@ describe('UsageBilling real-data surface', () => {
     }))
   })
 
+  it('keeps the compact trigger number-only while retaining dashboard, metric switching, and hover access', async () => {
+    localStorage.setItem('dsh.ui-usage-billing.card', JSON.stringify({ metric: 'tokens' }))
+    const usage = day(1, 700_000_000, 29_400_000, 0, 700_000_000, 6.79)
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify(
+      String(input).includes('/api/billing/usage-stats')
+        ? { total: usage, byModel: {}, byDay: { [todayStamp()]: usage } }
+        : { source: 'live', balances: [], quotas: [] },
+    ))))
+    render(<UsageBilling {...makeProps()} />)
+    const trigger = screen.getByTestId('billing-trigger')
+    await waitFor(() => { expect(trigger.textContent).toBe('729.4M') })
+    expect(trigger.querySelector('svg')).toBeNull()
+    expect(trigger.childElementCount).toBe(1)
+    expect(trigger.getAttribute('aria-label')).toContain('729.4M')
+    expect(trigger.getAttribute('aria-haspopup')).toBe('dialog')
+    fireEvent.focus(trigger)
+    expect(screen.getByTestId('billing-trigger-pop').getAttribute('aria-hidden')).toBe('false')
+    fireEvent.click(trigger)
+    expect(await screen.findByTestId('billing-dashboard')).toBeTruthy()
+    fireEvent.click(screen.getByTestId('billing-tab-settings'))
+    fireEvent.click(screen.getByTestId('billing-card-money'))
+    expect(trigger.textContent).toBe('$1.00')
+    expect(trigger.querySelector('svg')).toBeNull()
+    fireEvent.click(screen.getByTestId('billing-card-tokens'))
+    expect(trigger.textContent).toBe('729.4M')
+  })
+
   it('opens the dashboard over a realistic snapshot without throwing', async () => {
     const { container } = render(<UsageBilling {...makeProps()} />)
     const trigger = container.querySelector('button')

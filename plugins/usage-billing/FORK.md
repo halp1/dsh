@@ -121,6 +121,15 @@ Both are marked estimated because the exact IDs are gateway-specific and actual
 relay billing can differ. User-configured prices still take precedence. The
 ledger version is bumped again to recalculate readable pre-fix sessions.
 
+### Compact footer in fork.halp1.5
+
+The expanded sidebar footer now shows only the selected monthly metric, such as
+`729.4M`. It uses the host's small button sizing instead of a full-width card.
+The icon, labels, daily and weekly subline, and sparkline are removed. Clicking
+still opens the dashboard, hover or focus still exposes the quick view, and the
+button keeps a descriptive accessible name and tooltip. Collapsed rail behavior
+is unchanged.
+
 ## Pulling in upstream changes
 
 ```sh
