@@ -157,6 +157,14 @@ fold version 24 rebuilds readable pre-merge sessions.
 Inherited Pages publication and automatic issue creation only run in the
 canonical upstream repository. This fork remains private and cannot npm publish.
 
+## Composer queue controls removed in 1.8.2-fork.halp1.2
+
+The off-peak toggle and enqueue controls are no longer registered in composer
+slots. The corresponding display setting is removed rather than leaving a
+nonfunctional switch. The dashboard queue, existing tasks, and server-side queue
+functionality remain unchanged. No background summary polling is mounted by the
+removed composer controls.
+
 ## Pulling in upstream changes
 
 ```sh

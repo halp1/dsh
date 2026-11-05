@@ -1,7 +1,7 @@
 {
   "name": "@kenz1117/dsh-ui-usage-billing",
   "description": "Usage billing dashboard for DeepSeek Harness: sidebar cost metrics plus a full dashboard modal, priced from a current multi-provider catalog with real usage aggregated from session logs.",
-  "version": "1.8.2-fork.halp1.1",
+  "version": "1.8.2-fork.halp1.2",
   "keywords": [
     "deepseek-harness",
     "deepseek",
@@ -250,7 +250,8 @@
       "Builtin catalog retains free Flash and Gemini tiered/Opus thinking-fast gateway entries plus the verified Sonnet 5.5 cache-read rate",
       "OpenRouter parser accepts numeric and decimal-string prices, honors explicit cache-read rates, and avoids double promotional discounts",
       "Historical unknown routes retain catalog-cost estimates, visibly labeled as estimates, and never become official charges",
-      "Fork publication and issue-creation workflows are disabled outside the canonical upstream repository"
+      "Fork publication and issue-creation workflows are disabled outside the canonical upstream repository",
+      "Composer off-peak queue toggle/enqueue controls and their obsolete display setting are removed, while the dashboard queue is retained"
     ],
     "mergedUpstreamTag": "v1.8.2",
     "mergedUpstreamCommit": "4023b6c5bce0647944bc46b373461c070b69a9a9"
