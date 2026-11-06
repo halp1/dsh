@@ -1324,7 +1324,7 @@ export const BUILTIN_MODEL_CATALOG: readonly ModelEntry[] = [
     name: 'Claude Sonnet 5.5',
     provider: 'Anthropic',
     colorVar: 'dsw-static-red-400',
-    // Fork: retain the native Anthropic cache-read rate verified 2026-11-04.
+    // Native Anthropic cache-read rate verified 2026-11-04.
     price: { currency: 'USD', input: 2, cacheHit: 0.1, output: 10 },
   },
   {

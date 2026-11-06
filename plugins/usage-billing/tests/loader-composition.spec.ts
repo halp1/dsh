@@ -656,7 +656,7 @@ describe('plugin-registered adapter channels (issue #91)', () => {
     expect(doc.byModel.flash).toMatchObject({ calls: 1 })
   })
 
-  it('keeps the unknown bucket with fork estimates and warns when the registry cannot be read', { timeout: 60_000 }, async () => {
+  it('keeps the unknown bucket with historical estimates and warns when the registry cannot be read', { timeout: 60_000 }, async () => {
     // 负向对照：宿主没有 llm 注册表（服务缺失）时，通道仍按 issue #82 的 unknown 口径
     // 记 0，但必须留下可观察信号——静默退化正是 1.4.31 事故无法自查的原因。
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})

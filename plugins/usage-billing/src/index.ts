@@ -91,7 +91,7 @@ type NamespaceArg = string
 
 const SETTINGS_NAMESPACE_PATTERN = /^[a-z][a-z0-9-]*$/
 
-/** 校验并透过合法命名空间 id；非法值 fail-loud（与上游原行为一致）。 */
+/** 校验并透过合法命名空间 id；非法值 fail-loud（与宿主原行为一致）。 */
 function validateSettingsNamespace(value: string): NamespaceArg {
   if (!SETTINGS_NAMESPACE_PATTERN.test(value)) {
     throw new TypeError(`settings namespace "${value}" must match ${String(SETTINGS_NAMESPACE_PATTERN)}`)
@@ -782,7 +782,7 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
     ...(config.searchCallEstimateCny === undefined ? {} : { searchCallEstimateCny: config.searchCallEstimateCny }),
     // 冷phase闸门（issue #105）：与下面的预热定时器同源——闸门内的请求只吃账本
     // 轻文档，把「UI 一加载就全量折叠」从启动关键路径上摘掉。
-    // Fork: retain estimates for historical routes, while keeping them in the unknown bucket.
+    // Retain estimates for historical routes, while keeping them in the unknown bucket.
     estimateUnknownRoutes: true,
     deferFoldMs: replayDelayMs,
     ledger: ledgerStore,

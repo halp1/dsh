@@ -244,7 +244,7 @@ export function apply(ctx: Context): void {
     inject: (sessionId: string) => ({ sessionId: SessionId(sessionId) }),
   }, LiveCostChip))
 
-  // Fork: composer queue controls are not registered. The dashboard queue remains available.
+  // Composer queue controls are not registered. The dashboard queue remains available.
 
   // 对话完成提醒：会话 running→completed 迁移时弹一条桌面通知（默认关闭，
   // 用户到面板设置开启）。配置持久化在 localStorage，跨 tab 由 notifier 去重。

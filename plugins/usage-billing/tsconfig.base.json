@@ -1,7 +1,7 @@
 {
-  // Fork-local host-side compiler base. Mirrors the DSH monorepo's
+  // Package-local host-side compiler base. Mirrors the DSH monorepo's
   // tsconfig.base.json but omits the monorepo `paths` map (which resolves
-  // @deepseek-ai/* to monorepo source). A standalone fork resolves those
+  // @deepseek-ai/* to monorepo source). A package outside it resolves those
   // specifiers from node_modules (workspace symlinks or published packages),
   // so the map is neither portable nor needed here.
   "compilerOptions": {

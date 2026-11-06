@@ -220,7 +220,7 @@ export function sumSiteBuckets(
 
 /** Aggregation tuning options. */
 export interface AggregateOptions {
-  /** Fork: retain catalog-cost estimates for historical providers no longer configured. */
+  /** Retain catalog-cost estimates for historical providers no longer configured. */
   estimateUnknownRoutes?: boolean
   /** 订阅制 provider id 列表；缺省按订阅卡同款 id 判定（`isSubscriptionProviderId`）。 */
   subscriptionProviders?: readonly string[]
@@ -1148,7 +1148,7 @@ export function mergeUsageLedgerDocuments(document: UsageLedgerDocument, existin
 // 'latency'，Gemini Standard/Flex）按 DeepSeek 北京峰谷窗归桶：其计价与时刻
 // 无关（peakShare 混合），套窗分桶会让峰谷占比条虚含「时间窗计费」的流量。
 // bump 让日志仍在的会话重折出新峰谷口径；费用总额不受影响（byTier 仅展示层）。
-// Fork 24: gateway catalog additions and optional historical unknown-route estimates.
+// 24: gateway catalog additions and optional historical unknown-route estimates.
 export const FOLD_VERSION = 24
 
 /** 账本里拒读记录的条数上限：防异常环境（大量损坏日志）把账本撑爆；

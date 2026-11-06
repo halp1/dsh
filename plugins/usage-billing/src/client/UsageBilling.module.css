@@ -207,7 +207,7 @@ body {
   transition: transform var(--ds-t-fast);
 }
 
-/* Fork: content-sized, number-only native small footer button. */
+/* Content-sized, number-only native small footer button. */
 .trigger {
   flex: none;
   font-weight: 600;
@@ -249,7 +249,7 @@ body {
   overflow: hidden;
   border: 1px solid var(--ds-border-strong);
   border-radius: var(--ds-r-3);
-  /* Fork: opaque theme surface, without backdrop transparency. */
+  /* Opaque theme surface, without backdrop transparency. */
   background: var(--dsw-alias-bg-layer-3);
   box-shadow: var(--ds-shadow-2);
   opacity: 0;

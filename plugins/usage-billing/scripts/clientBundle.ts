@@ -1,10 +1,10 @@
 /**
- * Vendored tsdown client-bundle factory for OUT-OF-TREE (fork) UI plugins.
+ * Vendored tsdown client-bundle factory for OUT-OF-TREE UI plugins.
  *
  * The DSH monorepo publishes this shared preset at packages/client/tsdown.client.ts
- * and expects in-tree packages to import it via a relative path. A standalone fork
- * (or a fork cloned into packages/community/<name>) cannot resolve that shared file,
- * so per the cookbook contract ("That preset is not published today, so a package
+ * and expects in-tree packages to import it via a relative path. A plugin that
+ * lives outside the DSH monorepo cannot resolve that shared file, so per the
+ * cookbook contract ("That preset is not published today, so a package
  * outside this repository has to reproduce the same output format itself") this
  * repository carries its own copy. Keep it in sync with the monorepo factory when
  * the platform seed changes.
@@ -76,7 +76,7 @@ const SKIP_WORKSPACE_BUILD: UserConfig = { entry: '' }
 export const CLIENT_EXTERNALS: readonly string[] = [...PLATFORM_MODULES]
 
 // Repository root for sourcemap rebasing: this file lives at <repo>/scripts, so
-// one level up is the fork root (the monorepo original walks up two levels
+// one level up is the package root (the monorepo original walks up two levels
 // because it sits at packages/client/).
 const REPOSITORY_ROOT = fileURLToPath(new URL('..', import.meta.url))
 
