@@ -1,6 +1,6 @@
 # Bundle self-activation patch: mounts the plugin when the package is
 # installed into a profile via
-#   dsh plugin --profile web add file:~/code/dsh/dsh-plugin-wakatime
+#   dsh plugin --profile web add file:~/code/dsh/plugins/wakatime
 #
 # With no config, wakatime-cli reads api_url and api_key from ~/.wakatime.cfg.
 # Override from the profile's own cordis.patch.yml:

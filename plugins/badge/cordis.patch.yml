@@ -1,6 +1,6 @@
 # Bundle self-activation patch: mounts this plugin's (empty) node half when the
 # package is installed into a profile via
-#   dsh plugin --profile web add file:~/code/dsh/dsh-plugin-badge
+#   dsh plugin --profile web add file:~/code/dsh/plugins/badge
 #
 # The row exists so the Loader sees the package; the real work lives in the
 # browser half, which the client-modules scanner discovers through this

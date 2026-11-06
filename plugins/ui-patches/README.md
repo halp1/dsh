@@ -19,7 +19,7 @@ Fira Code is licensed under the SIL Open Font License 1.1, see [assets/FiraCode-
 ## Install
 
 ```sh
-dsh plugin --profile web add file:/Users/halp/code/dsh/dsh-plugin-ui-patches
+dsh plugin --profile web add file:/Users/halp/code/dsh/plugins/ui-patches
 ```
 
 Refresh each open browser after installing or changing the patch. No build step is required.

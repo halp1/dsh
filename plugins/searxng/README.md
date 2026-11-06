@@ -13,7 +13,7 @@ through as `content`.
 ## Install
 
 ```sh
-dsh plugin --profile web add file:~/code/dsh/dsh-plugin-searxng
+dsh plugin --profile web add file:~/code/dsh/plugins/searxng
 ```
 
 The bundle patch does two things:

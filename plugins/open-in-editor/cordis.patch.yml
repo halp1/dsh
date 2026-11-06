@@ -1,6 +1,6 @@
 # Bundle self-activation patch: mounts the node half (the two host routes) when
 # the package is installed into a profile via
-#   dsh plugin --profile web add file:/Users/halp/code/dsh/dsh-plugin-open-in-editor
+#   dsh plugin --profile web add file:/Users/halp/code/dsh/plugins/open-in-editor
 #
 # The row also makes the client-modules scanner serve the browser half, which
 # routes chat file links to VS Code.

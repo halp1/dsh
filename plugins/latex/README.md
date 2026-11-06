@@ -12,7 +12,7 @@ LaTeX math for DeepSeek Harness. It does two things:
 ## Install
 
 ```bash
-dsh plugin --profile web add file:/Users/halp/code/dsh/dsh-plugin-latex
+dsh plugin --profile web add file:/Users/halp/code/dsh/plugins/latex
 ```
 
 Restart `dsh web` (or rely on `patchReload: live`), then reload the page. The

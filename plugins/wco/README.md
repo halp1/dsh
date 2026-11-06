@@ -57,7 +57,7 @@ change is withdrawn.
 ## Install
 
 ```bash
-dsh plugin --profile web add file:/Users/halp/code/dsh/dsh-plugin-wco
+dsh plugin --profile web add file:/Users/halp/code/dsh/plugins/wco
 ```
 
 The profile reloads plugins live, so you don't need to restart `dsh web`. Then:

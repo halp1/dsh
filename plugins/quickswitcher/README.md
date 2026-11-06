@@ -39,7 +39,7 @@ is reused, with any unsent draft kept.
 
 ```bash
 pnpm install && pnpm build
-dsh plugin --profile web add file:/Users/halp/code/dsh/dsh-plugin-quickswitcher
+dsh plugin --profile web add file:/Users/halp/code/dsh/plugins/quickswitcher
 ```
 
 Then reload the page. pnpm installs `file:` dependencies as a copy, so rebuild

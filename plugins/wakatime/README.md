@@ -9,7 +9,7 @@ Works with any WakaTime-compatible server (Hackatime, Wakapi, self-hosted).
 ## Install
 
 ```sh
-dsh plugin --profile web add file:~/code/dsh/dsh-plugin-wakatime
+dsh plugin --profile web add file:~/code/dsh/plugins/wakatime
 ```
 
 It needs `wakatime-cli`. Any WakaTime editor plugin installs one at

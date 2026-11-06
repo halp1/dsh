@@ -8,7 +8,7 @@ preview in the sidebar.
 ## Install
 
 ```bash
-dsh plugin --profile web add file:/Users/halp/code/dsh/dsh-plugin-open-in-editor
+dsh plugin --profile web add file:/Users/halp/code/dsh/plugins/open-in-editor
 ```
 
 Then reload the page. pnpm installs `file:` dependencies as a copy, so run the

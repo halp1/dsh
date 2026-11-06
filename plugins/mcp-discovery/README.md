@@ -9,7 +9,7 @@ No MCP server, connection, credential, provider adapter, or installed DSH packag
 Tested with DSH `0.2.2-rc.1` and its native tool executor. Legacy runtimes exposing `ToolRuntime.modeFor()` are also recognized.
 
 ```sh
-dsh plugin --profile web add file:/Users/halp/code/dsh/dsh-plugin-mcp-discovery
+dsh plugin --profile web add file:/Users/halp/code/dsh/plugins/mcp-discovery
 ```
 
 The included bundle enables discovery for `rea` and `gworkspace`. Override the `mcp-discovery` row in your profile's `cordis.patch.yml`:

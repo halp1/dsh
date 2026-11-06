@@ -1,6 +1,6 @@
 # Bundle self-activation patch: mounts the SearXNG search provider when the
 # package is installed into a profile via
-#   dsh plugin --profile web add file:~/code/dsh/dsh-plugin-searxng
+#   dsh plugin --profile web add file:~/code/dsh/plugins/searxng
 #
 # It also pins `web.searchProvider` to this provider. That is required, not
 # cosmetic: the shipped DeepSeek provider pins itself as the search backend, and
