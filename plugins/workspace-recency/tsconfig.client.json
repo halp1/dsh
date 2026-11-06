@@ -1,0 +1,12 @@
+{
+  // Browser half: DOM types, no ambient node types.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "types": [],
+    "outDir": "lib/types",
+    "rootDir": "src",
+    "composite": true
+  },
+  "include": ["src/client/**/*.ts"]
+}
