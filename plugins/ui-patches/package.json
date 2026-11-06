@@ -1,0 +1,24 @@
+{
+  "name": "dsh-plugin-ui-patches",
+  "version": "0.1.0",
+  "description": "Small, shared UI patches for DeepSeek Harness across local, remote, and mobile views",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": ["src", "assets", "cordis.patch.yml", "README.md"],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "compatibility": {
+      "dsh": ">=0.2.1-rc.3 <0.3.0",
+      "profiles": ["web"]
+    }
+  },
+  "engines": { "node": ">=22.19" },
+  "peerDependencies": { "@deepseek-ai/cordis": "^4.0.4" },
+  "devDependencies": { "jsdom": "^26.1.0" },
+  "scripts": { "test": "node --test test/*.test.js" }
+}
