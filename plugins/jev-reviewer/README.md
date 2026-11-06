@@ -102,6 +102,8 @@ Common API-key, password, token, private-key, authorization, cookie, and credent
 
 Incomplete authority is not reconstructed from summaries. Compaction checkpoints, seeded/forked ambiguity, unknown instruction producers, non-text instruction blocks, or child-only model prompts require human review. A direct parent's instruction may narrow a child's scope, but cannot override direct human restrictions.
 
+Standard DSH skill catalogs, plan/action-card notices, and question replies are retained as restrictions, not new authorization. An incomplete skill catalog still requires a human. Model-selection notices and non-parent teammate replies are non-authorizing facts. Known structural tool additions/removals from the developer `tool-registry` producer are not mistaken for missing prose instructions. Unknown developer block types still fail closed.
+
 ## Logs and trust boundaries
 
 DSH retains its authoritative `approval/asked` and `approval/decided` audit. Supplemental reviewer logs contain session/call IDs, tool name, bounded reason code, model ID, probabilities, confidences, routing choice, and latency. They contain no raw arguments, prompts, paths, commands, or API error bodies. Session/call identifiers may still be sensitive metadata.

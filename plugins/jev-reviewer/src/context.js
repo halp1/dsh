@@ -72,6 +72,18 @@ export function instructionContext(snapshot) {
         ? 'direct-parent' : 'direct-user'
     } else if (['agent-instructions', 'skill-invocation'].includes(source.kind)) {
       role = 'constraint'
+    } else if (source.kind === 'skill-catalog') {
+      // A normal session always carries this producer. Keep its use requirements
+      // as restrictions, never as permission supplied by a catalog description.
+      if (source.form !== 'catalog' || source.incomplete === true || !Array.isArray(source.entries) ||
+          source.entries.some((entry) => !isRecord(entry) || typeof entry.name !== 'string' || typeof entry.description !== 'string')) {
+        limited = true
+      }
+      role = 'constraint'
+    } else if (['plan-mode', 'action-cards', 'user-question-reply'].includes(source.kind)) {
+      // Mode/card notices and question answers can narrow a task, not authorize
+      // an escalation. In particular, a missing/empty answer never means consent.
+      role = 'constraint'
     } else if (source.kind === 'agent-message' && snapshot.session.origin === 'subagent' &&
         source.senderSessionId === snapshot.session.parentSession) {
       role = 'direct-parent'
@@ -82,13 +94,20 @@ export function instructionContext(snapshot) {
       // Unknown producers might carry restrictions. Never silently discard them.
       // These known runtime notices and tool facts cannot grant authority.
       if (!['tool', 'runtime-context', 'time-context', 'tmux-context', 'user-approval',
-        'sandbox-policy', 'working-directory', 'tool-registry', 'ptc-mode', 'subagent-settled'].includes(source.kind)) {
+        'sandbox-policy', 'working-directory', 'tool-registry', 'ptc-mode', 'subagent-settled',
+        'agent-message', 'model-selection'].includes(source.kind)) {
         limited = true
       }
       continue
     }
     const text = []
     for (const block of content) {
+      // Current DSH emits structural tool changes in developer messages. They
+      // are not missing prose instructions. The pending tool's live schema is
+      // independently bound in buildState and rechecked before a grant.
+      if (event.type === 'developer/message' && source.kind === 'tool-registry' &&
+          ['tool-addition', 'tool-removal'].includes(block?.type) &&
+          typeof block.toolName === 'string' && block.toolName.trim()) continue
       if (block?.type !== 'text' || typeof block.text !== 'string') {
         limited = true
         continue

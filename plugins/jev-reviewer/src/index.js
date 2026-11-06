@@ -246,8 +246,12 @@ export function installReviewer(ctx, rawConfig = {}, options = {}) {
         return result.decision === 'allow' ? 'allowed-once' : 'rejected'
       }
       return await fallback(result ?? { decision: 'human', code: 'invalid-response' })
-    } catch {
-      return await fallback({ decision: 'human', code: deadline.signal.aborted ? 'review-timeout' : 'review-failed' })
+    } catch (error) {
+      // Only fixed local diagnostic codes may cross the log boundary, never
+      // arbitrary exception messages or raw snapshot/service details.
+      const contextCode = ['unsupported-context', 'incomplete-authority', 'unknown-directory',
+        'unknown-tool-schema', 'wrong-session'].includes(error?.message) ? error.message : 'review-failed'
+      return await fallback({ decision: 'human', code: deadline.signal.aborted ? 'review-timeout' : contextCode })
     } finally {
       clearTimeout(timer)
     }
