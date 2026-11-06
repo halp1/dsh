@@ -1,0 +1,13 @@
+{
+  // Browser half: DOM types, React JSX through the host's jsx-runtime.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "types": [],
+    "jsx": "react-jsx",
+    "outDir": "lib/types",
+    "rootDir": "src",
+    "composite": true
+  },
+  "include": ["src/client/**/*.ts", "src/client/**/*.tsx"]
+}

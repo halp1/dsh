@@ -1,0 +1,12 @@
+# Bundle self-activation patch: mounts this plugin's (empty) node half when the
+# package is installed into a profile via
+#   dsh plugin --profile web add file:/Users/halp/code/dsh/dsh-plugin-quickswitcher
+#
+# The row exists so the Loader sees the package. The switcher itself lives in
+# the browser half, which the client-modules scanner discovers through this
+# package.json's `dsh.client` declaration and serves as
+# /plugins/dsh-plugin-quickswitcher/client.js.
+#
+- insert:
+    - id: quickswitcher
+      name: dsh-plugin-quickswitcher
