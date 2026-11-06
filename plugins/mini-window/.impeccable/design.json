@@ -1,0 +1,853 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-04T21:58:31.964Z",
+  "title": "Design System: DSH Mini Window",
+  "extensions": {
+    "colorMeta": {
+      "primary": {
+        "role": "primary",
+        "displayName": "DSH action blue",
+        "tonalRamp": [
+          "oklch(15.00% 0.17219 266.22)",
+          "oklch(26.43% 0.17219 266.22)",
+          "oklch(37.86% 0.17219 266.22)",
+          "oklch(49.29% 0.17219 266.22)",
+          "oklch(60.71% 0.17219 266.22)",
+          "oklch(72.14% 0.17219 266.22)",
+          "oklch(83.57% 0.17219 266.22)",
+          "oklch(95.00% 0.17219 266.22)"
+        ]
+      },
+      "primary-hover": {
+        "role": "primary",
+        "displayName": "Action blue hover",
+        "tonalRamp": [
+          "oklch(15.00% 0.17858 266.09)",
+          "oklch(26.43% 0.17858 266.09)",
+          "oklch(37.86% 0.17858 266.09)",
+          "oklch(49.29% 0.17858 266.09)",
+          "oklch(60.71% 0.17858 266.09)",
+          "oklch(72.14% 0.17858 266.09)",
+          "oklch(83.57% 0.17858 266.09)",
+          "oklch(95.00% 0.17858 266.09)"
+        ]
+      },
+      "accent": {
+        "role": "primary",
+        "displayName": "Utility blue",
+        "tonalRamp": [
+          "oklch(15.00% 0.19954 267.55)",
+          "oklch(26.43% 0.19954 267.55)",
+          "oklch(37.86% 0.19954 267.55)",
+          "oklch(49.29% 0.19954 267.55)",
+          "oklch(60.71% 0.19954 267.55)",
+          "oklch(72.14% 0.19954 267.55)",
+          "oklch(83.57% 0.19954 267.55)",
+          "oklch(95.00% 0.19954 267.55)"
+        ]
+      },
+      "background": {
+        "role": "neutral",
+        "displayName": "Charcoal shell",
+        "tonalRamp": [
+          "oklch(15.00% 0.00262 247.98)",
+          "oklch(26.43% 0.00262 247.98)",
+          "oklch(37.86% 0.00262 247.98)",
+          "oklch(49.29% 0.00262 247.98)",
+          "oklch(60.71% 0.00262 247.98)",
+          "oklch(72.14% 0.00262 247.98)",
+          "oklch(83.57% 0.00262 247.98)",
+          "oklch(95.00% 0.00262 247.98)"
+        ]
+      },
+      "raised": {
+        "role": "neutral",
+        "displayName": "Raised charcoal",
+        "tonalRamp": [
+          "oklch(15.00% 0.00663 258.37)",
+          "oklch(26.43% 0.00663 258.37)",
+          "oklch(37.86% 0.00663 258.37)",
+          "oklch(49.29% 0.00663 258.37)",
+          "oklch(60.71% 0.00663 258.37)",
+          "oklch(72.14% 0.00663 258.37)",
+          "oklch(83.57% 0.00663 258.37)",
+          "oklch(95.00% 0.00663 258.37)"
+        ]
+      },
+      "overlay": {
+        "role": "neutral",
+        "displayName": "Overlay charcoal",
+        "tonalRamp": [
+          "oklch(15.00% 0.00811 264.42)",
+          "oklch(26.43% 0.00811 264.42)",
+          "oklch(37.86% 0.00811 264.42)",
+          "oklch(49.29% 0.00811 264.42)",
+          "oklch(60.71% 0.00811 264.42)",
+          "oklch(72.14% 0.00811 264.42)",
+          "oklch(83.57% 0.00811 264.42)",
+          "oklch(95.00% 0.00811 264.42)"
+        ]
+      },
+      "input": {
+        "role": "neutral",
+        "displayName": "Ink editor",
+        "tonalRamp": [
+          "oklch(15.00% 0.00483 262.80)",
+          "oklch(26.43% 0.00483 262.80)",
+          "oklch(37.86% 0.00483 262.80)",
+          "oklch(49.29% 0.00483 262.80)",
+          "oklch(60.71% 0.00483 262.80)",
+          "oklch(72.14% 0.00483 262.80)",
+          "oklch(83.57% 0.00483 262.80)",
+          "oklch(95.00% 0.00483 262.80)"
+        ]
+      },
+      "text": {
+        "role": "neutral",
+        "displayName": "Soft white",
+        "tonalRamp": [
+          "oklch(15.00% 0.00133 286.37)",
+          "oklch(26.43% 0.00133 286.37)",
+          "oklch(37.86% 0.00133 286.37)",
+          "oklch(49.29% 0.00133 286.37)",
+          "oklch(60.71% 0.00133 286.37)",
+          "oklch(72.14% 0.00133 286.37)",
+          "oklch(83.57% 0.00133 286.37)",
+          "oklch(95.00% 0.00133 286.37)"
+        ]
+      },
+      "label-secondary": {
+        "role": "neutral",
+        "displayName": "Secondary label",
+        "tonalRamp": [
+          "oklch(15.00% 0.00599 264.53)",
+          "oklch(26.43% 0.00599 264.53)",
+          "oklch(37.86% 0.00599 264.53)",
+          "oklch(49.29% 0.00599 264.53)",
+          "oklch(60.71% 0.00599 264.53)",
+          "oklch(72.14% 0.00599 264.53)",
+          "oklch(83.57% 0.00599 264.53)",
+          "oklch(95.00% 0.00599 264.53)"
+        ]
+      },
+      "label-tertiary": {
+        "role": "neutral",
+        "displayName": "Tertiary label",
+        "tonalRamp": [
+          "oklch(15.00% 0.01184 269.52)",
+          "oklch(26.43% 0.01184 269.52)",
+          "oklch(37.86% 0.01184 269.52)",
+          "oklch(49.29% 0.01184 269.52)",
+          "oklch(60.71% 0.01184 269.52)",
+          "oklch(72.14% 0.01184 269.52)",
+          "oklch(83.57% 0.01184 269.52)",
+          "oklch(95.00% 0.01184 269.52)"
+        ]
+      },
+      "label-caption": {
+        "role": "neutral",
+        "displayName": "Caption label",
+        "tonalRamp": [
+          "oklch(15.00% 0.01377 266.66)",
+          "oklch(26.43% 0.01377 266.66)",
+          "oklch(37.86% 0.01377 266.66)",
+          "oklch(49.29% 0.01377 266.66)",
+          "oklch(60.71% 0.01377 266.66)",
+          "oklch(72.14% 0.01377 266.66)",
+          "oklch(83.57% 0.01377 266.66)",
+          "oklch(95.00% 0.01377 266.66)"
+        ]
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "Muted metadata",
+        "tonalRamp": [
+          "oklch(15.00% 0.01224 264.49)",
+          "oklch(26.43% 0.01224 264.49)",
+          "oklch(37.86% 0.01224 264.49)",
+          "oklch(49.29% 0.01224 264.49)",
+          "oklch(60.71% 0.01224 264.49)",
+          "oklch(72.14% 0.01224 264.49)",
+          "oklch(83.57% 0.01224 264.49)",
+          "oklch(95.00% 0.01224 264.49)"
+        ]
+      },
+      "border": {
+        "role": "neutral",
+        "displayName": "Shell slate hairline",
+        "tonalRamp": [
+          "oklch(15.00% 0.01455 269.26)",
+          "oklch(26.43% 0.01455 269.26)",
+          "oklch(37.86% 0.01455 269.26)",
+          "oklch(49.29% 0.01455 269.26)",
+          "oklch(60.71% 0.01455 269.26)",
+          "oklch(72.14% 0.01455 269.26)",
+          "oklch(83.57% 0.01455 269.26)",
+          "oklch(95.00% 0.01455 269.26)"
+        ]
+      },
+      "control-border": {
+        "role": "neutral",
+        "displayName": "Control contour",
+        "tonalRamp": [
+          "oklch(15.00% 0.01312 267.13)",
+          "oklch(26.43% 0.01312 267.13)",
+          "oklch(37.86% 0.01312 267.13)",
+          "oklch(49.29% 0.01312 267.13)",
+          "oklch(60.71% 0.01312 267.13)",
+          "oklch(72.14% 0.01312 267.13)",
+          "oklch(83.57% 0.01312 267.13)",
+          "oklch(95.00% 0.01312 267.13)"
+        ]
+      },
+      "interactive-hover": {
+        "role": "neutral",
+        "displayName": "Quiet hover",
+        "tonalRamp": [
+          "oklch(15.00% 0.01020 260.70)",
+          "oklch(26.43% 0.01020 260.70)",
+          "oklch(37.86% 0.01020 260.70)",
+          "oklch(49.29% 0.01020 260.70)",
+          "oklch(60.71% 0.01020 260.70)",
+          "oklch(72.14% 0.01020 260.70)",
+          "oklch(83.57% 0.01020 260.70)",
+          "oklch(95.00% 0.01020 260.70)"
+        ]
+      },
+      "interactive-active": {
+        "role": "neutral",
+        "displayName": "Quiet active",
+        "tonalRamp": [
+          "oklch(15.00% 0.01898 264.27)",
+          "oklch(26.43% 0.01898 264.27)",
+          "oklch(37.86% 0.01898 264.27)",
+          "oklch(49.29% 0.01898 264.27)",
+          "oklch(60.71% 0.01898 264.27)",
+          "oklch(72.14% 0.01898 264.27)",
+          "oklch(83.57% 0.01898 264.27)",
+          "oklch(95.00% 0.01898 264.27)"
+        ]
+      },
+      "icon-hover": {
+        "role": "neutral",
+        "displayName": "Icon hover",
+        "tonalRamp": [
+          "oklch(15.00% 0.01177 264.37)",
+          "oklch(26.43% 0.01177 264.37)",
+          "oklch(37.86% 0.01177 264.37)",
+          "oklch(49.29% 0.01177 264.37)",
+          "oklch(60.71% 0.01177 264.37)",
+          "oklch(72.14% 0.01177 264.37)",
+          "oklch(83.57% 0.01177 264.37)",
+          "oklch(95.00% 0.01177 264.37)"
+        ]
+      },
+      "field-surface": {
+        "role": "neutral",
+        "displayName": "Search charcoal",
+        "tonalRamp": [
+          "oklch(15.00% 0.01170 270.92)",
+          "oklch(26.43% 0.01170 270.92)",
+          "oklch(37.86% 0.01170 270.92)",
+          "oklch(49.29% 0.01170 270.92)",
+          "oklch(60.71% 0.01170 270.92)",
+          "oklch(72.14% 0.01170 270.92)",
+          "oklch(83.57% 0.01170 270.92)",
+          "oklch(95.00% 0.01170 270.92)"
+        ]
+      },
+      "focus": {
+        "role": "primary",
+        "displayName": "Focus blue",
+        "tonalRamp": [
+          "oklch(15.00% 0.13141 269.61)",
+          "oklch(26.43% 0.13141 269.61)",
+          "oklch(37.86% 0.13141 269.61)",
+          "oklch(49.29% 0.13141 269.61)",
+          "oklch(60.71% 0.13141 269.61)",
+          "oklch(72.14% 0.13141 269.61)",
+          "oklch(83.57% 0.13141 269.61)",
+          "oklch(95.00% 0.13141 269.61)"
+        ]
+      },
+      "notice-background": {
+        "role": "semantic",
+        "displayName": "Muted rose notice",
+        "tonalRamp": [
+          "oklch(15.00% 0.03747 6.09)",
+          "oklch(26.43% 0.03747 6.09)",
+          "oklch(37.86% 0.03747 6.09)",
+          "oklch(49.29% 0.03747 6.09)",
+          "oklch(60.71% 0.03747 6.09)",
+          "oklch(72.14% 0.03747 6.09)",
+          "oklch(83.57% 0.03747 6.09)",
+          "oklch(95.00% 0.03747 6.09)"
+        ]
+      },
+      "notice-text": {
+        "role": "semantic",
+        "displayName": "Rose notice label",
+        "tonalRamp": [
+          "oklch(15.00% 0.04773 11.63)",
+          "oklch(26.43% 0.04773 11.63)",
+          "oklch(37.86% 0.04773 11.63)",
+          "oklch(49.29% 0.04773 11.63)",
+          "oklch(60.71% 0.04773 11.63)",
+          "oklch(72.14% 0.04773 11.63)",
+          "oklch(83.57% 0.04773 11.63)",
+          "oklch(95.00% 0.04773 11.63)"
+        ]
+      },
+      "error": {
+        "role": "semantic",
+        "displayName": "Inline rose error",
+        "tonalRamp": [
+          "oklch(15.00% 0.08806 12.12)",
+          "oklch(26.43% 0.08806 12.12)",
+          "oklch(37.86% 0.08806 12.12)",
+          "oklch(49.29% 0.08806 12.12)",
+          "oklch(60.71% 0.08806 12.12)",
+          "oklch(72.14% 0.08806 12.12)",
+          "oklch(83.57% 0.08806 12.12)",
+          "oklch(95.00% 0.08806 12.12)"
+        ]
+      },
+      "running": {
+        "role": "semantic",
+        "displayName": "Running / ready blue",
+        "tonalRamp": [
+          "oklch(15.00% 0.11419 261.54)",
+          "oklch(26.43% 0.11419 261.54)",
+          "oklch(37.86% 0.11419 261.54)",
+          "oklch(49.29% 0.11419 261.54)",
+          "oklch(60.71% 0.11419 261.54)",
+          "oklch(72.14% 0.11419 261.54)",
+          "oklch(83.57% 0.11419 261.54)",
+          "oklch(95.00% 0.11419 261.54)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "title": {
+        "displayName": "title",
+        "purpose": "Panel headings."
+      },
+      "body": {
+        "displayName": "body",
+        "purpose": "Actual 14px conversation and resident composer; content-font delta 0."
+      },
+      "label": {
+        "displayName": "label",
+        "purpose": "Utility buttons and labels."
+      },
+      "field": {
+        "displayName": "field",
+        "purpose": "Search and settings controls."
+      },
+      "metadata": {
+        "displayName": "metadata",
+        "purpose": "Workspace and session dates."
+      },
+      "supporting": {
+        "displayName": "supporting",
+        "purpose": "Snippets and error notices."
+      },
+      "workspace": {
+        "displayName": "workspace",
+        "purpose": "Expanded-header workspace/directory context; repeated session title and compact header hidden."
+      },
+      "subheading": {
+        "displayName": "subheading",
+        "purpose": "16px semibold New mini chats settings heading."
+      }
+    },
+    "shadows": [
+      {
+        "name": "window-css",
+        "value": "none",
+        "purpose": "No CSS shell shadow; compact backing is transparent."
+      },
+      {
+        "name": "composer-css",
+        "value": "none",
+        "purpose": "No composer shadow; expanded inner border removed."
+      }
+    ],
+    "motion": [
+      {
+        "name": "utility-hover",
+        "value": "background-color 120ms ease-out",
+        "purpose": "Icon buttons, ordinary buttons and session rows; only under prefers-reduced-motion: no-preference."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "narrow-mini",
+        "value": "500px"
+      }
+    ],
+    "focus": {
+      "outline": "2px solid #8ba7ff",
+      "outlineOffset": "3px",
+      "search": "focus-within border-color: #8ba7ff",
+      "editor": {
+        "outline": "none",
+        "caretColor": "#a9bdff",
+        "purpose": "No rectangular ring inside the borderless pill; form/button rings retained."
+      }
+    },
+    "geometry": {
+      "unit": "logical pixels",
+      "compact": {
+        "width": 640,
+        "height": 112,
+        "resizable": false
+      },
+      "expanded": {
+        "width": 640,
+        "height": 600,
+        "resizable": true,
+        "minimum": {
+          "width": 440,
+          "height": 360
+        }
+      },
+      "workAreaClamping": "Native bounds and minimum may shrink to available display work area.",
+      "header": {
+        "expandedHeight": 40,
+        "compactVisible": false,
+        "compactDragStripHeight": 12,
+        "compactDragStripSideInset": 56
+      },
+      "editor": {
+        "expandedMaxHeight": 160,
+        "compactMaxHeight": 32,
+        "compactCardHeight": 112,
+        "compactInputMinHeight": 32,
+        "compactInputPadding": "4px 12px",
+        "compactCardPadding": "16px 12px 12px"
+      }
+    },
+    "iconography": {
+      "source": "src/client/ui.tsx",
+      "viewBox": "0 0 24 24",
+      "strokeWidth": 1.7,
+      "strokeLinecap": "round",
+      "strokeLinejoin": "round",
+      "defaultSize": 20
+    },
+    "provenance": {
+      "mode": "scan",
+      "buildPath": "code",
+      "visualAuthority": "Verified user screenshot-pinned Gemini-inspired macOS dark rounded mini window; user-approved removal of outer compact chrome and nested expanded editor contours. Extension, not replacement, of DSH identity. Latest approved correction removes all shell/pill borders and native shadow/OS rounding, retaining CSS silhouette.",
+      "qualitativeLanguage": "Pinned direction and approved requirements supplied in the task; no replacement-world interview or new aesthetic invented.",
+      "extraction": {
+        "sources": [
+          {
+            "path": "PRODUCT.md",
+            "sha256": "3150c1ca403181a547eec664265091e36c11f9a85266e9229f0f525b6e2507e9"
+          },
+          {
+            "path": "docs/mini-surface.md",
+            "sha256": "37b819c1e7d5d059103d83df0000efff7b3bf163a8477744cfd842a0a686f433"
+          },
+          {
+            "path": "src/client/styles.ts",
+            "sha256": "3ca6795f31f7b0a5918def039824b288229fc41cb3c838ea92c07d2f515de5a4"
+          },
+          {
+            "path": "src/client/ui.tsx",
+            "sha256": "fc2506d59af3c7becbfd1e5bc02c07af4b1689f7a03674778a5132f6cb2ba434"
+          },
+          {
+            "path": "src/client/index.tsx",
+            "sha256": "b10cd67142854a2e17851bfc45a4eb6b15eb57199af0a256893d310cbd56013f"
+          },
+          {
+            "path": "shared/state.mjs",
+            "sha256": "2f16aded66ac837becc9c92733ec02f912000a41a60c69e57be09d8942c45225"
+          },
+          {
+            "path": "native/main.cjs",
+            "sha256": "b5310d494090e5aead3e0f082d0947aefd1c64616af46696fe5b06ba39b441e0"
+          },
+          {
+            "path": "native/icon.cjs",
+            "sha256": "b1022a669d5886d264b49d65f5d815412ab2ebfa364efca2cb7ae596faa0154b"
+          },
+          {
+            "path": "src/client/model-defaults.tsx",
+            "sha256": "8e4b8ff59f27331984e089e585f68579d28b100b06c8be37c1dc736fed37f271"
+          },
+          {
+            "path": "src/client/host-client.ts",
+            "sha256": "3a38369f9834c6051c5c69a85def87e0bab6d52c32b37d4bd26911cde957d55a"
+          },
+          {
+            "path": "src/client/session-controller.ts",
+            "sha256": "a18f145957c7450be794097e3335759a5f64305e77796c0e404edddb20875efa"
+          },
+          {
+            "path": "src/host/models.mjs",
+            "sha256": "a64a6e2afe33967b8bce5d9816c03ade707d830c203c8a08fb136ea7b7b575de"
+          },
+          {
+            "path": "src/host/routes.mjs",
+            "sha256": "fcc8abc385cd2e6be5ad30cd4c058460ffae4e756b2f686e06c11bd56e1e238f"
+          },
+          {
+            "path": "package.json",
+            "sha256": "2042e2e853e69cb8fd6eb72c96576b160651e805efdb7b9aa9f06d59a587d869"
+          }
+        ],
+        "frontmatter": "DESIGN.md owns normative colors, typography, rounded, spacing and component sub-tokens.",
+        "tonalRamps": "Synthesized preview-only OKLCH ramps: eight lightness steps from 15% to 95%, retaining each extracted color hue and chroma. Not shipping tokens.",
+        "snippets": "Source CSS translated into scoped ds- classes with literal local mini tokens and inherited host-alias fallbacks. Inline paths copied from authored SVG. No runtime, external fonts or icon packages.",
+        "composer": "Actual host composer remains required. No fabricated standalone HTML composer sample."
+      },
+      "userReferences": [
+        {
+          "attachmentId": "sha256:a21e38b673e5f59440cf5e81d6275840b7dce637c600847034b85b8066acbd22",
+          "kind": "user-provided screenshot",
+          "verification": "Verified in later user attachment references by parent.",
+          "use": "Initial visual reference only; not a shipping asset."
+        },
+        {
+          "attachmentId": "sha256:1a2cc18c0dc15d8c558fc31f371cedd95e82ae7f4f79d63209adab99bbee67b7",
+          "kind": "user-provided screenshot",
+          "verification": "Verified in later user attachment references by parent.",
+          "use": "Initial visual reference only; not a shipping asset."
+        }
+      ],
+      "captures": [
+        {
+          "path": "docs/screenshots/compact.png",
+          "status": "current-renderer-capture",
+          "sha256": "689ea4c7bf28bb0d8b74c1714d7c7c42cd3a345ce8c19dd503c46c86779022ec",
+          "hashScope": "Current metadata-bearing file bytes.",
+          "origin": "Exact parent browser screenshot copied and embedded with accurate Capture/Validation metadata.",
+          "surface": "Actual DSH renderer with real backend; native bridge simulated only for browser preview.",
+          "pixelDimensions": {
+            "width": 2800,
+            "height": 1608
+          },
+          "rootCSSBounds": {
+            "x": 380,
+            "y": 32,
+            "width": 640,
+            "height": 112
+          },
+          "limitations": "Retina browser-renderer capture, not a physical OS-window screenshot, native drag/resize proof or composition-led golden."
+        },
+        {
+          "path": "docs/screenshots/expanded.png",
+          "status": "current-renderer-capture",
+          "sha256": "57d238a6fb728b96eae2765e6ff300f4ac8465b5354e0aafbc036cb37cfff554",
+          "hashScope": "Current metadata-bearing file bytes.",
+          "origin": "Exact parent browser screenshot copied and embedded with accurate Capture/Validation metadata.",
+          "surface": "Actual DSH renderer with real backend; native bridge simulated only for browser preview.",
+          "pixelDimensions": {
+            "width": 2800,
+            "height": 1608
+          },
+          "rootCSSBounds": {
+            "x": 380,
+            "y": 32,
+            "width": 640,
+            "height": 600
+          },
+          "limitations": "Retina browser-renderer capture, not a physical OS-window screenshot, native drag/resize proof or composition-led golden."
+        },
+        {
+          "path": "docs/screenshots/settings.png",
+          "status": "current-renderer-capture",
+          "sha256": "9bfed7f7305c289825505446682291d8d5b8fc8c65a28e72cadf2e4f53544bb9",
+          "hashScope": "Current metadata-bearing file bytes.",
+          "origin": "Exact parent browser screenshot copied and embedded with accurate Capture/Validation metadata.",
+          "surface": "Actual DSH renderer with real backend; native bridge simulated only for browser preview.",
+          "pixelDimensions": {
+            "width": 2800,
+            "height": 1608
+          },
+          "rootCSSBounds": {
+            "x": 380,
+            "y": 32,
+            "width": 640,
+            "height": 600
+          },
+          "limitations": "Retina browser-renderer capture, not a physical OS-window screenshot, native drag/resize proof or composition-led golden."
+        }
+      ],
+      "assets": [
+        {
+          "source": "native/icon.cjs",
+          "kind": "authored SVG",
+          "description": "18px monochrome speech-bubble native template image."
+        },
+        {
+          "source": "native/icon.cjs#templateBitmap",
+          "kind": "code-generated bitmap",
+          "description": "Local black/transparent procedural fallback at scale factor 2; not AI-generated artwork or downloaded raster."
+        }
+      ],
+      "verification": {
+        "source": "Implementation handoff from parent, not rerun by documentation task.",
+        "mechanicalDetector": {
+          "runs": 1,
+          "scope": "Prior corrected-renderer refinement, before latest border removal/model defaults; not rerun by documentation task.",
+          "verdict": "Advisory-only pre-existing documentation omissions.",
+          "advisories": [
+            "Incidental selection, scrollbar and legacy fallback colors absent from normative palette.",
+            "Existing small 6px and 4px radii absent from normative radius scale."
+          ],
+          "disposition": "Recorded without expanding the palette or repairing unrelated drift."
+        },
+        "finalUIReview": "SHIP — fresh independent reviewer 4412baaf-914a-468e-b5da-4e6d16c88332 inspected all three updated 0.1.1 renderer captures. No material blockers: single compact silhouette without outer stroke/editor outline; clean expanded header/composer; legible mini-only Gemini/High settings with legitimate control borders. Verdict: .impeccable/review/verdict-v011.md. Screenshot-only; no physical native-window or resize claim.",
+        "native": "Actual native restart/show returned HTTP 200 ready/visible/registered after rebuild; physical no-border appearance and native drag/resize geometry not manually proven by browser captures.",
+        "documentationPass": "No browser, rebuild, npm, image generation or detector rerun.",
+        "currentAuthoredGeometry": {
+          "compactComposerCardHeight": 112,
+          "windowHeight": 112,
+          "headerVisible": false,
+          "evidence": "Source CSS; no new browser metrics claimed by documentation task.",
+          "rootBorderWidth": 0,
+          "compactComposerBorderWidth": 0,
+          "editorOutline": "none"
+        },
+        "previousRendererReview": "SHIP — independent reviewer a782096a-7f6c-42e2-a5e5-5bfd8f4109be inspected both corrected renderer captures against the user's correction. Persistence passed; compact single-pill shape/padding and expanded flat surface matched; utility craft ceiling reached; no material fixes. Preserve chrome-free compact surface and resident editor. Disposition is scoped to the corrected browser renderer captures: physical OS behavior and original attachments were not locally reviewed; palette advisories were not material.",
+        "previousRendererMetrics": {
+          "source": "Final parent browser renderer measurements.",
+          "compact": {
+            "root": {
+              "width": 640,
+              "height": 112
+            },
+            "composerCard": {
+              "width": 640,
+              "height": 112
+            },
+            "rootAndCardBoundsEqual": true,
+            "headerDisplay": "none",
+            "editorHeight": 32,
+            "inputPadding": "4px 12px",
+            "cardPadding": "16px 12px 12px"
+          },
+          "expanded": {
+            "composerBorderWidth": 0,
+            "billingDockHeight": 0,
+            "editorCount": 1
+          },
+          "limitations": "Browser-composited preview, not physical OS-window measurement. Supersedes prior 67px compact-card metric.",
+          "status": "Historical pre-latest-border-removal measurements; not current proof."
+        },
+        "automatedRun": {
+          "source": "Parent handoff; documentation task did not run tests.",
+          "earlierPassingCountReported": 86,
+          "latestRun": "Parent collected final npm test result: 88 tests passed, 0 failed; includes two public-RPC callback regressions. Typecheck and build passed before deployment."
+        }
+      },
+      "packageVersion": "0.1.1",
+      "runtimeVerification": {
+        "status": "primary-workflow-live-verified",
+        "server": "http://127.0.0.1:3080",
+        "observedBy": "Parent runtime handoff; persisted projection selection also read by documentation task.",
+        "restart": "Human restarted existing server, not a replacement. Rebuilt frontend installed; actual native child restarted.",
+        "catalog": {
+          "primary": "Public remote.session.modelCatalog() RPC via injected HostClient catalogLoader callback.",
+          "dependency": "@deepseek-ai/dsh-api-remotes 0.2.0-rc.2 ClientRemote; exact injection remote.session.",
+          "optionalHTTP": {
+            "path": "GET /api/dsh-mini-window.models",
+            "source": "requestBody buffered fix present",
+            "runningHost": "Still cached prior HTTP 400 until next normal server restart",
+            "verifiedHTTP200": false,
+            "impact": "Not primary UI path; no further restart needed for verified primary workflow."
+          }
+        },
+        "requestedSmoke": {
+          "selection": {
+            "provider": "antigravity",
+            "model": "gemini-3.8-flash-tiered",
+            "reasoningEffort": "high"
+          },
+          "configuredVia": "Mini Settings Default model + Reasoning High + Save mini defaults, then new chat.",
+          "sessionId": "session-e2d9672e-a03c-4d64-969d-0d1c87440056",
+          "newDistinctSession": true,
+          "reply": "MINI_GEMINI_HIGH_OK",
+          "durationSecondsApprox": 4,
+          "projectionEvidence": {
+            "path": "/Users/halp/.dsh/storages/session_projcache/sessions/session-e2d9672e-a03c-4d64-969d-0d1c87440056.json",
+            "lines": "853-863",
+            "lastUsed": {
+              "provider": "antigravity",
+              "model": "gemini-3.8-flash-tiered",
+              "reasoningEffort": "high"
+            },
+            "pending": null
+          },
+          "mainDefaultUnchanged": {
+            "provider": "openai-codex",
+            "model": "gpt-6.1-sol",
+            "reasoningEffort": "high",
+            "comparison": "Byte-identical before and after."
+          },
+          "shortcutUnchanged": "Command+Shift+C"
+        },
+        "nativeAPI": {
+          "restartHTTPStatus": 200,
+          "showHTTPStatus": 200,
+          "status": "ready",
+          "visible": true,
+          "shortcutRegistered": true
+        },
+        "limits": "No claim of physical OS-window no-border appearance, manual drag/resize geometry or exhaustive fullscreen/multi-monitor checks."
+      }
+    },
+    "nativePresentation": {
+      "frame": false,
+      "transparent": true,
+      "hasShadow": false,
+      "roundedCorners": false,
+      "vibrancy": "removed",
+      "resizeDecoration": false,
+      "compactCommands": "Native menus and shortcuts; Command-comma settings; double-click empty padding toggles mode.",
+      "shapeOwner": "CSS border radii; native physical appearance/resizing pending verification."
+    },
+    "miniModelDefaults": {
+      "stateField": "defaultModel",
+      "selection": "null or {provider, model, reasoningEffort?}; only advertised IDs",
+      "scope": "New mini chats only; existing refs/history and main DSH defaults unchanged.",
+      "ui": "New mini chats, provider-grouped Default model select, conditional advertised Reasoning select, Save mini defaults and Refresh models.",
+      "unsupported": "No global Codex speed/verbosity controls.",
+      "creation": "Await own queued saves; fresh server GET; fail closed; validate live catalog; public storage prepare/append model/selection/persist flush/close, then ordinary core session creation.",
+      "routes": {
+        "catalog": "GET /api/dsh-mini-window.models (optional fallback; current cached host HTTP 200 not verified)",
+        "newChat": "POST /api/dsh-mini-window.chat"
+      },
+      "ownership": "No private API, core patch, alternative agent, selectModel or global-default save call.",
+      "catalogTransport": "Public remote.session.modelCatalog() RPC callback injected into HostClient; authenticated optional HTTP fallback remains non-primary.",
+      "liveVerifiedSelection": {
+        "provider": "antigravity",
+        "model": "gemini-3.8-flash-tiered",
+        "reasoningEffort": "high"
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "Header icon button",
+      "kind": "button",
+      "refersTo": "button-icon",
+      "description": "Authored rounded stroke icon; expanded header size. Accessible label is on the button.",
+      "html": "<button class=\"ds-icon\" type=\"button\" aria-label=\"New chat\" title=\"New chat\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M12 5v14M5 12h14\"/></svg></button>",
+      "css": ".ds-icon{font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;border:0;padding:0;flex:none;width:32px;height:32px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;background:transparent;color:#ededee;cursor:pointer}.ds-icon:hover{background:#282b31}.ds-icon:focus-visible{outline:2px solid #8ba7ff;outline-offset:3px}.ds-icon:disabled{opacity:.4;cursor:default}@media(prefers-reduced-motion:no-preference){.ds-icon,.ds-button,.ds-row{transition:background-color 120ms ease-out}}"
+    },
+    {
+      "name": "Secondary settings button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Inherits DSH aliases with the mini-document values as fallback.",
+      "html": "<button class=\"ds-button\" type=\"button\">Show window</button>",
+      "css": ".ds-button{font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;font-size:13px;border:1px solid var(--dsw-alias-border-l3,#30333a);background:var(--dsw-alias-bg-l1,#181a1d);color:var(--dsw-alias-label-primary,#ededee);border-radius:9px;padding:8px 12px;cursor:pointer}.ds-button:hover{background:var(--dsw-alias-interactive-bg-hover,#25282d)}.ds-button:focus-visible{outline:2px solid #8ba7ff;outline-offset:3px}.ds-button:disabled{opacity:.45;cursor:default}@media(prefers-reduced-motion:no-preference){.ds-icon,.ds-button,.ds-row{transition:background-color 120ms ease-out}}"
+    },
+    {
+      "name": "Primary settings button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Explicit blue Save shortcut action, preserving inherited button shape and focus.",
+      "html": "<button class=\"ds-button ds-primary\" type=\"button\">Save shortcut</button>",
+      "css": ".ds-button{font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;font-size:13px;border:1px solid var(--dsw-alias-border-l3,#30333a);background:var(--dsw-alias-bg-l1,#181a1d);color:var(--dsw-alias-label-primary,#ededee);border-radius:9px;padding:8px 12px;cursor:pointer}.ds-button:hover{background:var(--dsw-alias-interactive-bg-hover,#25282d)}.ds-button:focus-visible{outline:2px solid #8ba7ff;outline-offset:3px}.ds-button:disabled{opacity:.45;cursor:default}@media(prefers-reduced-motion:no-preference){.ds-icon,.ds-button,.ds-row{transition:background-color 120ms ease-out}}.ds-primary{background:#365ac5;color:white;border-color:#365ac5}.ds-primary:hover{background:#436bdc}"
+    },
+    {
+      "name": "Shortcut field",
+      "kind": "input",
+      "refersTo": "field",
+      "description": "Extracted labeled settings input; the panel sample has no persistence behavior.",
+      "html": "<label class=\"ds-field\">Global show/hide shortcut<input spellcheck=\"false\" value=\"Command+Shift+Space\" placeholder=\"Command+Shift+Space\"/></label>",
+      "css": ".ds-field{display:grid;gap:8px;font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;font-size:14px;font-weight:500;color:var(--dsw-alias-label-primary,#ededee)}.ds-field input{width:100%;min-width:0;border:1px solid var(--dsw-alias-border-l3,#30333a);border-radius:9px;padding:10px 12px;background:var(--dsw-alias-bg-l1,#181a1d);color:inherit;font:inherit;font-weight:400;caret-color:#a9bdff}.ds-field input:focus-visible{outline:2px solid #8ba7ff;outline-offset:3px}"
+    },
+    {
+      "name": "Session search",
+      "kind": "input",
+      "refersTo": "search",
+      "description": "Literal charcoal search backing and focus-within border, with the source SVG path.",
+      "html": "<label class=\"ds-search\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M21 21l-6-6M17 10a7 7 0 1 1-14 0 7 7 0 0 1 14 0\"/></svg><input aria-label=\"Search sessions and messages\" placeholder=\"Search sessions and messages\"/></label>",
+      "css": ".ds-search{display:flex;align-items:center;gap:10px;padding:10px 12px;background:#202228;border:1px solid #424650;border-radius:12px;color:#ededee;font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif}.ds-search input{width:100%;min-width:0;background:transparent;border:0;outline:none;color:inherit;font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;font-size:14px;caret-color:#a9bdff}.ds-search:focus-within{border-color:#8ba7ff}.ds-search input::placeholder{color:#aeb2ba}"
+    },
+    {
+      "name": "Session navigation row",
+      "kind": "nav",
+      "refersTo": "session-row",
+      "description": "Flat session row with workspace/date metadata. Labels are illustrative, not an actual session record.",
+      "html": "<button class=\"ds-row\" type=\"button\"><span class=\"ds-row-title\">Session title</span><span class=\"ds-row-meta\">Workspace · Oct 4</span></button>",
+      "css": ".ds-row{width:100%;display:flex;flex-direction:column;text-align:left;gap:5px;padding:12px;border:0;border-bottom:1px solid #25282e;border-radius:8px;background:transparent;color:#ededee;cursor:pointer;font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif}.ds-row:hover,.ds-row:focus-visible{background:#202329}.ds-row:focus-visible{outline:2px solid #8ba7ff;outline-offset:3px}.ds-row-title{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:500}.ds-row-meta{font-size:11px;color:#aeb2ba}@media(prefers-reduced-motion:no-preference){.ds-icon,.ds-button,.ds-row{transition:background-color 120ms ease-out}}"
+    },
+    {
+      "name": "Error notice",
+      "kind": "card",
+      "refersTo": "notice",
+      "description": "Scoped alert surface with bounded scrolling and a dismiss action. Sample text comes from the source bridge report.",
+      "html": "<div class=\"ds-notice\" role=\"alert\"><span>The mini window could not complete this action. Try showing it again.</span><button type=\"button\" aria-label=\"Dismiss error\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M6 6l12 12M18 6L6 18\"/></svg></button></div>",
+      "css": ".ds-notice{display:flex;gap:8px;align-items:flex-start;color:#f6ccd0;background:#3b2328;border-radius:10px;padding:8px 10px;font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;font-size:12px;line-height:1.5;max-height:90px;overflow:auto;margin-bottom:6px}.ds-notice span{flex:1}.ds-notice button{border:0;padding:0;background:none;color:inherit;cursor:pointer}.ds-notice button:focus-visible{outline:2px solid #8ba7ff;outline-offset:3px}"
+    },
+    {
+      "name": "Expanded window toolbar",
+      "kind": "nav",
+      "refersTo": "window",
+      "description": "Visible only in expanded mode. Workspace context remains without a repeated long session title; no compact outer toolbar.",
+      "html": "<header class=\"ds-toolbar\"><button class=\"ds-icon\" type=\"button\" aria-label=\"Hide window\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M6 6l12 12M18 6L6 18\"/></svg></button><button class=\"ds-title\" type=\"button\" aria-label=\"Choose workspace for a new chat\"><span>Choose a workspace</span></button><button class=\"ds-icon\" type=\"button\" aria-label=\"Existing sessions\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M3 11a9 9 0 1 1 2.7 7M3 4v7h7M12 7v5l3 2\"/></svg></button><button class=\"ds-icon\" type=\"button\" aria-label=\"New chat\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M12 5v14M5 12h14\"/></svg></button><button class=\"ds-icon\" type=\"button\" aria-label=\"Mini window settings\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M9 3h6l1 4 4 1v8l-4 1-1 4H9l-1-4-4-1V8l4-1zM15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0\"/></svg></button><button class=\"ds-icon\" type=\"button\" aria-label=\"Collapse window\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M3 8h5V3M21 8h-5V3M16 21v-5h5M8 21v-5H3\"/></svg></button></header>",
+      "css": ".ds-icon{font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;border:0;padding:0;flex:none;width:32px;height:32px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;background:transparent;color:#ededee;cursor:pointer}.ds-icon:hover{background:#282b31}.ds-icon:focus-visible{outline:2px solid #8ba7ff;outline-offset:3px}.ds-icon:disabled{opacity:.4;cursor:default}@media(prefers-reduced-motion:no-preference){.ds-icon,.ds-button,.ds-row{transition:background-color 120ms ease-out}}.ds-toolbar{display:flex;align-items:center;gap:4px;height:40px;min-height:40px;padding:0 2px 6px;margin-bottom:8px;background:#101112;color:#ededee;font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;user-select:none}.ds-title{flex:1;min-width:0;display:flex;align-items:baseline;gap:10px;padding:3px 6px;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer;border-radius:6px;font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif}.ds-title:hover{background:#24272d}.ds-title:focus-visible{outline:2px solid #8ba7ff;outline-offset:3px}.ds-title span{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:12px;color:#aeb2ba}@media(max-width:500px){.ds-title span{display:none}}"
+    },
+    {
+      "name": "Mini default model select",
+      "kind": "input",
+      "refersTo": "model-default-select",
+      "description": "Extracted unconfigured default-model select. Provider groups/options come only from the live catalog; no invented Gemini ID.",
+      "html": "<label class=\"ds-field\">Default model<select><option value=\"\">Use main DSH default</option></select></label>",
+      "css": ".ds-field{display:grid;gap:8px;font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;font-size:14px;font-weight:500;color:var(--dsw-alias-label-primary,#ededee)}.ds-field select{width:100%;min-width:0;border:1px solid var(--dsw-alias-border-l3,#30333a);border-radius:9px;padding:10px 12px;background:var(--dsw-alias-bg-l1,#181a1d);color:inherit;font:inherit;font-weight:400;caret-color:#a9bdff}.ds-field select:focus-visible{outline:2px solid #8ba7ff;outline-offset:3px}"
+    }
+  ],
+  "narrative": {
+    "northStar": "DSH within reach",
+    "overview": "A quiet macOS floating utility, grounded in the user's Gemini mini-window screenshots and extended with DSH's existing identity. The approved refinement removes the outer compact chrome: the dark, generously padded real composer is the only visible pill, now without a CSS border or editor focus rectangle. Expanded mode keeps one near-black conversation canvas and a padded, borderless composer instead of repeating outlined bubbles. This documents the refined implementation, not a new visual world.\n\nThe real DSH composer and conversation remain the functional and visual foundation. The approved requirement to preserve that composer takes precedence over generic web-design prohibitions on stock components. There is no invented display-font pairing, generated raster artwork, or alternate composition-led identity.",
+    "keyCharacteristics": [
+      "Screenshot-pinned dark rounded macOS utility with a single compact composer pill.",
+      "Resident DSH composer and real session history.",
+      "System typography, quiet stroke icons and restrained blue actions.",
+      "Chrome-free compact input and natively resizable expanded conversation."
+    ],
+    "rules": [
+      {
+        "name": "The Scoped Identity Rule",
+        "body": "Mini-window aliases apply only to the mini document; ordinary DSH pages retain their incumbent appearance, and the main Settings section inherits host aliases.",
+        "section": "colors"
+      },
+      {
+        "name": "The Native Text Rule",
+        "body": "Preserve macOS system typography and the inherited DSH text hierarchy; do not add a web display font to make this utility seem branded.",
+        "section": "typography"
+      },
+      {
+        "name": "The Single Surface Rule",
+        "body": "Compact mode shows only the real composer pill; expanded mode avoids repeated outlined or shadowed containers around that editor.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do preserve the screenshot-pinned dark rounded macOS world and DSH identity, with only one visible compact composer pill.",
+      "Do keep the real composer mounted and bottom-anchored in expanded mode, with compact seat positioning reset and generous input padding.",
+      "Do retain system typography, accessible action names, form/button keyboard rings, accented editor caret and reduced-motion behavior.",
+      "Do limit mini-default settings to the catalog-selected model and its advertised reasoning options, without changing main DSH defaults or existing sessions.",
+      "Do preserve native resizing and remembered expanded geometry; distinguish CSS breakpoints from window bounds.",
+      "Do record browser captures, user-reference attachments and procedural icon provenance separately."
+    ],
+    "donts": [
+      "Don't replace the approved DSH composer because a generic web-design rule discourages stock components.",
+      "Don't invent a display-font pairing, generated raster artwork or composition-led golden screenshots.",
+      "Don't describe browser-preview captures as actual macOS window screenshots.",
+      "Don't claim exhaustive native fullscreen or multi-monitor manual verification from helper tests or browser metrics.",
+      "Don't restore shell/pill borders, native shadows, rectangular editor focus outlines, compact outer chrome, repeated expanded session titles, billing/dock strips or resize decoration.",
+      "Don't infer model wire IDs from display names, change main defaults, or advertise the unverified optional catalog GET as the primary path.",
+      "Don't leak mini-window overrides into ordinary DSH pages or overwrite current user preferences."
+    ]
+  }
+}

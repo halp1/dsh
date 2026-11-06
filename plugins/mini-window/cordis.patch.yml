@@ -1,0 +1,4 @@
+# Installed with: dsh plugin --profile web add file:/path/to/dsh-plugin-mini-window
+- insert:
+    - id: mini-window
+      name: dsh-plugin-mini-window
