@@ -1,0 +1,17 @@
+# Mini chat surface
+
+Mode: Operate. Confirmed direction: the user's Gemini mini-window screenshots, implemented with DSH's existing chat and composer. Code-led implementation approved in the plan.
+
+## Direction contract
+THESIS: Quick access without leaving the focused macOS desktop; an input pill expands into a real, natively resizable DSH conversation, not a reduced copy of the full sidebar app.
+OWN-WORLD: Screenshot-pinned near-black surfaces without a shell/pill border, native shadow or editor focus rectangle; CSS owns the rounded silhouette. Keep macOS system text, quiet circular icon buttons, restrained blue actions, an accented editor caret and keyboard rings on forms/buttons. Preserve the DSH composer internals and all approval behavior.
+STORY: Summon, type, read or resume an existing session, then hide and return to work. Explicit workspace context prevents unintended work in a wrong directory. Mini settings select a default model and only its advertised reasoning options for new mini chats; existing sessions and the main DSH default stay unchanged.
+FIRST VIEWPORT: Compact 640×112 logical pixels is only the dark input pill: no external toolbar, padding, frame, border, shadow, or vibrancy; more breathing room inside the input. Its invisible top padding is draggable, and native menus/shortcuts keep controls accessible. Expanded 640×600 is one near-black conversation canvas with quiet controls, scrollable transcript, padded borderless composer, native resize edges, and no accessory billing/status docks. Existing-session search is accessible in expanded mode; New chat and Settings remain available through native shortcuts in both modes. This supersedes the former double-wrapped implementation per the user's explicit screenshot correction.
+FORM: Screenshot-pinned compact pill / expanded conversation panel; no invented alternate visual identity. Native expand/collapse is the signature interaction, retaining the same editor and last expanded geometry.
+FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance.
+
+## Current verification boundary
+
+Version 0.1.1 source adds mini-only model defaults and removes remaining CSS/native contours. The human restarted the existing server on port 3080. Live public `remote.session.modelCatalog()` discovery supplied `antigravity` / `gemini-3.8-flash-tiered` / `high`; saving in mini Settings and starting a distinct new chat produced `MINI_GEMINI_HIGH_OK` in about 4 seconds. Persisted last-used selection matches, main default remains unchanged, and the configured global shortcut is unchanged. Actual native restart/show APIs returned HTTP 200 ready/visible/registered. Current compact, expanded and settings browser captures use real backend data with a simulated native bridge only for renderer inspection; they are not physical OS-window screenshots or native drag/resize proof.
+
+The optional catalog GET route has a buffered-body source fix but the running host caches its former HTTP 400 until the next normal server restart; no HTTP 200 claim is made for that fallback. The primary UI uses public RPC and needs no additional restart. Previous renderer-only SHIP evidence remains historical; no new independent-review verdict is invented. Native physical no-border rendering/resizing and exhaustive Spaces/fullscreen/multi-monitor behavior remain unverified.
