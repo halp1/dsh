@@ -19,6 +19,6 @@
   },
   "engines": { "node": ">=22.19" },
   "peerDependencies": { "@deepseek-ai/cordis": "^4.0.4" },
-  "devDependencies": { "jsdom": "^26.1.0" },
+  "devDependencies": { "@deepseek-ai/cordis": "catalog:", "jsdom": "^26.1.0" },
   "scripts": { "test": "node --test test/*.test.js" }
 }

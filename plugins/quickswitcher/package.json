@@ -44,11 +44,12 @@
     "@deepseek-ai/cordis": "^4.0.1"
   },
   "devDependencies": {
-    "@types/node": "^22.20.0",
-    "@types/react": "^19.1.0",
-    "react": "^19.3.1",
-    "tsdown": "^0.22.2",
-    "typescript": "^6.0.3"
+    "@deepseek-ai/cordis": "catalog:",
+    "@types/node": "catalog:",
+    "@types/react": "catalog:",
+    "react": "catalog:",
+    "tsdown": "catalog:",
+    "typescript": "catalog:"
   },
   "scripts": {
     "build": "tsc -b tsconfig.json && tsdown",

@@ -40,14 +40,21 @@
     "@deepseek-ai/dsh-settings": { "optional": true }
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-settings": "0.2.2-rc.1",
-    "@deepseek-ai/cordis-plugin-loader": "~1.1.0",
-    "@deepseek-ai/dsh-session": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-session-projection": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-scope": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-system-prompt": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-sandbox": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-llm": "0.2.2-rc.1"
+    "@deepseek-ai/cordis": "catalog:",
+    "@deepseek-ai/schemastery": "catalog:",
+    "@deepseek-ai/dsh-tools": "catalog:dsh",
+    "@deepseek-ai/dsh-user-approval": "catalog:dsh",
+    "@deepseek-ai/dsh-sandbox-policy": "catalog:dsh",
+    "@deepseek-ai/dsh-session-query": "catalog:dsh",
+    "@deepseek-ai/dsh-working-directory": "catalog:dsh",
+    "@deepseek-ai/dsh-settings": "catalog:dsh",
+    "@deepseek-ai/cordis-plugin-loader": "catalog:",
+    "@deepseek-ai/dsh-session": "catalog:dsh",
+    "@deepseek-ai/dsh-session-projection": "catalog:dsh",
+    "@deepseek-ai/dsh-scope": "catalog:dsh",
+    "@deepseek-ai/dsh-system-prompt": "catalog:dsh",
+    "@deepseek-ai/dsh-sandbox": "catalog:dsh",
+    "@deepseek-ai/dsh-llm": "catalog:dsh"
   },
   "keywords": ["dsh-plugin", "deepseek-harness", "jev", "sandbox", "approval"]
 }

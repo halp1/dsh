@@ -33,6 +33,10 @@
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-llm": ">=0.1.1"
   },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "catalog:",
+    "@deepseek-ai/dsh-llm": "catalog:dsh"
+  },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-llm": {
       "optional": true
