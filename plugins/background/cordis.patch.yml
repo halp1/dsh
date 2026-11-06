@@ -1,0 +1,15 @@
+# Bundle self-activation patch: mounts this plugin's node half when the package
+# is installed into a profile via
+#   dsh plugin --profile web add file:~/code/dsh/dsh-plugin-background
+#
+# The node half owns the shared background library (state.json) and the
+# authenticated /api/dsh-background.* routes; the browser half (stage, token
+# overrides, Settings > Background tab) is discovered through package.json's
+# `dsh.client` declaration and served as /plugins/<id>/client.js.
+#
+# Optional config: `stateFile` moves the library off the default
+# <$DSH_HOME or ~/.dsh>/plugins/background/state.json.
+#
+- insert:
+    - id: background
+      name: dsh-plugin-background
