@@ -1,0 +1,19 @@
+# Bundle self-activation patch: mounts the node half (the two host routes) when
+# the package is installed into a profile via
+#   dsh plugin --profile web add file:/Users/halp/code/dsh/dsh-plugin-open-in-editor
+#
+# The row also makes the client-modules scanner serve the browser half, which
+# routes chat file links to VS Code.
+#
+# Optional config, overridable from the profile's own cordis.patch.yml:
+#
+#   - id: open-in-editor
+#     config:
+#       command: /usr/local/bin/cursor   # editor CLI; default: VS Code, then Insiders
+#       sidebarExtensions: [md, png]      # what stays in the sidebar
+#       openWorkspace: true               # also pass the session cwd as the folder
+#       localOnly: true                   # only route clicks from a loopback page
+#
+- insert:
+    - id: open-in-editor
+      name: dsh-plugin-open-in-editor
