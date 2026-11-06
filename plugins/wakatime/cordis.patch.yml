@@ -1,0 +1,16 @@
+# Bundle self-activation patch: mounts the plugin when the package is
+# installed into a profile via
+#   dsh plugin --profile web add file:~/code/dsh/dsh-plugin-wakatime
+#
+# With no config, wakatime-cli reads api_url and api_key from ~/.wakatime.cfg.
+# Override from the profile's own cordis.patch.yml:
+#
+#   - id: wakatime
+#     config:
+#       apiUrl: https://hackatime.hackclub.com/api/hackatime/v1
+#       apiKey: ...
+#       category: ai coding
+#       cliPath: /opt/homebrew/bin/wakatime-cli
+- insert:
+    - id: wakatime
+      name: dsh-plugin-wakatime

@@ -1,0 +1,38 @@
+{
+  "name": "dsh-plugin-wakatime",
+  "version": "0.1.0",
+  "description": "WakaTime heartbeats for DeepSeek Harness: reports files the agent reads and edits, with a configurable API endpoint",
+  "license": "MIT",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "wakatime",
+    "hackatime"
+  ],
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=22.19"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}
