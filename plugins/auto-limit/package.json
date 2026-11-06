@@ -1,0 +1,44 @@
+{
+  "name": "dsh-plugin-auto-limit",
+  "version": "0.1.0",
+  "description": "Automatically pause DeepSeek Harness prompt turns when a Claude/Codex subscription usage window (5-hour, weekly, monthly) reaches a threshold, and resume automatically when the window resets",
+  "license": "MIT",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "rate-limit",
+    "usage",
+    "subscription",
+    "claude",
+    "codex"
+  ],
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-llm": ">=0.1.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}
