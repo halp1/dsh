@@ -1,0 +1,19 @@
+# Bundle self-activation patch: mounts this plugin's node half when the package
+# is installed into a profile via
+#   dsh plugin --profile web add file:~/code/dsh/dsh-plugin-latex
+#
+# The node half registers the "write math as LaTeX" system-prompt section for
+# every agent. The row also makes the client-modules scanner read this
+# package's `dsh.client` declaration and serve the browser half (live KaTeX
+# rendering while a reply streams) as /plugins/dsh-plugin-latex/client.js.
+#
+# Optional config, overridable from the profile's own cordis.patch.yml:
+#
+#   - id: latex
+#     config:
+#       prompt: true          # false = render only, no prompt section
+#       promptText: "..."     # replace the built-in guidance entirely
+#
+- insert:
+    - id: latex
+      name: dsh-plugin-latex

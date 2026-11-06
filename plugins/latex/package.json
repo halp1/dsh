@@ -1,0 +1,42 @@
+{
+  "name": "dsh-plugin-latex",
+  "version": "0.1.0",
+  "description": "LaTeX math for DeepSeek Harness: tells every agent to write math as LaTeX, and renders it with KaTeX live while replies stream in the web chat",
+  "license": "MIT",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "latex",
+    "katex",
+    "math"
+  ],
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./prompt": "./src/prompt.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}
