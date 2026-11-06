@@ -1,6 +1,6 @@
 /**
  * PluginInfoCard: 「设置 → 插件信息」卡——图标 + 插件名/版本 tag + 描述，下接
- * 元信息网格（作者 / 仓库 / npm / 许可证）。版本号来自服务端 usage-stats 的
+ * 元信息网格（作者 / 许可证）。版本号来自服务端 usage-stats 的
  * `pluginVersion`（读自包 package.json），其余元信息静态来自 `plugin-info.ts`。
  * 无版本号时显示 em dash。
  */
@@ -12,8 +12,6 @@ import {
   PLUGIN_DESCRIPTION,
   PLUGIN_LICENSE,
   PLUGIN_NAME,
-  PLUGIN_NPM_URL,
-  PLUGIN_REPOSITORY,
 } from './plugin-info.ts'
 import type { UsageBillingKey } from './locales.ts'
 
@@ -40,18 +38,6 @@ export function PluginInfoCard({ t, version }: { t: (key: UsageBillingKey) => st
           <span className={css.plgLabel}>{t('pluginAuthor')}</span>
           <a className={css.plgLink} href={`https://github.com/${PLUGIN_AUTHOR_HANDLE}`} target="_blank" rel="noreferrer">
             {PLUGIN_AUTHOR_NAME} ({PLUGIN_AUTHOR_HANDLE})
-          </a>
-        </div>
-        <div className={css.plgItem}>
-          <span className={css.plgLabel}>{t('pluginRepository')}</span>
-          <a className={css.plgLink} href={PLUGIN_REPOSITORY} target="_blank" rel="noreferrer">
-            GitHub
-          </a>
-        </div>
-        <div className={css.plgItem}>
-          <span className={css.plgLabel}>{t('pluginNpm')}</span>
-          <a className={css.plgLink} href={PLUGIN_NPM_URL} target="_blank" rel="noreferrer">
-            {PLUGIN_NAME}
           </a>
         </div>
         <div className={css.plgItem}>

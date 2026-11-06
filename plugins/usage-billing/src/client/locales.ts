@@ -273,8 +273,6 @@ export type UsageBillingKey =
   | 'streakDays'
   | 'subscriptionAutoDetect'
   | 'pluginAuthor'
-  | 'pluginRepository'
-  | 'pluginNpm'
   | 'pluginLicense'
   | 'tabToken'
   | 'tokenExport'
@@ -307,11 +305,6 @@ export type UsageBillingKey =
   | 'modelBudgetHint'
   | 'modelBudgetBody'
   | 'modelBudgetPlaceholder'
-  | 'moreWorksTitle'
-  | 'adEngramName'
-  | 'adEngramDesc'
-  | 'adRainbowName'
-  | 'adRainbowDesc'
   | 'kpiDescCacheHit'
   | 'kpiDescTokens'
   | 'kpiDescAvgCost'
@@ -708,8 +701,6 @@ export const zh: Record<UsageBillingKey, string> = {
   'streakDays': '连续使用',
   'subscriptionAutoDetect': '自动识别',
   'pluginAuthor': '作者',
-  'pluginRepository': '仓库',
-  'pluginNpm': 'npm',
   'pluginLicense': '许可证',
   'tabToken': '用量',
   'tokenExport': '导出 Token',
@@ -747,11 +738,6 @@ export const zh: Record<UsageBillingKey, string> = {
   'modelBudgetHint': '为单个模型设本月上限（人民币元）；跨 80% / 100% 各提醒一次，留空 = 不限。',
   'modelBudgetBody': '「{model}」本月已 {cost}（预算 {budget} 的 {pct}%）',
   'modelBudgetPlaceholder': '上限',
-  'moreWorksTitle': '更多作品',
-  'adEngramName': 'DSH Engram · 记忆宫殿',
-  'adEngramDesc': '跨会话长期记忆：记忆图谱 · 混合检索 · 知识飞轮',
-  'adRainbowName': 'RainbowSpeak · 虹语',
-  'adRainbowDesc': '聊天输入框的彩虹流光边框，持续流动的渐变光环',
   'kpiDescCacheHit': '缓存命中 token ÷ 总输入 token。命中率越高，输入费用越低（缓存读单价约为未命中的 1/10）。',
   'kpiDescTokens': '总处理 token = 输入 + 输出。缓存读/写已含在输入内，不重复计数（issue #85 口径）。',
   'kpiDescAvgCost': '统计范围内总费用 ÷ 总调用次数，单次调用的平均开销。',
@@ -1142,8 +1128,6 @@ export const en: Record<UsageBillingKey, string> = {
   'streakDays': 'Streak',
   'subscriptionAutoDetect': 'Auto',
   'pluginAuthor': 'Author',
-  'pluginRepository': 'Repository',
-  'pluginNpm': 'npm',
   'pluginLicense': 'License',
   'tabToken': 'Usage',
   'tokenExport': 'Export tokens',
@@ -1179,11 +1163,6 @@ export const en: Record<UsageBillingKey, string> = {
   'modelBudgetHint': 'Set a monthly cap per model (CNY); alerts fire once each at 80% / 100%. Empty = unlimited.',
   'modelBudgetBody': '"{model}" has spent {cost} this month ({pct}% of {budget})',
   'modelBudgetPlaceholder': 'Cap',
-  'moreWorksTitle': 'More plugins',
-  'adEngramName': 'DSH Engram · Memory Palace',
-  'adEngramDesc': 'Cross-session long-term memory: graph · hybrid retrieval · flywheel',
-  'adRainbowName': 'RainbowSpeak',
-  'adRainbowDesc': 'A flowing rainbow marquee border for the chat composer',
   'kpiDescCacheHit': 'Cache-hit tokens ÷ total input tokens. Higher hit rate means lower input cost (cache reads are ~1/10 the miss price).',
   'kpiDescTokens': 'Total tokens = input + output. Cache reads/writes are already part of input and are not double-counted (issue #85).',
   'kpiDescAvgCost': 'Total cost ÷ total calls within the selected range — the average cost per call.',

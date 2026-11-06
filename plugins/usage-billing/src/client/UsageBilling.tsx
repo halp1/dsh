@@ -2923,39 +2923,9 @@ function BillingDashboard({
               {/* 5. 自定义单价：set-card——已存价列表 + 新增行；显示层重估，口径差异见说明。 */}
               <div hidden={settingsSectionHiddenBy(SETTINGS_KEYWORDS.advanced)} id="settings-advanced"><UserPriceCard userPrices={userPrices} onUserPrices={onUserPrices} t={t} /></div>
 
-              {/* 6. 插件信息卡：作者 / 仓库 / 版本 / 许可证（设置 Tab 常驻）。 */}
+              {/* 6. 插件信息卡：作者 / 版本 / 许可证（设置 Tab 常驻）。 */}
               <div hidden={settingsSectionHiddenBy(SETTINGS_KEYWORDS.about)} id="settings-about"><PluginInfoCard t={t} version={stats.pluginVersion} /></div>
 
-              {/* 更多作品：同作者的两个配套插件（设置-关于分组）。 */}
-              <section hidden={settingsSectionHiddenBy(SETTINGS_KEYWORDS.about)} className={css.setCard} data-testid="billing-more-works">
-                <div className={css.setCardHead}>
-                  <div className={css.setCardMeta}>
-                    <h3 className={css.setCardTitle}>{t('moreWorksTitle')}</h3>
-                  </div>
-                </div>
-                <div className={css.moreWorkList}>
-                  <a
-                    className={css.moreWorkRow}
-                    href="https://github.com/kenz1117/dsh-engram"
-                    target="_blank"
-                    rel="noreferrer"
-                    data-testid="billing-ad-engram"
-                  >
-                    <span className={css.moreWorkName}>{t('adEngramName')}</span>
-                    <span className={css.moreWorkDesc}>{t('adEngramDesc')}</span>
-                  </a>
-                  <a
-                    className={css.moreWorkRow}
-                    href="https://github.com/kenz1117/dsh-ui-rainbowspeak"
-                    target="_blank"
-                    rel="noreferrer"
-                    data-testid="billing-ad-rainbowspeak"
-                  >
-                    <span className={css.moreWorkName}>{t('adRainbowName')}</span>
-                    <span className={css.moreWorkDesc}>{t('adRainbowDesc')}</span>
-                  </a>
-                </div>
-              </section>
                 </div>{/* settingsPane */}
               </div>{/* settingsLayout */}
             </div>
@@ -3943,7 +3913,7 @@ const SETTINGS_KEYWORDS = {
   toggles: ['usage_stats', '工具', '即时代费', '胶囊', '中转站', '站点', '隐藏', '低谷', '队列', 'relay', 'site', 'live', 'cost', 'hide', 'queue', 'off-peak'],
   displayExtra: ['悬浮', '订阅', '计费卡', '指标', '环比', '主数字', '侧栏', '入口', '隐藏', 'float', 'subscription', 'card', 'metric', 'delta', 'sidebar', 'trigger', 'hidden'],
   advanced: ['自定义', '单价', '价格', '低谷', 'custom', 'price'],
-  about: ['关于', '版本', '作者', '许可', '仓库', 'about', 'version', 'author', 'license', 'repo'],
+  about: ['关于', '版本', '作者', '许可', 'about', 'version', 'author', 'license'],
 } as const
 
 /** 全部分区是否都被搜索过滤隐藏（用于显示「没有匹配」空态提示）。 */
