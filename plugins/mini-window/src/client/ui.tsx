@@ -97,6 +97,7 @@ export function MiniRoot({ controller, client, native, SessionProvider, renderSl
   const [bridgeError, setBridgeError] = useState<string | null>(null)
   const root = useRef<HTMLDivElement>(null)
   const historyButton = useRef<HTMLButtonElement>(null)
+  const content = useRef<HTMLElement>(null)
   const expandedRef = useRef(false)
   const pickerExpanded = useRef(false)
   const expand = (value: boolean) => { pickerExpanded.current = false; void native.setExpanded(value).catch(e => setBridgeError(message(e))) }
@@ -104,6 +105,8 @@ export function MiniRoot({ controller, client, native, SessionProvider, renderSl
   const newChat = async (workspace?: WorkspaceId | null) => { setPanel(null); if (await controller.newChat(workspace)) { expand(false); focusComposer() } }
   const openPanel = (value: 'sessions' | 'settings' | 'workspaces') => { expand(true); setPanel(value) }
   const closePanel = () => { setPanel(null); requestAnimationFrame(() => historyButton.current?.focus()) }
+  // React 18 has no `inert` prop, so the attribute is toggled directly.
+  useEffect(() => { content.current?.toggleAttribute('inert', panel !== null) }, [panel])
   useEffect(() => {
     let active = true
     void native.getState().then(value => { if (active) { expandedRef.current = value.expanded; setExpanded(value.expanded) } }).catch(e => setBridgeError(message(e)))
@@ -175,7 +178,7 @@ export function MiniRoot({ controller, client, native, SessionProvider, renderSl
       <IconButton label={expanded ? 'Collapse window' : 'Expand window'} icon={expanded ? 'collapse' : 'expand'} onClick={() => { setPanel(null); expand(!expanded) }} />
     </header>
     {(bridgeError || selection.error || host.error) && <div className="dshmini-notice" role="alert"><span>{bridgeError || selection.error || host.error}</span><button type="button" aria-label="Dismiss error" onClick={() => { setBridgeError(null); controller.clearError() }}><Icon name="close" /></button></div>}
-    <main className="dshmini-content" aria-label="DSH mini chat" aria-busy={selection.busy} inert={panel ? true : undefined}>
+    <main ref={content} className="dshmini-content" aria-label="DSH mini chat" aria-busy={selection.busy}>
       {selection.reference ? <SessionProvider session={selection.reference}>{renderSlot('mini.conversation', {})}</SessionProvider> : <div className="dshmini-setup"><p>{selection.initialized ? 'Start a chat in a workspace or uncategorized.' : 'Connecting to DSH…'}</p>{selection.initialized && <label>Location<select aria-label="New chat location" value="" disabled={selection.busy} onChange={e => void newChat(e.target.value === 'uncategorized' ? null : e.target.value as WorkspaceId)}><option value="">Choose a location</option><option value="uncategorized">Uncategorized</option>{workspaceState.items.map(w => <option value={w.workspaceId} key={w.workspaceId}>{w.title || w.path}</option>)}</select></label>}</div>}
     </main>
     {panel && <section className="dshmini-panel" role="dialog" aria-modal="true" aria-label={panel === 'sessions' ? 'Choose an existing session' : panel === 'workspaces' ? 'Choose a workspace' : 'Mini window settings'}>{panel === 'sessions' ? <SessionPicker controller={controller} close={closePanel} onPick={id => { void controller.open(id).then(ok => { if (ok) { setPanel(null); expand(true); focusComposer() } }) }} /> : panel === 'settings' ? <Settings client={client} close={closePanel} /> : <div className="dshmini-picker"><div className="dshmini-picker-top"><h2>New chat in…</h2><IconButton label="Close workspace picker" icon="close" onClick={closePanel} /></div><p className="dshmini-muted">Choose a workspace, or leave the chat uncategorized.</p><div className="dshmini-results"><button type="button" className="dshmini-session" disabled={selection.busy} onClick={() => void newChat(null)}><span className="dshmini-session-title">Uncategorized</span><span className="dshmini-session-meta">No workspace · uses the DSH server’s working directory</span></button>{workspaceState.items.map(w => <button type="button" key={w.workspaceId} className="dshmini-session" disabled={selection.busy} onClick={() => void newChat(w.workspaceId)}><span className="dshmini-session-title">{w.title || w.path}</span><span className="dshmini-session-meta">{w.path}</span></button>)}</div></div>}</section>}
