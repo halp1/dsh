@@ -26,7 +26,7 @@
  * 8. 费率表 sticky 表头契约（#113）：.ubTablewrapPricing 必须有 max-height
  *    （自建滚动容器），表头必须 position:sticky + top:0 + 不透明底色。
  *
- * 全绿退出 0；违规打印 文件:行 退出 1。CI 与 `pnpm lint` 共用本脚本。
+ * 全绿退出 0；违规打印 文件:行 退出 1。由 `pnpm lint` 调用。
  */
 
 import { readdirSync, readFileSync, statSync } from 'node:fs'

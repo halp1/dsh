@@ -1,42 +1,26 @@
 #!/usr/bin/env node
 /**
- * check-clientbundle-sync.mjs —— vendored clientBundle.ts 与宿主 monorepo
- * 工厂的平台种子漂移检测（E-8）。
+ * check-clientbundle-sync.mjs: drift check between the vendored
+ * scripts/clientBundle.ts PLATFORM_MODULES seed and the DSH host source
+ * (packages/client/web/src/platform.ts), which the seed copies verbatim.
  *
- * scripts/clientBundle.ts 的 PLATFORM_MODULES 注释声明「verbatim 拷贝自宿主
- * packages/client/web/src/platform.ts」。此前没有校验：宿主改平台种子时，我们
- * 只能靠运行时炸了才发现种子落后。
+ * Reference: the host tag `dsh-v<version>` for the newest exact
+ * `@deepseek-ai/dsh-*` version pinned in package.json devDependencies. The seed
+ * must match the host generation this package builds and tests against, not an
+ * arbitrary checkout HEAD. When that tag is not available locally, set
+ * DSH_FETCH_HOST_TAG=1 to fetch it, otherwise the script compares against the
+ * host working tree and only reports differences without failing.
  *
- * ── 参照物（2026-10 加固）────────────────────────────────────────────
- * **主参照 = 本仓已声明的最新宿主版本对应的 tag**：从 package.json 的
- * dsh.compatibility.dshReleases 取最大版本 → `dsh-v<version>`，用
- * `git show <tag>:packages/client/web/src/platform.ts` 读出该 tag 的种子。
- * 种子必须对着**我们声称兼容的那一代宿主**校准——对着任意 HEAD 校准没有意义
- * （本机检出停在旧 ref 时会报假警报，见 docs/store-benchmark-2026-10.md §3.2）。
+ * Failure modes (authoritative mode only):
+ * - ours has extra entries: those modules stay `require()` in the browser and a
+ *   host that cannot answer them throws at runtime. This is the dangerous side.
+ * - ours is missing entries: a later import of that module gets inlined and may
+ *   create a second shared runtime instance.
+ * - same set, different order: verbatim copy means the order must match too.
  *
- * tag 在本地不可得时：
- * - 设了 DSH_FETCH_HOST_TAG=1 → 尝试 `git fetch --depth 1 origin tag <tag>`
- *   再读（CI 每日任务用这个开关，保证权威校验在 CI 里也生效）；
- * - 否则退回读宿主仓**工作区**的 platform.ts，并降级为**参考性**比对（只提示、
- *   不失败）——工作区 ref 不是我们声明的兼容面，据此判失败会制造假警报。
- *
- * ── 判定方向（2026-10 复核后修正）────────────────────────────────────
- * CLIENT_EXTERNALS 里的模块在浏览器端保持 `require()`（不内联），宿主 loader 的
- * 模块表必须答得上，否则运行时抛错。故：
- * - 本仓 ⊋ 参照（多出条目）→ **失败**：多出的条目一旦被 import，就是 require 到
- *   目标宿主答不了的 spec → 运行时抛错。**这是危险方向**。
- * - 本仓 ⊊ 参照（少了条目）→ **失败（权威模式）**：宿主种子扩张未镜像；日后
- *   import 该模块会被内联，可能产生第二份共享运行时实例。
- * - 集合相同、顺序不同 → **失败**：verbatim 语义要求顺序也一致。
- *
- * ── 行为 ─────────────────────────────────────────────────────────────
- * - 定位宿主 monorepo：`--repo <path>` > `$DSH_HARNESS_REPO` > 兄弟目录
- *   `../deepseek-harness` > `~/deepseek-harness`。
- * - 找不到 monorepo：打 skip 提示退出 0（CI 无 monorepo checkout 时正常）。
- * - 一致：打印参照来源 + 宿主 HEAD 佐证，退出 0。
- *
- * watch-dsh-releases 每日任务会 clone 宿主仓跑本脚本，漂移自动开
- * label=clientbundle-drift 的 issue。
+ * Host checkout lookup: `--repo <path>`, then `$DSH_HARNESS_REPO`, then
+ * `../deepseek-harness`, then `~/deepseek-harness`. No checkout means skip and
+ * exit 0.
  */
 
 import { execFileSync } from 'node:child_process'
@@ -111,7 +95,10 @@ function compareVersions(a, b) {
   return 0
 }
 
-/** 本仓声明的最新宿主版本（兼容矩阵的边界）→ 对应宿主 tag。 */
+/**
+ * Newest exact host version pinned in devDependencies, mapped to its host tag.
+ * Ranges or non-version specifiers (for example `catalog:`) are ignored.
+ */
 function declaredTargetTag() {
   let pkg
   try {
@@ -119,9 +106,12 @@ function declaredTargetTag() {
   } catch {
     return undefined
   }
-  const releases = pkg?.dsh?.compatibility?.dshReleases
-  if (releases === undefined || typeof releases !== 'object') return undefined
-  const versions = Object.keys(releases)
+  const deps = pkg?.devDependencies
+  if (deps === undefined || typeof deps !== 'object') return undefined
+  const versions = Object.entries(deps)
+    .filter(([name]) => name.startsWith('@deepseek-ai/dsh-'))
+    .map(([, spec]) => String(spec))
+    .filter(spec => /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/.test(spec))
   if (versions.length === 0) return undefined
   let newest = versions[0]
   for (const v of versions) {
@@ -187,7 +177,7 @@ if (target !== undefined) {
   const taggedText = readHostPlatformAtRef(harnessRepo, target.tag)
   if (taggedText !== undefined) {
     referenceSeed = extractSeed(taggedText, `宿主 platform.ts（${target.tag}）`)
-    referenceLabel = `tag ${target.tag}（本仓声明的最新兼容版本 ${target.version}）`
+    referenceLabel = `tag ${target.tag}（devDependencies 固定的宿主版本 ${target.version}）`
     authoritative = true
   }
 }
