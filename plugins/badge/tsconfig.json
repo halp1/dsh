@@ -1,6 +1,6 @@
 {
   // Host half: node types, emitting declarations into lib/types.
-  "extends": "./tsconfig.base.json",
+  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "lib": ["ES2024"],
     "types": ["node"],
