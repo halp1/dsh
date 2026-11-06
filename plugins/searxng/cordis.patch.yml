@@ -17,9 +17,14 @@
 #       language: en
 #       timeoutMs: 15000
 #
+# A patch replaces the targeted row's whole `config`, so the base row's
+# `fetchProvider: http` must be restated here. Dropping it leaves fetch with two
+# usable providers (http, deepseek-fetch-api) and every fetch fails with
+# WEB_PROVIDER_AMBIGUOUS.
 - id: web
   config:
     searchProvider: searxng
+    fetchProvider: http
 
 - insert:
     - id: web-search-searxng
