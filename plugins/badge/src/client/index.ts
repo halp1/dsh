@@ -54,6 +54,8 @@ export interface BadgeService {
   readonly supported: boolean
   /** A copy of the live settings. */
   settings(): BadgeSettings
+  /** Raw per-session inputs the count is derived from, for diagnosing mismatches with the sidebar. */
+  debug(): unknown
   /**
    * Merge a partial settings change, persist it, and republish immediately.
    * @param patch - the fields to change.
@@ -127,6 +129,35 @@ export function apply(ctx: Context): void {
     get count() { return watcher?.count ?? 0 },
     get supported() { return badgingSupported(typeof navigator === 'undefined' ? undefined : navigator) },
     settings: () => ({ ...settings }),
+    debug: () => {
+      const list = sources.sessions.getSnapshot()
+      const statuses = sources.statuses.getSnapshot()
+      const archived = sources.workspaces.getSnapshot().archivedSessionIds
+      return {
+        ids: list.ids.length,
+        byId: Object.keys(list.byId).length,
+        statusEntries: statuses.size,
+        archived: archived.length,
+        rows: Object.values(list.byId).map(s => {
+          const st = statuses.get(s.id)
+          return {
+            id: s.id,
+            title: s.displayTitle,
+            inIds: list.ids.includes(s.id),
+            blank: s.blank,
+            origin: s.origin,
+            mainView: s.retainedBy?.mainView,
+            running: s.running,
+            status: st === undefined ? null : {
+              running: st.running,
+              pending: st.pendingInteraction?.kind,
+              completionUnread: st.completionUnread,
+            },
+          }
+        }),
+        statusOnly: [...statuses.keys()].filter(id => list.byId[id] === undefined),
+      }
+    },
     configure: (patch: Partial<BadgeSettings>) => {
       settings = { ...settings, ...patch }
       saveSettings(storage, settings)
