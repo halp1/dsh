@@ -242,7 +242,7 @@ async function loadCompositionWith(options: {
     `- name: 'virtual:test-billing-settings${options.settings === 'live' ? '-live' : ''}'`,
     // 显式 id 与 name 必须是同一个列表项（name 用 2 空格缩进续行），拆成两行
     // 会生成一个无 name 的空条目导致 import 失败。
-    ...(options.entryId === undefined ? ["- name: '@kenz1117/dsh-ui-usage-billing'"] : ["- id: 'usage-billing-test'", "  name: '@kenz1117/dsh-ui-usage-billing'"]),
+    ...(options.entryId === undefined ? ["- name: 'dsh-plugin-usage-billing'"] : ["- id: 'usage-billing-test'", "  name: 'dsh-plugin-usage-billing'"]),
     '  config:',
     '    monthlyBudget: 100',
     // 组合测试验证的是完整折叠管线（聚合内容/快照兜底/预算回落/余额不等待），
@@ -285,7 +285,7 @@ async function loadCompositionWith(options: {
     ...(options.settings === 'live'
       ? [['virtual:test-billing-settings-live', liveSettingsDouble(options.onUpdate ?? (() => {}))] as const]
       : [['virtual:test-billing-settings', settingsDouble] as const]),
-    ['@kenz1117/dsh-ui-usage-billing', UsageBilling],
+    ['dsh-plugin-usage-billing', UsageBilling],
   ])
   context.loader.internal = {
     version: 'v2',
@@ -420,7 +420,7 @@ describe('usage-billing real Loader composition', () => {
 
     // HMR 安全：卸载 billing 行后三条路由释放（webserver 仍在，答 404）。
     const billingEntry = [...loaded.loader.entries()]
-      .find(entry => entry.options.name === '@kenz1117/dsh-ui-usage-billing')
+      .find(entry => entry.options.name === 'dsh-plugin-usage-billing')
     expect(billingEntry).toBeDefined()
     await billingEntry!.fiber?.dispose()
     expect((await getJson(port, '/api/billing/usage-stats')).status).toBe(404)

@@ -85,7 +85,7 @@ async function startHost(): Promise<void> {
     "- name: 'virtual:test-billing-persistence'",
     "- name: 'virtual:test-billing-credentials'",
     "- name: 'virtual:test-billing-settings'",
-    "- name: '@kenz1117/dsh-ui-usage-billing'",
+    "- name: 'dsh-plugin-usage-billing'",
     '  config:',
     '    monthlyBudget: 100',
     `    snapshotPath: '${join(root, 'usage-stats.json')}'`,
@@ -103,7 +103,7 @@ async function startHost(): Promise<void> {
     ['virtual:test-billing-persistence', persistenceDouble],
     ['virtual:test-billing-credentials', credentialsDouble],
     ['virtual:test-billing-settings', settingsDouble],
-    ['@kenz1117/dsh-ui-usage-billing', UsageBilling],
+    ['dsh-plugin-usage-billing', UsageBilling],
   ])
   ctx.loader.internal = {
     version: 'v2',

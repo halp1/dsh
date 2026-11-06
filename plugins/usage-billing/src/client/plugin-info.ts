@@ -5,7 +5,7 @@
  */
 
 /** npm 包名。 */
-export const PLUGIN_NAME = '@kenz1117/dsh-ui-usage-billing'
+export const PLUGIN_NAME = 'dsh-plugin-usage-billing'
 
 /** 一句话描述。 */
 export const PLUGIN_DESCRIPTION = 'Usage billing dashboard for DeepSeek Harness'
@@ -20,7 +20,7 @@ export const PLUGIN_AUTHOR_HANDLE = 'kenz1117'
 export const PLUGIN_REPOSITORY = 'https://github.com/kenz1117/dsh-ui-usage-billing'
 
 /** npm 包主页（可点击）。 */
-export const PLUGIN_NPM_URL = 'https://www.npmjs.com/package/@kenz1117/dsh-ui-usage-billing'
+export const PLUGIN_NPM_URL = 'https://www.npmjs.com/package/dsh-plugin-usage-billing'
 
 /** 许可证。 */
 export const PLUGIN_LICENSE = 'MIT'
