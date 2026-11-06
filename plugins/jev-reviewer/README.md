@@ -6,7 +6,7 @@ Jev reviews individual sandbox escalation requests in DSH `read-only` and `works
 
 ## Requirements
 
-- DSH `0.2.2-rc.1`, with its approval, tools, sandbox policy, working directory, and session query services mounted
+- DSH `0.2.2-rc.1` or newer, with its approval, tools, sandbox policy, working directory, and session query services mounted
 - Node.js 24.9 or newer
 - A TypeSafe API key saved in **Settings > Jev reviewer**, or `TYPESAFE_API_KEY` in the DSH Host process environment
 - An existing terminal human answerer, such as DSH Web or its interactive CLI adapter
