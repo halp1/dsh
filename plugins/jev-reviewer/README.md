@@ -8,18 +8,18 @@ Jev reviews individual sandbox escalation requests in DSH `read-only` and `works
 
 - DSH `0.2.2-rc.1`, with its approval, tools, sandbox policy, working directory, and session query services mounted
 - Node.js 24.9 or newer
-- `TYPESAFE_API_KEY` in the DSH Host process environment
+- A TypeSafe API key saved in **Settings > Jev reviewer**, or `TYPESAFE_API_KEY` in the DSH Host process environment
 - An existing terminal human answerer, such as DSH Web or its interactive CLI adapter
 
-The SDK is pinned to `@typesafe-ai/sdk` 0.7.0. The default model is `jev-1.14.0`. The package has been tested locally without live Jev requests or activation in a running profile.
+The SDK is pinned to `@typesafe-ai/sdk` 0.7.0. The default model is `jev-1.14.0`. Tests use mocked transport, with no live Jev requests.
 
 ## Install and enable
 
 Installation changes your profile and enables the bundle. Do it only after reviewing the data disclosure and policy below.
 
-1. Set `TYPESAFE_API_KEY` through your normal Host secret management. Never put the value in plugin configuration or tool arguments.
-2. In DSH's **Plugins** page, install this local repository by its absolute directory path. The equivalent `plugin_manager` request is shown below. Replace the path with your checkout.
-3. Keep the existing human approval adapter enabled. Check the manager's application result. If it reports restart-required, restart DSH with the environment variable available to that process.
+1. In DSH's **Plugins** page, install this local repository by its absolute directory path. The equivalent `plugin_manager` request is shown below. Replace the path with your checkout.
+2. Open **Settings > Jev reviewer**, enter your TypeSafe API key in the masked field, and choose **Save key**. The saved key takes effect on the next automated review without restarting DSH. Alternatively, set `TYPESAFE_API_KEY` in the Host environment before launching DSH.
+3. Keep the existing human approval adapter enabled. Check the manager's application result. If it reports restart-required, restart DSH yourself. If the Settings page is not yet visible after installing an update, refresh the browser window.
 
 ```json
 {
@@ -32,9 +32,17 @@ No publication, global npm installation, or replacement DSH server is needed. Th
 
 To disable it, turn off the `jev-reviewer` entry or the entire bundle in Plugins. Disablement takes effect when DSH applies the change, or after restart when HMR is unavailable. In-progress Jev reviews are cancelled on actual unload. A human question already handed to the existing adapter remains owned by that adapter.
 
+## API key in Settings
+
+Open **Settings > Jev reviewer** to save or replace the key. This field is write-only: DSH returns only a presence marker, never the saved value. Successful saves clear the input. Failed or stale saves preserve your draft and show a generic error without echoing it. **Reset key** removes the profile override and restores an inherited key, or the environment fallback when none is configured.
+
+A saved key takes precedence over `TYPESAFE_API_KEY`. Changes apply to new reviews immediately through DSH's live configuration reference. The SDK is only called from the Host, not the browser. No credential is stored in browser local/session storage or included in model state or reviewer logs.
+
+DSH persists this setting in the profile configuration file as plain text. The secret role masks and redacts reads but does not encrypt the file. Any authenticated browser permitted to edit Host Settings can replace it. Protect your profile directory and backups. Use the environment fallback instead if profile-file persistence is unsuitable. Do not paste the key into chat or tool arguments.
+
 ## Configuration
 
-The following is a profile patch override after the bundle is installed. These are all supported configuration fields. Unknown fields and invalid values reject plugin startup.
+The following is a profile patch override after the bundle is installed. The optional `apiKey` secret is managed separately through Settings. Other fields remain configuration-file options. Unknown fields and invalid values reject plugin startup.
 
 ```yaml
 - id: jev-reviewer
@@ -118,5 +126,7 @@ The initial dependency installation reported 20 high-severity advisories in the 
 - [Host middleware](<src/index.js>) owns correlation, one-shot routing, cancellation, and stale-context checks.
 - [Context handling](<src/context.js>) owns operation identity, denial evidence, and authority labels.
 - [Jev policy](<src/review.js>) owns configuration, privacy validation, SDK transport, and probability gates.
+- [Host settings schema](<src/config.js>) owns the write-only secret field and live credential adapter.
+- [Settings page](<src/client.js>) uses DSH's revisioned configuration forms and existing Settings window.
 
 API references: [JavaScript SDK](https://docs.typesafe.ai/sdk/javascript.md), [Choice](https://docs.typesafe.ai/primitives/choice.md), and [LLM guardrails](https://docs.typesafe.ai/cookbooks/llm_guardrails.md).
