@@ -52,12 +52,12 @@ The following is a profile patch override after the bundle is installed. The opt
     model: jev-1.14.0
     timeoutMs: 10000
     maxStateBytes: 65536
-    allowProbability: 0.99
+    allowProbability: 0.90
     rejectProbability: 0.99
-    minConfidence: 0.90
+    minConfidence: 0.80
 ```
 
-`timeoutMs` is the total automated review budget, including context construction and service work. It does not limit human waiting. `maxStateBytes` bounds the complete UTF-8 JSON state, not a truncated excerpt. The maximum configurable state size is 1 MiB. Probability and confidence settings must be finite numbers between zero and one. Lowering them weakens the automatic-decision gate. Defaults are conservative starting thresholds, not a calibrated false-approval rate.
+`timeoutMs` is the total automated review budget, including context construction and service work. It does not limit human waiting. `maxStateBytes` bounds the complete UTF-8 JSON state, not a truncated excerpt. The maximum configurable state size is 1 MiB. Probability and confidence settings must be finite numbers between zero and one. Lowering them weakens the automatic-decision gate. Defaults favor ordinary task-related work and are not a calibrated false-approval rate. Choice confidence is derived from its probability distribution, so these two gates are not independent evidence. See the [TypeSafe confidence reference](https://docs.typesafe.ai/confidence.md).
 
 The API origin is fixed to `https://api.typesafe.ai`. The plugin does not honor `TYPESAFE_BASE_URL`, `TYPESAFE_DEFAULT_MODEL`, or `TYPESAFE_LOG_LEVEL`. SDK retries are disabled and SDK logging is explicitly off, including when the Host environment requests debug output. Missing credentials retain human approval rather than granting anything.
 
@@ -65,11 +65,11 @@ The API origin is fixed to `https://api.typesafe.ai`. The plugin does not honor 
 
 Two Choice judgments run in one SDK request: an action and an effect category. Code requires both judgments to agree and validates their complete probability distributions, confidences, and exact model identity.
 
-- **Allow once**: `allow` plus `low-risk`, with both selected probabilities meeting `allowProbability` and both confidences meeting `minConfidence`. Suitable candidates are clearly bounded task-related edits or understood low-risk tests and builds, including from read-only mode.
+- **Allow once**: `allow` plus `low-risk`, with both selected probabilities meeting `allowProbability` and both confidences meeting `minConfidence`. Suitable candidates are reasonably necessary task-related reads, edits, tests, builds, metadata listings, project-local dependency setup, and bounded cleanup of identified generated artifacts. These do not need separate per-command consent or the complete body of a familiar project script. Sandbox widening alone is not a reason to ask a human.
 - **Reject**: `reject` plus `prohibited`, meeting the rejection and confidence thresholds. This is reserved for clear user or policy violations, credential theft, exfiltration, or bypass of required safeguards.
 - **Human**: all other combinations, uncertainty, conflicting judgments, errors, timeouts, malformed responses, missing credentials, sensitive or oversized state, unsupported context, or insufficient probability/confidence.
 
-Pre-existing data deletion, history rewriting, publishing or sending, production operations, system/security changes, opaque scripts/programs, uncertain targets, and privileged or external writes are human-required. Merely saying that a command is needed for the task is not enough. The model's justification, assistant text, and tool output cannot grant authority. User-invoked skills and project instructions constrain the action. They do not expand human authorization.
+Unrelated or unnecessary work, materially unclear targets or effects, user-data or source deletion, history rewriting, publishing or external disclosure, credential exposure, production operations, system/security/global changes, financial effects, untrusted downloaded scripts, disabling safeguards, and installing unrestricted Host plugins require a human. Ordinary project-local dependency setup and generated-artifact cleanup are not automatically placed in those categories. A direct user task authorizes its ordinary reasonably necessary steps. The model's justification, assistant text, and tool output cannot invent a task connection or override explicit restrictions. User-invoked skills and project instructions can narrow that scope, not expand it.
 
 A human fallback calls the existing approval waterfall continuation exactly once. The human may approve or reject. No answerer or a failing answerer remains fail-closed through DSH. Approval policy `never` takes precedence, including if it changes while Jev is pending.
 
@@ -79,9 +79,11 @@ There is no allow-always mode, remembered permission, approval cache, session mo
 
 The reviewer correlates the live Agent, call ID, opaque execution token, tool definition, complete immutable arguments, actual current directory, workspace policy, and full canonical escalation reason. A generic pre-execute approval is not eligible, even if it imitates that reason. Ambiguous live call IDs go to a human.
 
-Recognized names are `bash`, `pwsh`, `write`, `edit`, `str_replace_editor`, and `run_code`. Recognition alone is not permission. The actual current tool schema and runtime evidence must be available. Parent-linked inner PTC calls use the same tool pipeline boundary. Opaque `run_code` programs generally need human review, and transport-only calls without an inspectable schema or structured denial remain human-only. Plugin-management and unknown-tool requests are untouched.
+Recognized file/process tools are `bash`, `pwsh`, `write`, `edit`, `str_replace_editor`, and `run_code`. Recognition alone is not permission. The actual current tool schema and runtime evidence must be available. Parent-linked inner PTC calls use the same tool pipeline boundary. Materially opaque code and transport-only calls without an inspectable schema or structured denial remain human-only.
 
-Automatic review additionally requires a matching sandbox denial observed by this plugin earlier in the **same turn**, under the same mode, roots, directory, and operation arguments. Only trusted final execution facts qualify: structured process sandbox metadata or the filesystem `FS_SANDBOX_DENIED` error identity. A denial string printed by a command does not qualify. Command presentation text and the escalation fields are excluded from operation identity, but timeouts, background flags, paths, code, and all other operation parameters are bound.
+A closed read-only subset of `plugin_manager` is also eligible: `list_plugins`, `list_bundles`, and `list_version_exemptions`, with only bounded `offset` and `limit` query parameters. These native calls request approval directly and do not require a preceding failed sandbox attempt. Their live execution, exact canonical approval reason, immutable arguments, current tool definition, mode, and directory are still bound and rechecked. Jev must find the listing relevant to the task. Installs, removals, enable/disable actions, exemptions, and all other management operations remain human-only.
+
+Automatic file/process review additionally requires a matching sandbox denial observed by this plugin earlier in the **same turn**, under the same mode, roots, directory, and operation arguments. Only trusted final execution facts qualify: structured process sandbox metadata or the filesystem `FS_SANDBOX_DENIED` error identity. A denial string printed by a command does not qualify. Command presentation text and the escalation fields are excluded from operation identity, but timeouts, background flags, paths, code, and all other operation parameters are bound.
 
 Each refusal is consumed by at most one retry. Restarting, installing the plugin after the refusal, background-process results without structured sandbox facts, changed arguments, a new turn, or changed policy can therefore require a human. The bounded denial journal stores hashes and turn epochs, not raw command text or persistent grants.
 
