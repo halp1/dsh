@@ -1,0 +1,7 @@
+# No transports are replaced. This plugin only controls model-facing exposure.
+- insert:
+    - id: mcp-discovery
+      name: dsh-plugin-mcp-discovery
+      config:
+        servers: [rea, gworkspace]
+        maxSelectedTools: 16
