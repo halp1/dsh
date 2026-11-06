@@ -2,7 +2,7 @@ import { resolveConfig, createReviewer } from './review.js'
 import { runtimeOptions } from './config.js'
 export { Config } from './config.js'
 import {
-  buildState, identifyEscalation, operationKey, sandboxDenied, supportedTool,
+  buildState, identifyEscalation, operationKey, readOnlyPluginQuery, sandboxDenied, supportedTool,
 } from './context.js'
 
 export const name = 'jev-reviewer'
@@ -228,7 +228,8 @@ export function installReviewer(ctx, rawConfig = {}, options = {}) {
       const evidence = journal?.has(key) && journal.get(key) === (turnEpochs.get(session) ?? 0)
       // Each observed denial is evidence for at most one retry, even with concurrent calls.
       journal?.delete(key)
-      if (!evidence) return await fallback({ decision: 'human', code: 'missing-retry-evidence' })
+      const pluginQuery = readOnlyPluginQuery(record.exec.name, record.exec.arguments)
+      if (!evidence && !pluginQuery) return await fallback({ decision: 'human', code: 'missing-retry-evidence' })
       const snapshot = await abortable(service(ctx, request.agent, 'sessionQuery').readSurface(session.id), signal)
       if (snapshot.session.id !== session.id) throw new Error('wrong-session')
       const schema = record.exec.schema ?? record.definition

@@ -5,7 +5,8 @@ const MODES = {
   'read-only': ['workspace-write', 'danger-full-access'],
   'workspace-write': ['danger-full-access'],
 }
-const TOOLS = new Set(['bash', 'pwsh', 'write', 'edit', 'str_replace_editor', 'run_code'])
+const TOOLS = new Set(['bash', 'pwsh', 'write', 'edit', 'str_replace_editor', 'run_code', 'plugin_manager'])
+const PLUGIN_QUERIES = new Set(['list_plugins', 'list_bundles', 'list_version_exemptions'])
 
 export function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -27,16 +28,37 @@ export function supportedTool(name) {
   return TOOLS.has(name)
 }
 
+/** Closed read-only subset. Never generalize this to installation or other profile mutations. */
+export function readOnlyPluginQuery(name, args) {
+  if (name !== 'plugin_manager' || !isRecord(args) || !Object.hasOwn(args, 'action') ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(args))) return false
+  const keys = Reflect.ownKeys(args)
+  if (keys.some((key) => typeof key !== 'string' || !['action', 'offset', 'limit'].includes(key) ||
+      !Object.getOwnPropertyDescriptor(args, key).enumerable ||
+      !Object.hasOwn(Object.getOwnPropertyDescriptor(args, key), 'value'))) return false
+  if (!PLUGIN_QUERIES.has(args.action)) return false
+  if (args.offset !== undefined && (!Number.isSafeInteger(args.offset) || args.offset < 0)) return false
+  if (args.limit !== undefined && (!Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > 100)) return false
+  return true
+}
+
 /** Recognize only the tested host's actual escalation protocol, not a prose prefix. */
 export function identifyEscalation(request, record, policy, cwd) {
   if (!record || !record.active || record.closed || !supportedTool(request.toolName)) return false
   const exec = record.exec
   const args = exec.arguments
   if (request.agent !== exec.agent || request.callId !== exec.callId || request.toolName !== exec.name) return false
+  if (JSON.stringify(record.policy) !== JSON.stringify(policy) || record.cwd !== cwd) return false
+  if (request.toolName === 'plugin_manager') {
+    // The native query gate asks directly, without first running a failing sandboxed command.
+    // Bind the full observed gate format to the immutable, closed read-only arguments.
+    return MODES[policy?.mode]?.includes('danger-full-access') === true &&
+      readOnlyPluginQuery(exec.name, args) && request.reason ===
+      `escalate sandbox to danger-full-access: plugin_manager ${JSON.stringify(args)}. Profile changes persist across sessions${String.fromCharCode(59)} installed Host code runs outside the workspace sandbox.`
+  }
   if (!isRecord(args) || !MODES[policy?.mode]?.includes(args.sandbox_permissions)) return false
   if (typeof args.justification !== 'string' || !args.justification.trim()) return false
   if (request.reason !== `escalate sandbox to ${args.sandbox_permissions}: ${args.justification}`) return false
-  if (JSON.stringify(record.policy) !== JSON.stringify(policy) || record.cwd !== cwd) return false
   return true
 }
 
@@ -128,14 +150,15 @@ export function buildState(request, record, policy, cwd, schema, snapshot, retry
   if (!schema || schema.name !== record.exec.name || typeof schema.description !== 'string' ||
       !isRecord(schema.parameters)) throw new Error('unknown-tool-schema')
   const args = record.exec.arguments
+  const pluginQuery = readOnlyPluginQuery(record.exec.name, args)
   const directory = args.workdir === undefined ? cwd :
     typeof args.workdir === 'string' ? resolve(cwd, args.workdir) : undefined
   if (!directory) throw new Error('unknown-directory')
   return {
-    policyVersion: 1,
+    policyVersion: 2,
     policy: {
       standingMode: policy.mode,
-      requestedMode: args.sandbox_permissions,
+      requestedMode: pluginQuery ? 'danger-full-access' : args.sandbox_permissions,
       workspaceRoot: policy.workspaceRoot,
       additionalWritableRoots: policy.additionalWritableRoots ?? [],
     },
@@ -147,6 +170,6 @@ export function buildState(request, record, policy, cwd, schema, snapshot, retry
       schema: { name: schema.name, description: schema.description, parameters: schema.parameters },
     },
     instructions: instructionContext(snapshot),
-    evidence: { exactSameTurnSandboxDenial: retryEvidence === true },
+    evidence: { exactSameTurnSandboxDenial: retryEvidence === true, readOnlyPluginQuery: pluginQuery },
   }
 }

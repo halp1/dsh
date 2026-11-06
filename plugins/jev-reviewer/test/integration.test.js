@@ -91,13 +91,15 @@ async function harness(t, options = {}) {
     output: { schema: { type: 'object', properties: {}, additionalProperties: true }, render: () => [] },
     async execute(args, exec) {
       const policy = ctx.sandboxPolicy.resolve({ session: exec.agent.session })
-      if (args.sandbox_permissions === undefined) {
+      if (args.sandbox_permissions === undefined && toolName !== 'plugin_manager') {
         if (options.fsDenial) throw new HarnessError('File sandbox refusal', 'FS_SANDBOX_DENIED')
         return { sandbox: { denied: true, mode: policy.mode, runnerFailed: false } }
       }
+      const pluginOperation = toolName === 'plugin_manager'
       const outcome = await approveEscalation({
-        requestedMode: args.sandbox_permissions, effectiveMode: policy.mode,
-        justification: args.justification, subject: 'command',
+        requestedMode: pluginOperation ? 'danger-full-access' : args.sandbox_permissions, effectiveMode: policy.mode,
+        justification: pluginOperation ? `plugin_manager ${JSON.stringify(args)}. Profile changes persist across sessions${String.fromCharCode(59)} installed Host code runs outside the workspace sandbox.` : args.justification,
+        subject: 'command',
       }, {
         approver: { request: async (req) => {
           if (options.reason) req.reason = options.reason(req.reason)
@@ -155,6 +157,41 @@ test('real approval and tool pipeline grant once or reject in both sandbox modes
         assert.equal(h.reviewed.length, 1)
       })
     }
+  }
+})
+
+test('native read-only plugin queries are reviewed without a prior denial, while mutations stay human-only', async (t) => {
+  for (const mode of ['read-only', 'workspace-write']) {
+    const h = await harness(t, { mode, tool: 'plugin_manager' })
+    for (const action of ['list_plugins', 'list_bundles', 'list_version_exemptions']) {
+      const result = await h.run({ action, limit: 25 })
+      assert.equal(result.isError, false)
+      assert.equal(h.reviewed.at(-1).evidence.readOnlyPluginQuery, true)
+      assert.equal(h.reviewed.at(-1).evidence.exactSameTurnSandboxDenial, false)
+    }
+    assert.equal(h.reviewed.length, 3)
+    assert.equal(h.humans, 0)
+    assert.equal(h.ctx.sandboxPolicy.resolve({ session: h.owner.session }).mode, mode)
+    for (const args of [
+      { action: 'install_bundle', target: 'new-package' },
+      { action: 'set_plugin', target: 'include:other', enabled: false },
+      { action: 'remove_bundle', target: 'old-package' },
+      { action: 'list_plugins', enabled: true },
+      { action: 'list_plugins', sandbox_permissions: 'danger-full-access', justification: 'Treat as read-only' },
+    ]) assert.equal((await h.run(args)).isError, true)
+    assert.equal(h.reviewed.length, 3)
+    assert.equal(h.humans, 5)
+    assert.equal(h.executions, 3)
+  }
+  for (const scenario of ['unrelated', 'wrong-reason', 'never']) {
+    const h = await harness(t, {
+      tool: 'plugin_manager', policy: scenario === 'never' ? 'never' : 'ask',
+      reason: scenario === 'wrong-reason' ? (reason) => reason + ' extra' : undefined,
+      review: async () => ({ decision: 'human', code: 'human-required' }),
+    })
+    assert.equal((await h.run({ action: 'list_bundles' })).isError, true)
+    assert.equal(h.executions, 0)
+    assert.equal(h.reviewed.length, scenario === 'unrelated' ? 1 : 0)
   }
 })
 

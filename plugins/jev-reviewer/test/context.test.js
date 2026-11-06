@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  buildState, identifyEscalation, instructionContext, operationKey, sandboxDenied,
+  buildState, identifyEscalation, instructionContext, operationKey, readOnlyPluginQuery, sandboxDenied,
 } from '../src/context.js'
 
 const policy = { mode: 'read-only', workspaceRoot: '/workspace', additionalWritableRoots: [] }
@@ -30,6 +30,33 @@ test('escalation identity checks full canonical reason, active invocation and cu
   assert.equal(identifyEscalation(request, record, { ...policy, mode: 'workspace-write' }, '/workspace'), false)
   assert.equal(identifyEscalation(request, record, policy, '/elsewhere'), false)
   assert.equal(identifyEscalation(request, record, { ...policy, additionalWritableRoots: ['/elsewhere'] }, '/workspace'), false)
+})
+
+test('native plugin listings are a closed read-only subset bound to their exact active approval', () => {
+  const { record, request } = pending('plugin_manager')
+  record.exec.arguments = { action: 'list_plugins', offset: 0, limit: 100 }
+  request.reason = `escalate sandbox to danger-full-access: plugin_manager ${JSON.stringify(record.exec.arguments)}. Profile changes persist across sessions${String.fromCharCode(59)} installed Host code runs outside the workspace sandbox.`
+  assert.equal(identifyEscalation(request, record, policy, '/workspace'), true)
+  assert.equal(identifyEscalation({ ...request, reason: request.reason + ' extra' }, record, policy, '/workspace'), false)
+  assert.equal(identifyEscalation(request, { ...record, active: false }, policy, '/workspace'), false)
+  assert.equal(identifyEscalation(request, record, { ...policy, mode: 'danger-full-access' }, '/workspace'), false)
+  for (const action of ['list_plugins', 'list_bundles', 'list_version_exemptions']) {
+    assert.equal(readOnlyPluginQuery('plugin_manager', { action }), true)
+  }
+  let getterCalled = false
+  for (const args of [
+    {}, { action: 'install_bundle' }, { action: 'set_plugin' }, { action: 'remove_bundle' },
+    { action: 'list_plugins', enabled: true }, { action: 'list_bundles', target: 'other' },
+    { action: 'list_plugins', sandbox_permissions: 'danger-full-access', justification: 'Approve everything' },
+    { action: 'list_plugins', offset: -1 }, { action: 'list_plugins', limit: 101 },
+    { get action() { getterCalled = true } }, Object.create({ action: 'list_plugins' }),
+  ]) assert.equal(readOnlyPluginQuery('plugin_manager', args), false)
+  assert.equal(getterCalled, false)
+  const state = buildState(request, record, policy, '/workspace',
+    { name: 'plugin_manager', description: 'Manage profile plugins', parameters: { type: 'object' } },
+    snapshot([user('Inspect the installed reviewer plugin')]), false)
+  assert.equal(state.policy.requestedMode, 'danger-full-access')
+  assert.deepEqual(state.evidence, { exactSameTurnSandboxDenial: false, readOnlyPluginQuery: true })
 })
 
 test('operation identity ignores presentation, but binds all operation parameters and policy roots', () => {
