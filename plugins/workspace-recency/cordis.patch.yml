@@ -1,0 +1,18 @@
+# Bundle self-activation patch: mounts this plugin's (empty) node half when the
+# package is installed into a profile via
+#   dsh plugin --profile web add file:~/code/dsh/dsh-plugin-workspace-recency
+#
+# The row exists so the Loader sees the package; the real work lives in the
+# browser half, which the client-modules scanner discovers through this
+# package.json's `dsh.client` declaration and serves as /plugins/<id>/client.js.
+#
+# The browser half's preferences are per-device rather than per-profile (the
+# sort is a view over host state, so a second browser may keep the manual
+# order), so they persist in localStorage under
+# `dsh.workspaceRecency.settings` and are edited through
+# `ctx.workspaceRecency` from the devtools console rather than through this
+# row's config.
+#
+- insert:
+    - id: workspace-recency
+      name: dsh-plugin-workspace-recency
