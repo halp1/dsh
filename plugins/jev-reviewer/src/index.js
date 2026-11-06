@@ -1,4 +1,6 @@
 import { resolveConfig, createReviewer } from './review.js'
+import { runtimeOptions } from './config.js'
+export { Config } from './config.js'
 import {
   buildState, identifyEscalation, operationKey, sandboxDenied, supportedTool,
 } from './context.js'
@@ -45,9 +47,10 @@ function definitionFor(ctx, exec) {
 
 /** Host-only middleware, exported to allow integration tests with a fake Jev transport. */
 export function installReviewer(ctx, rawConfig = {}, options = {}) {
-  const config = resolveConfig(rawConfig)
+  const { policy, getApiKey } = runtimeOptions(rawConfig)
+  const config = resolveConfig(policy)
   if (!config.enabled) return
-  const review = options.review ?? createReviewer(config)
+  const review = options.review ?? createReviewer(config, { getApiKey })
   const logger = ctx.logger('jev-reviewer')
   const lifetime = new AbortController()
   const records = new Set()
@@ -259,4 +262,7 @@ export function installReviewer(ctx, rawConfig = {}, options = {}) {
 
 export function apply(ctx, rawConfig = {}) {
   installReviewer(ctx, rawConfig)
+  ctx.inject(['settings'], (settingsCtx) => {
+    settingsCtx.effect(() => settingsCtx.settings.configure({ auto: false }, ctx.fiber))
+  })
 }

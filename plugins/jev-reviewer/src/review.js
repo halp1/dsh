@@ -6,6 +6,7 @@ const DEFAULTS = Object.freeze({
   allowProbability: 0.99,
   rejectProbability: 0.99,
   minConfidence: 0.90,
+  apiKey: '',
 })
 
 const ACTIONS = ['allow', 'reject', 'human']
@@ -21,7 +22,7 @@ const SECRET_FORMS = [
   /\b[a-z][a-z0-9+.-]*:\/\/[^\s/@]+(?::[^\s/@]*)?@/i,
 ]
 
-/** Resolve only supported settings. Credentials always come from the environment. */
+/** Resolve supported settings without exposing the credential to enumeration or JSON. */
 export function resolveConfig(raw = {}) {
   if (!isRecord(raw)) throw new TypeError('Reviewer configuration must be an object')
   if (Reflect.ownKeys(raw).some((key) => typeof key !== 'string' || !Object.hasOwn(DEFAULTS, key))) {
@@ -47,6 +48,8 @@ export function resolveConfig(raw = {}) {
   for (const key of ['allowProbability', 'rejectProbability', 'minConfidence']) {
     if (!isProbability(config[key])) throw new TypeError(`Invalid reviewer setting: ${key}`)
   }
+  if (!isApiKey(config.apiKey)) throw new TypeError('Invalid reviewer API key')
+  Object.defineProperty(config, 'apiKey', { value: config.apiKey, enumerable: false })
   return Object.freeze(config)
 }
 
@@ -111,7 +114,7 @@ export function prepareState(state, config = DEFAULTS) {
     }
     if (state === null || (typeof state !== 'string' && typeof state !== 'object')) return { ok: false, code: 'invalid-state' }
     const snapshot = clone(state, 0)
-    if (sensitive) return { ok: false, code: 'sensitive-state' }
+    if (sensitive || containsCredential(snapshot, settings.apiKey)) return { ok: false, code: 'sensitive-state' }
     return { ok: true, state: snapshot, bytes }
   } catch (error) {
     return { ok: false, code: error instanceof StateFailure ? error.code : 'invalid-state' }
@@ -137,11 +140,12 @@ export function routeAnswers(response, config = DEFAULTS) {
         return human('invalid-response')
       }
     }
-    const metadata = {
+    const validatedMetadata = {
       model: response.model,
       probabilities: { action: { ...action.probabilities }, effect: { ...effect.probabilities } },
       confidence: { action: action.confidence, effect: effect.confidence },
     }
+    const metadata = containsCredential(validatedMetadata, settings.apiKey) ? {} : validatedMetadata
     if (action.choice === 'human' || effect.choice === 'human-required') return human('human-required', metadata)
     if (effect.choice === 'unknown') return human('unknown-effect', metadata)
     const allow = action.choice === 'allow' && effect.choice === 'low-risk'
@@ -163,6 +167,8 @@ export function routeAnswers(response, config = DEFAULTS) {
 /**
  * options.client injects a systemOne(request, options) SDK-compatible client.
  * options.fetch injects SDK transport. options.env replaces process.env for tests.
+ * options.getApiKey is a synchronous live Settings reader, sampled once per review.
+ * An empty live value falls back to the environment, not captured Settings.
  * No SDK import or client construction occurs for an ineligible state.
  */
 export function createReviewer(config = DEFAULTS, options = {}) {
@@ -172,8 +178,18 @@ export function createReviewer(config = DEFAULTS, options = {}) {
     if (signal?.aborted) return human('aborted')
     const prepared = prepareState(state, settings)
     if (!prepared.ok) return human(prepared.code)
-    const apiKey = (options.env ?? process.env).TYPESAFE_API_KEY
-    if (typeof apiKey !== 'string' || !apiKey.trim()) return human('missing-api-key')
+    let apiKey
+    try {
+      apiKey = options.getApiKey === undefined ? settings.apiKey : options.getApiKey()
+      if (apiKey === '') {
+        apiKey = (options.env ?? process.env).TYPESAFE_API_KEY ?? ''
+        if (typeof apiKey === 'string' && !apiKey.trim()) return human('missing-api-key')
+      }
+      if (!isApiKey(apiKey)) return human('invalid-api-key')
+    } catch {
+      return human('invalid-api-key')
+    }
+    if (containsCredential(prepared.state, apiKey)) return human('sensitive-state')
     const controller = new AbortController()
     let timedOut = false
     const abort = () => controller.abort()
@@ -196,7 +212,7 @@ export function createReviewer(config = DEFAULTS, options = {}) {
           const { TypeSafeClient } = await import('@typesafe-ai/sdk')
           if (controller.signal.aborted) return human(timedOut ? 'timeout' : 'aborted')
           client = new TypeSafeClient({
-            apiKey: apiKey.trim(),
+            apiKey,
             baseURL: 'https://api.typesafe.ai',
             defaultModel: settings.model,
             timeout: settings.timeoutMs,
@@ -213,7 +229,7 @@ export function createReviewer(config = DEFAULTS, options = {}) {
           questions: questions(),
         }, { signal: controller.signal, timeout: settings.timeoutMs, retry: NO_RETRY })
         if (controller.signal.aborted) return human(timedOut ? 'timeout' : 'aborted')
-        return routeAnswers(response, settings)
+        return omitCredentialMetadata(routeAnswers(response, settings), apiKey)
       } catch {
         return human(controller.signal.aborted ? (timedOut ? 'timeout' : 'aborted') : 'service-error')
       }
@@ -256,6 +272,22 @@ function questions() {
       },
     },
   }
+}
+
+function isApiKey(value) {
+  return typeof value === 'string' && value.length <= 4096 && !/[\s\p{Cc}\p{Cf}]/u.test(value)
+}
+
+/** Only inspect already-materialized JSON, never caller accessors or serializers. */
+function containsCredential(value, apiKey) {
+  if (!apiKey) return false
+  if (value === null || typeof value !== 'object') return String(value).includes(apiKey)
+  return Object.entries(value).some(([key, child]) => key.includes(apiKey) || containsCredential(child, apiKey))
+}
+
+function omitCredentialMetadata(result, apiKey) {
+  const { decision, code, ...metadata } = result
+  return containsCredential(metadata, apiKey) ? { decision, code } : result
 }
 
 function containsSecret(value) {

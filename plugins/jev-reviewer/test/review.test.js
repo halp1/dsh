@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { zstdDecompressSync } from 'node:zlib'
 import { createReviewer, prepareState, resolveConfig, routeAnswers } from '../src/review.js'
 
 const config = resolveConfig()
@@ -35,12 +36,26 @@ function fakeClient(result = response()) {
   }
 }
 
+function captureFetch(reply = () => Response.json(response())) {
+  const calls = []
+  return {
+    calls,
+    async fetch(url, init) {
+      const headers = new Headers(init.headers)
+      const encoded = Buffer.from(init.body)
+      const body = headers.get('content-encoding') === 'zstd' ? zstdDecompressSync(encoded) : encoded
+      calls.push({ url, headers, body: JSON.parse(body.toString('utf8')) })
+      return reply()
+    },
+  }
+}
+
 test('configuration rejects typos, unsafe model identifiers, invalid types, accessors and invalid thresholds', () => {
   for (const raw of [
     null, [], { enabled: 'false' }, { model: 'jev-1\nsecret' }, { model: 'jev-' + 'x'.repeat(129) },
     { timeoutMs: 0 }, { timeoutMs: 1.5 }, { maxStateBytes: Infinity }, { maxStateBytes: 1_048_577 },
     { allowProbability: NaN }, { rejectProbability: -0.01 }, { minConfidence: 1.01 },
-    { allowProbabilty: 0.5 }, { apiKey: 'never-accept-config-credentials' },
+    { allowProbabilty: 0.5 },
   ]) assert.throws(() => resolveConfig(raw), TypeError)
   let getterCalled = false
   assert.throws(() => resolveConfig({ get enabled() { getterCalled = true } }), TypeError)
@@ -48,6 +63,25 @@ test('configuration rejects typos, unsafe model identifiers, invalid types, acce
   const stricter = resolveConfig({ allowProbability: 1, rejectProbability: 1, minConfidence: 1 })
   assert.equal(routeAnswers(response('allow', 'low-risk', 0.999), stricter).decision, 'human')
   assert.equal(routeAnswers(response('reject', 'prohibited'), stricter).decision, 'reject')
+})
+
+test('Settings credentials are validated, preserved on re-resolution and hidden from enumeration', () => {
+  const key = 'opaque-configured-value'
+  const resolved = resolveConfig({ apiKey: key })
+  assert.equal(resolved.apiKey, key)
+  assert.equal(resolveConfig(resolved).apiKey, key)
+  assert.equal(Object.getOwnPropertyDescriptor(resolved, 'apiKey').enumerable, false)
+  assert.equal(Object.isFrozen(resolved), true)
+  assert.equal(Object.hasOwn({ ...resolved }, 'apiKey'), false)
+  assert.equal(JSON.stringify(resolved).includes(key), false)
+  assert.equal(resolveConfig({ apiKey: '' }).apiKey, '')
+  assert.equal(resolveConfig({ apiKey: 'x'.repeat(4096) }).apiKey.length, 4096)
+  for (const apiKey of [undefined, null, 42, {}, ' key', 'key ', 'a b', 'a\tb', 'a\nb', 'a\u0000b', 'a\u007fb', 'a\u0085b', 'a\u200bb', 'a\u00a0b', 'x'.repeat(4097)]) {
+    assert.throws(() => resolveConfig({ apiKey }), TypeError)
+  }
+  let read = false
+  assert.throws(() => resolveConfig({ get apiKey() { read = true } }), TypeError)
+  assert.equal(read, false)
 })
 
 test('routing requires agreement, both probabilities, both confidences and inclusive threshold boundaries', () => {
@@ -260,5 +294,135 @@ test('real SDK uses only mocked fetch, pinned origin and one attempt with SDK lo
   }
   assert.deepEqual(await createReviewer(config, { fetch: failFetch, env })(state), { decision: 'human', code: 'service-error' })
   assert.equal(calls, 2)
+  assert.deepEqual(logs, [])
+})
+
+test('Settings precedence, empty fallback and live credential rotation reach only mocked fetch', async () => {
+  const captured = captureFetch()
+  const configured = 'configuredOpaqueCredential'
+  const fallback = 'environmentOpaqueCredential'
+  const environment = { TYPESAFE_API_KEY: fallback }
+  for (const settings of [{ apiKey: configured }, resolveConfig({ apiKey: configured })]) {
+    assert.equal((await createReviewer(settings, { fetch: captured.fetch, env: environment })(state)).decision, 'allow')
+    assert.equal(captured.calls.at(-1).headers.get('authorization'), `Bearer ${configured}`)
+  }
+  for (const settings of [{}, { apiKey: '' }]) {
+    assert.equal((await createReviewer(settings, { fetch: captured.fetch, env: environment })(state)).decision, 'allow')
+    assert.equal(captured.calls.at(-1).headers.get('authorization'), `Bearer ${fallback}`)
+  }
+  assert.equal((await createReviewer({ apiKey: configured }, { fetch: captured.fetch, env: {} })(state)).decision, 'allow')
+  assert.equal(captured.calls.at(-1).headers.get('authorization'), `Bearer ${configured}`)
+  let live = 'firstLiveOpaqueCredential'
+  let reads = 0
+  const review = createReviewer({ apiKey: configured }, {
+    fetch: captured.fetch,
+    env: environment,
+    getApiKey() {
+      reads += 1
+      return live
+    },
+  })
+  for (const [value, expected] of [
+    ['firstLiveOpaqueCredential', 'firstLiveOpaqueCredential'],
+    ['rotatedLiveOpaqueCredential', 'rotatedLiveOpaqueCredential'],
+    ['', fallback],
+  ]) {
+    live = value
+    assert.equal((await review(state)).decision, 'allow')
+    assert.equal(captured.calls.at(-1).headers.get('authorization'), `Bearer ${expected}`)
+  }
+  assert.equal(reads, 3)
+  assert.equal(captured.calls.length, 8)
+  for (const call of captured.calls) {
+    assert.equal(new URL(call.url).origin, 'https://api.typesafe.ai')
+    assert.deepEqual(call.body.state, state)
+    assert.equal(Object.hasOwn(call.body, 'apiKey'), false)
+    const chosen = call.headers.get('authorization').slice('Bearer '.length)
+    assert.equal(JSON.stringify(call.body).includes(chosen), false)
+  }
+  const before = captured.calls.length
+  assert.equal((await createReviewer({ apiKey: configured }, {
+    getApiKey: () => '', fetch: captured.fetch, env: {},
+  })(state)).code, 'missing-api-key')
+  assert.equal(captured.calls.length, before)
+})
+
+test('invalid live credentials and credential reader errors fail closed without fetch or raw failures', async () => {
+  const captured = captureFetch()
+  for (const key of [undefined, null, 42, ' ', 'embedded space', 'a\nb', 'a\u0000b', 'x'.repeat(4097)]) {
+    const result = await createReviewer({ apiKey: 'capturedMustNotBeUsed' }, {
+      getApiKey: () => key, fetch: captured.fetch, env,
+    })(state)
+    assert.deepEqual(result, { decision: 'human', code: 'invalid-api-key' })
+  }
+  const result = await createReviewer(config, {
+    getApiKey() { throw new Error('privateReaderFailureMustNotEscape') },
+    fetch: captured.fetch,
+    env,
+  })(state)
+  assert.deepEqual(result, { decision: 'human', code: 'invalid-api-key' })
+  assert.deepEqual(await createReviewer(config, {
+    fetch: captured.fetch, env: { TYPESAFE_API_KEY: 'invalid embedded space' },
+  })(state), { decision: 'human', code: 'invalid-api-key' })
+  assert.equal(captured.calls.length, 0)
+})
+
+test('exact chosen credentials in snapshot keys or values block every credential source without partial sending', async () => {
+  const key = 'bnd8Rvx72cFMpLq4tN'
+  const inputs = [
+    `the opaque text is ${key}`,
+    { nested: [{ text: `prefix${key}suffix` }] },
+    { nested: { [`prefix${key}suffix`]: 'ordinary value' } },
+  ]
+  for (const input of inputs) {
+    assert.equal(prepareState(input).ok, true)
+    assert.deepEqual(prepareState(input, resolveConfig({ apiKey: key })), { ok: false, code: 'sensitive-state' })
+  }
+  const captured = captureFetch()
+  for (const [settings, options] of [
+    [{ apiKey: key }, { env: {} }],
+    [{ apiKey: 'unusedCapturedCredential' }, { getApiKey: () => key, env }],
+    [{ apiKey: '' }, { env: { TYPESAFE_API_KEY: key } }],
+    [{ apiKey: 'unusedCapturedCredential' }, { getApiKey: () => '', env: { TYPESAFE_API_KEY: key } }],
+  ]) {
+    const review = createReviewer(settings, { ...options, fetch: captured.fetch })
+    for (const input of inputs) {
+      const result = await review(input)
+      assert.deepEqual(result, { decision: 'human', code: 'sensitive-state' })
+      assert.equal(JSON.stringify(result).includes(key), false)
+    }
+  }
+  assert.deepEqual(await createReviewer({ apiKey: '123456' }, {
+    fetch: captured.fetch, env: {},
+  })({ nested: { numericValue: 123456 } }), { decision: 'human', code: 'sensitive-state' })
+  assert.equal(captured.calls.length, 0)
+})
+
+test('chosen credentials never escape through routing metadata or SDK failures', async (t) => {
+  const logs = []
+  for (const method of ['debug', 'info', 'warn', 'error', 'log']) t.mock.method(console, method, (...args) => logs.push(args))
+  const key = config.model
+  for (const candidate of [response(), response('human', 'human-required'), response('allow', 'low-risk', 0.98)]) {
+    const routed = routeAnswers(candidate, resolveConfig({ apiKey: key }))
+    assert.equal(Object.hasOwn(routed, 'model'), false)
+    assert.equal(Object.hasOwn(routed, 'probabilities'), false)
+    assert.equal(JSON.stringify(routed).includes(key), false)
+    const captured = captureFetch(() => Response.json(candidate))
+    const result = await createReviewer(config, { getApiKey: () => key, fetch: captured.fetch, env })(state)
+    assert.equal(result.decision, routed.decision)
+    assert.equal(JSON.stringify(result).includes(key), false)
+    assert.equal(Object.hasOwn(result, 'model'), false)
+    assert.equal(captured.calls.length, 1)
+  }
+  const numeric = captureFetch(() => Response.json(response('allow', 'low-risk', 0.99)))
+  const numericResult = await createReviewer(config, { getApiKey: () => '0.99', fetch: numeric.fetch, env })(state)
+  assert.deepEqual(numericResult, { decision: 'allow', code: 'low-risk' })
+  const fail = captureFetch(() => { throw new Error(`private upstream failure ${key}`) })
+  const failed = await createReviewer(config, { getApiKey: () => key, fetch: fail.fetch, env })(state)
+  assert.deepEqual(failed, { decision: 'human', code: 'service-error' })
+  assert.equal(JSON.stringify(failed).includes(key), false)
+  const malformed = captureFetch(() => Response.json({ ...response(), unexpected: key }))
+  const invalid = await createReviewer(config, { getApiKey: () => key, fetch: malformed.fetch, env })(state)
+  assert.deepEqual(invalid, { decision: 'human', code: 'invalid-response' })
   assert.deepEqual(logs, [])
 })

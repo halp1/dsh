@@ -7,27 +7,41 @@
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
+    "./client": "./src/client.js",
     "./package.json": "./package.json"
   },
   "files": ["src", "cordis.patch.yml", "README.md", "LICENSE"],
-  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "inject": ["@deepseek-ai/dsh-client-ui-settings", "@deepseek-ai/dsh-client-ui-slots", "@deepseek-ai/dsh-client-ui-primitives"]
+    }
+  },
   "engines": { "node": ">=24.9.0", "dsh": "0.2.2-rc.1" },
   "scripts": {
     "test": "node --test",
-    "check": "node --check src/index.js && node --check src/context.js && node --check src/review.js"
+    "check": "node --check src/index.js && node --check src/context.js && node --check src/review.js && node --check src/config.js && node --check src/client.js"
   },
   "dependencies": {
     "@typesafe-ai/sdk": "0.7.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.1.0",
+    "@deepseek-ai/schemastery": "~3.19.0",
+    "@deepseek-ai/dsh-settings": "0.2.2-rc.1",
     "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
     "@deepseek-ai/dsh-user-approval": "0.2.2-rc.1",
     "@deepseek-ai/dsh-sandbox-policy": "0.2.2-rc.1",
     "@deepseek-ai/dsh-session-query": "0.2.2-rc.1",
     "@deepseek-ai/dsh-working-directory": "0.2.2-rc.1"
   },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-settings": { "optional": true }
+  },
   "devDependencies": {
+    "@deepseek-ai/dsh-settings": "0.2.2-rc.1",
+    "@deepseek-ai/cordis-plugin-loader": "~1.1.0",
     "@deepseek-ai/dsh-session": "0.2.2-rc.1",
     "@deepseek-ai/dsh-session-projection": "0.2.2-rc.1",
     "@deepseek-ai/dsh-scope": "0.2.2-rc.1",
