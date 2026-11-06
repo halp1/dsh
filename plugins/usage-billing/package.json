@@ -1,7 +1,7 @@
 {
-  "name": "@kenz1117/dsh-ui-usage-billing",
+  "name": "dsh-plugin-usage-billing",
   "description": "Usage billing dashboard for DeepSeek Harness: sidebar cost metrics plus a full dashboard modal, priced from a current multi-provider catalog with real usage aggregated from session logs.",
-  "version": "1.8.2-fork.halp1.2",
+  "version": "2.0.0",
   "keywords": [
     "deepseek-harness",
     "deepseek",
@@ -14,10 +14,6 @@
     "llm",
     "dashboard"
   ],
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/halp1/dsh-ui-usage-billing-fork.git"
-  },
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
@@ -49,42 +45,7 @@
       "platform": "web"
     },
     "compatibility": {
-      "dsh": ">=0.1.2-alpha.1",
-      "dshReleases": {
-        "0.1.2-alpha.1": "compatible",
-        "0.1.2-alpha.2": "compatible",
-        "0.1.2-alpha.3": "compatible",
-        "0.1.2-alpha.4": "compatible",
-        "0.1.2-alpha.5": "compatible",
-        "0.1.2-rc.1": "compatible",
-        "0.1.3-alpha.1": "compatible",
-        "0.1.3-alpha.2": "compatible",
-        "0.1.5-alpha.1": "compatible",
-        "0.1.5-alpha.2": "compatible",
-        "0.1.5-rc.1": "compatible",
-        "0.1.5-rc.2": "compatible",
-        "0.1.5-rc.3": "compatible",
-        "0.1.6-alpha.1": "compatible",
-        "0.1.6-alpha.2": "compatible",
-        "0.1.7-alpha.1": "compatible",
-        "0.1.7-alpha.2": "compatible",
-        "0.1.7-rc.1": "compatible",
-        "0.1.7-rc.2": "compatible",
-        "0.2.0-rc.1": "compatible",
-        "0.2.0-rc.2": "compatible",
-        "0.2.1-alpha.1": "compatible",
-        "0.2.1-alpha.2": "compatible",
-        "0.2.1-alpha.3": "compatible",
-        "0.2.1-alpha.4": "compatible",
-        "0.2.1-alpha.5": "compatible",
-        "0.2.1-rc.1": "compatible",
-        "0.2.1-rc.2": "compatible",
-        "0.2.1-rc.3": "compatible",
-        "0.2.1-rc.4": "compatible",
-        "0.2.1-rc.5": "compatible",
-        "0.2.2-alpha.2": "compatible",
-        "0.2.2-alpha.3": "compatible"
-      }
+      "dsh": ">=0.1.2-alpha.1"
     }
   },
   "scripts": {
@@ -220,7 +181,6 @@
     "micromark-util-symbol": "^2.0.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "semver": "^7.7.2",
     "shiki": "^4.3.1",
     "simple-icons": "^16.32.0",
     "tsdown": "^0.22.2",
@@ -236,25 +196,5 @@
     "lib/types/**/*.d.ts",
     "cordis.patch.yml"
   ],
-  "homepage": "https://github.com/kenz1117/dsh-ui-usage-billing#readme",
-  "fork": {
-    "upstreamPackage": "@kenz1117/dsh-ui-usage-billing",
-    "upstreamRepository": "https://github.com/kenz1117/dsh-ui-usage-billing",
-    "upstreamReadme": "https://github.com/kenz1117/dsh-ui-usage-billing#readme",
-    "forkedAtTag": "v1.2.6",
-    "forkedAtCommit": "4acffb5fb952fcf4b2eb5fb4b37ffc70a2545215",
-    "divergence": [
-      "Default display currency is USD, with migration of legacy JSON preferences to upstream currency storage",
-      "Sidebar uses a number-only native small button, monthly by default, with upstream day/week/month selection retained",
-      "Sidebar hover quick view uses an opaque theme surface without backdrop blur",
-      "Builtin catalog retains free Flash and Gemini tiered/Opus thinking-fast gateway entries plus the verified Sonnet 5.5 cache-read rate",
-      "OpenRouter parser accepts numeric and decimal-string prices, honors explicit cache-read rates, and avoids double promotional discounts",
-      "Historical unknown routes retain catalog-cost estimates, visibly labeled as estimates, and never become official charges",
-      "Fork publication and issue-creation workflows are disabled outside the canonical upstream repository",
-      "Composer off-peak queue toggle/enqueue controls and their obsolete display setting are removed, while the dashboard queue is retained"
-    ],
-    "mergedUpstreamTag": "v1.8.2",
-    "mergedUpstreamCommit": "4023b6c5bce0647944bc46b373461c070b69a9a9"
-  },
   "private": true
 }
