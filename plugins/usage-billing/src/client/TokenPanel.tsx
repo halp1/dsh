@@ -1,0 +1,662 @@
+/**
+ * TokenPanel: 「Token」分区——把 token 从费用里独立出来洞察。
+ * 四个板块 + 导出，全部由 `UsageStats` 派生，服务端零改动：
+ *  1. 每日 Token 趋势，双视角切换（7/30 天）：
+ *     - 按结构：未命中输入 / 缓存命中 / 输出[含 reasoning] 三桶堆叠；
+ *     - 按模型：每天按模型堆叠，段 = 该模型当日「模型总 Token」（输入[含命中] + 输出），
+ *       分色复用趋势页 `chartModels`（同模型同色跨页一致）；
+ *       旧快照缺 `byDayModels` 时隐藏切换钮，仅保留结构视角。
+ *     悬停显示当日精确明细；图例 / 「模型 Token」表格行可点击聚焦单个模型
+ *     （目标段保持原色，其余段弱化，y 轴不变）。
+ *     归因边界：reasoning 无按日 × 模型明细（`byDayModels` 无该字段），图与导出不含此列。
+ *  2. 模型 Token 总量排行 + 占比（行点击 = 聚焦该模型并切到按模型视角）；
+ *  3. Token 结构 KPI（缓存命中率 / reasoning 占比 / 输入:输出比 / 峰值日）+ 显式缓存写入；
+ *  4. 工具调用排行（byTool 计次；token 无法按工具归因）。
+ */
+
+import { useMemo, useState } from 'react'
+import clsx from 'clsx'
+import css from './UsageBilling.module.css'
+import type { UsageBillingKey } from './locales.ts'
+import { formatTokens, localDayStamp, modelOf } from './pricing.ts'
+import { downloadText } from './export.ts'
+import type { TrendSeriesModel } from './TrendChart.tsx'
+import type { UsageStats } from './domain/types.ts'
+
+
+
+/** 短数字刻度：`1.2M` / `3.4K`。导出供概览 KPI 峰值日卡复用。 */
+export function shortNumber(v: number): string {
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`
+  if (v >= 1_000) return `${(v / 1_000).toFixed(1)}K`
+  return String(Math.round(v))
+}
+
+/** 每日 token 堆叠图元（按结构视角）。 */
+interface DailyBucket {
+  date: string
+  miss: number
+  hit: number
+  output: number
+  reasoning: number
+}
+
+/** 按模型视角下某模型某日的 token 明细（`byDayModels` 无 reasoning 列）。 */
+interface ModelDayCell {
+  hit: number
+  miss: number
+  output: number
+  /** 命中 + 未命中 + 输出（= 模型总 Token 口径）。 */
+  total: number
+}
+
+/** 按模型视角的一天：各模型段 + 当日合计。 */
+interface DayModelsRow {
+  date: string
+  models: Record<string, ModelDayCell>
+  total: number
+}
+
+/** 模型 token 行。 */
+interface ModelTokenRow {
+  key: string
+  name: string
+  input: number
+  output: number
+  reasoning: number
+  calls: number
+  cacheHit: number
+  cacheMiss: number
+  cacheHitRate: number
+  total: number
+  /** 占总 token 比例（0..1）。 */
+  share: number
+}
+
+const W = 680
+const H = 200
+const PAD = { top: 14, right: 18, bottom: 22, left: 46 }
+
+/** tooltip 半宽估算（px）：结构/模型两视角的三、四行 nowrap 数字卡约 160px 宽，
+ * 用于按列宽推算两端多少根柱处于「居中会溢出容器」的安全区外（issue #45）。 */
+const TOOLTIP_HALF_PX = 80
+
+const MISS_COLOR = 'var(--ds-blue)'
+// 缓存命中段：用青色系与输入（蓝）区分，取设计 spec §3.4 的 --ds-cyan（#2dd4bf）。
+const HIT_COLOR = 'var(--ds-cyan)'
+const OUTPUT_COLOR = 'var(--ds-amber)'
+
+/** 聚焦时其余模型段的透明度：目标段保持原色，y 轴与柱总高不变。 */
+const DIM_OPACITY = 0.15
+/** 图例（`models` prop）未覆盖某模型时的兜底色（与 PerfPanel 的 colorOf 一致）。 */
+const FALLBACK_MODEL_COLOR = '#8b95a3'
+
+/** 每日 token 视角：结构三桶 或 按模型堆叠。 */
+type TokenView = 'structure' | 'model'
+
+/** 导出全量 JSON 文档：按日结构 + 模型排行 + 按日×模型明细 + 总量（无 reasoning 列）。 */
+export function tokenDailyJson(
+  days: readonly DailyBucket[],
+  models: readonly ModelTokenRow[],
+  dayModels: readonly DayModelsRow[],
+  total: UsageStats['total'],
+): string {
+  return JSON.stringify({ days, models, dayModels, total }, null, 2)
+}
+
+/**
+ * Token 洞察面板。
+ * @param props.stats - usage-stats 文档（byDay/byModel/byDayModels/total）。
+ * @param props.trendDays - 每日 token 窗口（7/30 天）。
+ * @param props.onTrendDays - 切换趋势窗口。
+ * @param props.models - 趋势页同款模型图例（key/name/色）：按模型视角的分色来源；缺省用兜底灰。
+ */
+export function TokenPanel(props: {
+  stats: UsageStats
+  trendDays: 7 | 30
+  onTrendDays: (d: 7 | 30) => void
+  models?: readonly TrendSeriesModel[]
+  /** 金额格式化（跟随仪表盘币种切换）：费用构成区块展示用。 */
+  money: (cny: number) => string
+  t: (key: UsageBillingKey) => string
+}): React.ReactNode {
+  const { stats, trendDays, onTrendDays, t } = props
+  const money = props.money
+  const brandModels = props.models ?? []
+  const { byDay, byModel, total } = stats
+
+  // 悬停的日期索引（null = 未悬停）：与 TrendChart 一致的十字线 + 明细 tooltip。
+  const [hover, setHover] = useState<number | null>(null)
+  // 每日 token 视角（默认按结构 = 历史行为）。
+  const [view, setView] = useState<TokenView>('structure')
+  // 聚焦的模型 key（null = 无）。仅按模型视角生效；切换视角即清除。
+  const [focus, setFocus] = useState<string | null>(null)
+  // 旧快照无按日 × 模型明细：隐藏视角切换，仅保留结构视角（既有降级先例）。
+  const modelViewAvailable = stats.byDayModels !== undefined
+
+  // 切换视角：按模型 → 按结构（或反向）都清除聚焦（结构视角没有模型维度）。
+  const switchView = (next: TokenView): void => {
+    setView(next)
+    setFocus(null)
+  }
+
+  // 费用构成（估算）：角色归因三段（用户输入 / 助手输出 / 工具结果）——自账单页迁入。
+  const roleRows = useMemo(() => {
+    const role = stats.byRole
+    if (role === undefined) return []
+    const total = role.user + role.assistant + role.tool
+    if (total <= 0) return []
+    return [
+      { label: t('roleUser'), value: role.user, seg: css.shareSegUser },
+      { label: t('roleAssistant'), value: role.assistant, seg: css.shareSegAssistant },
+      { label: t('roleTool'), value: role.tool, seg: css.shareSegTool },
+    ].map(row => ({ ...row, pct: (row.value / total) * 100 }))
+  }, [stats.byRole, t])
+
+  // 每日 token 窗口（缺日补 0）。
+  const days: DailyBucket[] = useMemo(() => {
+    const out: DailyBucket[] = []
+    for (let offset = trendDays - 1; offset >= 0; offset -= 1) {
+      const d = new Date()
+      d.setDate(d.getDate() - offset)
+      const date = localDayStamp(d.getTime())
+      const day = byDay[date]
+      out.push({
+        date,
+        miss: day?.cacheMiss ?? 0,
+        hit: day?.cacheHit ?? 0,
+        output: day?.output ?? 0,
+        reasoning: day?.reasoning ?? 0,
+      })
+    }
+    return out
+  }, [byDay, trendDays])
+
+  // 按模型视角的每日数据（缺日补 0；只收有 token 用量的模型段）。
+  const modelDays: DayModelsRow[] = useMemo(() => {
+    const out: DayModelsRow[] = []
+    for (let offset = trendDays - 1; offset >= 0; offset -= 1) {
+      const d = new Date()
+      d.setDate(d.getDate() - offset)
+      const date = localDayStamp(d.getTime())
+      const cells = stats.byDayModels?.[date]
+      const models: Record<string, ModelDayCell> = {}
+      let dayTotal = 0
+      if (cells !== undefined) {
+        for (const [key, cell] of Object.entries(cells)) {
+          const hit = cell.cacheHit ?? 0
+          const miss = cell.cacheMiss ?? 0
+          const output = cell.output ?? 0
+          const cellTotal = hit + miss + output
+          if (cellTotal <= 0) continue
+          models[key] = { hit, miss, output, total: cellTotal }
+          dayTotal += cellTotal
+        }
+      }
+      out.push({ date, models, total: dayTotal })
+    }
+    return out
+  }, [stats.byDayModels, trendDays])
+
+  // 图例模型：窗口内有 token 用量的模型全量展示（不截断），按窗口总量降序；
+  // 堆叠自下而上同序（大头沉底，基线稳定，与趋势页一致）。
+  const legendModels: TrendSeriesModel[] = useMemo(() => {
+    const totals = new Map<string, number>()
+    for (const day of modelDays) {
+      for (const [key, cell] of Object.entries(day.models)) {
+        totals.set(key, (totals.get(key) ?? 0) + cell.total)
+      }
+    }
+    return [...totals.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([key]) => ({
+        key,
+        name: brandModels.find(m => m.key === key)?.name ?? modelOf(key).name,
+        color: brandModels.find(m => m.key === key)?.color ?? FALLBACK_MODEL_COLOR,
+      }))
+  }, [modelDays, brandModels])
+
+  // 生效的聚焦：模型被 7/30 窗口缩掉后自动失效。
+  const activeFocus = focus !== null && legendModels.some(m => m.key === focus) ? focus : null
+
+  // 聚焦入口：图例色块 / 模型 Token 表格行。同一份状态，两处联动；
+  // 结构视角下点表格行 = 直接切到按模型并聚焦该模型（「查询这个模型」的自然动作）。
+  const toggleFocus = (key: string): void => {
+    if (!modelViewAvailable) return
+    if (view !== 'model') {
+      setView('model')
+      setFocus(key)
+      return
+    }
+    setFocus(current => (current === key ? null : key))
+  }
+
+  // 模型 token 排行。
+  const models: ModelTokenRow[] = useMemo(() => {
+    let grand = 0
+    const rows = Object.entries(byModel)
+      .filter(([, d]) => d.calls > 0)
+      .map(([key, d]) => {
+        const totalTokens = d.input + d.output
+        grand += totalTokens
+        const hitMiss = d.cacheHit + d.cacheMiss
+        return {
+          key,
+          name: modelOf(key).name,
+          input: d.input,
+          output: d.output,
+          reasoning: d.reasoning ?? 0,
+          calls: d.calls,
+          cacheHit: d.cacheHit,
+          cacheMiss: d.cacheMiss,
+          cacheHitRate: hitMiss > 0 ? (d.cacheHit / hitMiss) * 100 : 0,
+          total: totalTokens,
+          share: 0,
+        }
+      })
+      .sort((a, b) => b.total - a.total)
+    return rows.map(r => ({ ...r, share: grand > 0 ? r.total / grand : 0 }))
+  }, [byModel])
+
+  // 结构 KPI 已并入概览 KPI 七卡（issue #47 反馈），此处不再重复渲染。
+
+  // 工具调用排行：取前 8 名，其余合并为「其他」。
+  const toolRows = useMemo(() => {
+    const entries = Object.entries(stats.byTool ?? {})
+    const top = entries.slice(0, 8)
+    const rest = entries.slice(8).reduce((sum, [, count]) => sum + count, 0)
+    const totalCalls = entries.reduce((sum, [, count]) => sum + count, 0)
+    return { top, rest: rest > 0 ? [['…', rest] as const] : [], totalCalls }
+  }, [stats.byTool])
+
+  // 每日堆叠图布局（两视角共用：同窗口同长度，仅 y 轴最大值口径不同）。
+  const chart = useMemo(() => {
+    const n = days.length
+    if (n === 0) return null
+    const plotW = W - PAD.left - PAD.right
+    const plotH = H - PAD.top - PAD.bottom
+    const max = view === 'model'
+      ? Math.max(...modelDays.map(d => d.total), 1)
+      : Math.max(...days.map(d => d.miss + d.hit + d.output), 1)
+    const y = (v: number): number => PAD.top + plotH - (v / max) * plotH
+    const groupW = plotW / n
+    const barW = Math.min(20, groupW * 0.6)
+    const inner = (i: number): number => (n === 1 ? PAD.left + plotW / 2 : PAD.left + (plotW * i) / (n - 1))
+    const step = Math.max(1, Math.ceil(n / 8))
+    const indices: number[] = []
+    for (let i = 0; i < n; i += step) indices.push(i)
+    if (n > 0 && indices[indices.length - 1] !== n - 1) indices.push(n - 1)
+    return { n, plotW, plotH, max, y, barW, inner, indices, groupW }
+  }, [days, modelDays, view])
+
+  // 导出：按日 token CSV（结构口径，保持不变）+ 全量 JSON（含按日 × 模型明细）。
+  const exportTokenCsv = (): void => {
+    downloadText(`token-daily-${localDayStamp()}.csv`, tokenDayCsv(days), 'text/csv')
+  }
+  const exportTokenJson = (): void => {
+    downloadText(`token-${localDayStamp()}.json`, tokenDailyJson(days, models, modelDays, total), 'application/json')
+  }
+
+  // 悬停日的明细（tooltip 数据源）；未悬停或索引越界时不显示。
+  const activeDay = hover === null ? undefined : days[hover]
+  const activeModelDay = hover === null ? undefined : modelDays[hover]
+  // tooltip 水平钳制（issue #45）：锚点 translate(-50%) 居中时，两端柱位会把
+  // 半张卡推出滚动容器被裁——当日往往最高且在最右，最容易触发。按列宽估算
+  // 半卡覆盖的列数，安全区外的柱位向容器内翻转（右缘左对齐 / 左缘右对齐）。
+  const edgeCols = chart === null ? 0 : Math.ceil(TOOLTIP_HALF_PX / Math.max(chart.groupW, 1))
+  const tooltipAlign = hover === null || chart === null ? undefined
+    : hover >= chart.n - edgeCols ? css.chartTooltipAlignRight
+    : hover < edgeCols ? css.chartTooltipAlignLeft
+    : undefined
+
+  return (
+    <div className={css.tokenPanel} data-testid="billing-token-panel">
+      {/* 导出工具条。 */}
+      <div className={css.exportBar} role="group" aria-label={t('tokenExport')}>
+        <span className={css.exportLabel}>{t('export')}</span>
+        <button type="button" className={css.exportButton} data-testid="billing-token-export-csv" onClick={exportTokenCsv}>
+          {t('tokenExportCsv')}
+        </button>
+        <button type="button" className={css.exportButton} data-testid="billing-token-export-json" onClick={exportTokenJson}>
+          {t('exportJson')}
+        </button>
+      </div>
+
+      {/* Token 结构 KPI 已并入概览（issue #47 反馈），用量页从每日趋势开始。 */}
+
+      {/* 每日 token 堆叠趋势（按结构 / 按模型 双视角）。 */}
+      <section className={css.panel} data-testid="billing-token-daily">
+        <div className={css.panelHead}>
+          <h3 className={css.panelTitle}>{t('tokenDaily')}</h3>
+          <span className={css.panelHeadControls}>
+            {/* 视角切换：旧快照无按日 × 模型明细时整体隐藏（保持结构视角）。 */}
+            {modelViewAvailable && (
+              <span className={css.rangeToggle} role="group" aria-label={t('tokenDaily')}>
+                {(['structure', 'model'] as const).map(v => (
+                  <button key={v} type="button" className={clsx(css.rangeButton, view === v && css.rangeButtonActive)} aria-pressed={view === v} onClick={() => { switchView(v) }} data-testid={`billing-token-view-${v}`}>
+                    {v === 'structure' ? t('tokenViewStructure') : t('tokenViewModel')}
+                  </button>
+                ))}
+              </span>
+            )}
+            <span className={css.rangeToggle} role="group" aria-label={t('tokenDaily')}>
+              {([7, 30] as const).map(d => (
+                <button key={d} type="button" className={clsx(css.rangeButton, trendDays === d && css.rangeButtonActive)} aria-pressed={trendDays === d} onClick={() => { onTrendDays(d) }} data-testid={`billing-token-${d}d`}>
+                  {d === 7 ? t('trend7d') : t('trend30d')}
+                </button>
+              ))}
+            </span>
+          </span>
+        </div>
+        {(chart === null || (view === 'model' && legendModels.length === 0)) ? (
+          <div className={css.chartEmpty}>{t('trendEmpty')}</div>
+        ) : (
+          <div className={css.chartWrap}>
+            <svg
+              viewBox={`0 0 ${W} ${H}`}
+              className={css.chartSvg}
+              role="img"
+              aria-label={t('tokenDaily')}
+              onMouseLeave={() => { setHover(null) }}
+              onMouseMove={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect()
+                const x = ((e.clientX - rect.left) / rect.width) * W
+                const ratio = (x - PAD.left) / chart.plotW
+                const index = Math.round(ratio * (chart.n - 1))
+                setHover(Math.min(Math.max(index, 0), chart.n - 1))
+              }}
+            >
+              {[0, 0.5, 1].map((f) => {
+                const v = chart.max * f
+                const yy = chart.y(v)
+                return (
+                  <g key={f}>
+                    <line x1={PAD.left} x2={W - PAD.right} y1={yy} y2={yy} className={css.chartGrid} />
+                    <text x={PAD.left - 8} y={yy + 3} textAnchor="end" className={css.chartAxisLabel}>{shortNumber(v)}</text>
+                  </g>
+                )
+              })}
+              {view === 'structure'
+                ? days.map((d, i) => {
+                    const x = chart.inner(i) - chart.barW / 2
+                    const baseY = chart.y(0)
+                    const yMiss = chart.y(d.miss)
+                    const yHit = chart.y(d.miss + d.hit)
+                    const yOut = chart.y(d.miss + d.hit + d.output)
+                    return (
+                      <g key={d.date}>
+                        <rect x={x} y={yMiss} width={chart.barW} height={baseY - yMiss} fill={MISS_COLOR} />
+                        <rect x={x} y={yHit} width={chart.barW} height={yMiss - yHit} fill={HIT_COLOR} />
+                        <rect x={x} y={yOut} width={chart.barW} height={yHit - yOut} fill={OUTPUT_COLOR} />
+                      </g>
+                    )
+                  })
+                : modelDays.map((day, i) => {
+                    // 按模型堆叠：段自下而上按图例序（窗口总量降序），零值段不画；
+                    // 聚焦时其余模型段弱化，y 轴与柱总高保持不变。
+                    const x = chart.inner(i) - chart.barW / 2
+                    let acc = 0
+                    return (
+                      <g key={day.date}>
+                        {legendModels.map((m) => {
+                          const cell = day.models[m.key]
+                          if (cell === undefined) return null
+                          const y0 = chart.y(acc)
+                          acc += cell.total
+                          const y1 = chart.y(acc)
+                          const dimmed = activeFocus !== null && m.key !== activeFocus
+                          return (
+                            <rect
+                              key={m.key}
+                              x={x}
+                              y={y1}
+                              width={chart.barW}
+                              height={y0 - y1}
+                              fill={m.color}
+                              opacity={dimmed ? DIM_OPACITY : 1}
+                            />
+                          )
+                        })}
+                      </g>
+                    )
+                  })}
+              {chart.indices.map((i) => {
+                const d = days[i]
+                if (d === undefined) return null
+                return <text key={d.date} x={chart.inner(i)} y={H - 6} textAnchor="middle" className={css.chartAxisLabel}>{d.date.slice(5)}</text>
+              })}
+              {/* 悬停十字线：定位当前日期列。 */}
+              {hover !== null && (
+                <line x1={chart.inner(hover)} x2={chart.inner(hover)} y1={PAD.top} y2={PAD.top + chart.plotH} className={css.chartCrosshair} />
+              )}
+            </svg>
+            {/* 悬停 tooltip：按结构给三桶精确值；按模型给当日逐模型 命中/未命中/输出 明细（数字不缩写）。 */}
+            {hover !== null && view === 'structure' && activeDay !== undefined && (
+              <div
+                className={clsx(css.chartTooltip, tooltipAlign)}
+                data-testid="billing-token-tooltip"
+                style={{
+                  left: `${(chart.inner(hover) / W) * 100}%`,
+                  top: `${(chart.y(activeDay.miss + activeDay.hit + activeDay.output) / H) * 100}%`,
+                }}
+              >
+                <div className={css.chartTooltipHead}>
+                  <span className={css.chartTooltipDate}>{activeDay.date}</span>
+                  <strong>{(activeDay.miss + activeDay.hit + activeDay.output).toLocaleString()}</strong>
+                </div>
+                <div className={clsx(css.chartTooltipRow, css.chartTooltipSplit)}>
+                  <span className={css.chartTooltipLabel}>
+                    <span className={css.chartTooltipSwatch} style={{ background: HIT_COLOR }} />
+                    {t('tokenHit')}
+                  </span>
+                  <strong>{activeDay.hit.toLocaleString()}</strong>
+                </div>
+                <div className={clsx(css.chartTooltipRow, css.chartTooltipSplit)}>
+                  <span className={css.chartTooltipLabel}>
+                    <span className={css.chartTooltipSwatch} style={{ background: MISS_COLOR }} />
+                    {t('tokenMiss')}
+                  </span>
+                  <strong>{activeDay.miss.toLocaleString()}</strong>
+                </div>
+                <div className={clsx(css.chartTooltipRow, css.chartTooltipSplit)}>
+                  <span className={css.chartTooltipLabel}>
+                    <span className={css.chartTooltipSwatch} style={{ background: OUTPUT_COLOR }} />
+                    {t('tokenOutput')}
+                  </span>
+                  <strong>{activeDay.output.toLocaleString()}</strong>
+                </div>
+              </div>
+            )}
+            {hover !== null && view === 'model' && activeModelDay !== undefined && (
+              <div
+                className={clsx(css.chartTooltip, tooltipAlign)}
+                data-testid="billing-token-tooltip"
+                style={{
+                  left: `${(chart.inner(hover) / W) * 100}%`,
+                  top: `${(chart.y(activeModelDay.total) / H) * 100}%`,
+                }}
+              >
+                <div className={css.chartTooltipHead}>
+                  <span className={css.chartTooltipDate}>{activeModelDay.date}</span>
+                  <strong>{activeModelDay.total.toLocaleString()}</strong>
+                </div>
+                {legendModels.map((m) => {
+                  const cell = activeModelDay.models[m.key]
+                  if (cell === undefined) return null
+                  return (
+                    <div key={m.key}>
+                      <div className={clsx(css.chartTooltipRow, css.chartTooltipSplit)}>
+                        <span className={css.chartTooltipLabel}>
+                          <span className={css.chartTooltipSwatch} style={{ background: m.color }} />
+                          {m.name}
+                        </span>
+                        <strong>{cell.total.toLocaleString()}</strong>
+                      </div>
+                      <div className={css.chartTooltipModelDetail}>
+                        {t('tokenHitShort')} {cell.hit.toLocaleString()} · {t('tokenMissShort')} {cell.miss.toLocaleString()} · {t('tokenOutput')} {cell.output.toLocaleString()}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+            <div className={css.chartLegend}>
+              {view === 'structure'
+                ? (
+                    <>
+                      <span><span className={css.chartTooltipSwatch} style={{ background: MISS_COLOR }} />{t('tokenMiss')}</span>
+                      <span><span className={css.chartTooltipSwatch} style={{ background: HIT_COLOR }} />{t('tokenHit')}</span>
+                      <span><span className={css.chartTooltipSwatch} style={{ background: OUTPUT_COLOR }} />{t('tokenOutput')}</span>
+                    </>
+                  )
+                : legendModels.map(m => (
+                  // 按模型图例：可点击聚焦（与「模型 Token」表格行联动），全量展示不截断。
+                  <button
+                    key={m.key}
+                    type="button"
+                    className={clsx(css.chartLegendItem, activeFocus === m.key && css.chartLegendItemActive)}
+                    aria-pressed={activeFocus === m.key}
+                    data-testid={`billing-token-legend-${m.key}`}
+                    onClick={() => { toggleFocus(m.key) }}
+                  >
+                    <span className={css.chartTooltipSwatch} style={{ background: m.color }} />
+                    {m.name}
+                  </button>
+                ))}
+            </div>
+          </div>
+        )}
+      </section>
+
+      {/* 模型 token 排行与占比（行点击 = 聚焦该模型）。 */}
+      <section className={css.panel} data-testid="billing-token-models">
+        <div className={css.panelHead}>
+          <h3 className={css.panelTitle}>{t('tokenByModel')}</h3>
+        </div>
+        {models.length === 0 ? (
+          <div className={css.emptyRow}>{t('noData')}</div>
+        ) : (
+          <div className={css.tableScroll}>
+            <table className={css.modelTable} data-testid="billing-token-model-table">
+              <thead>
+                <tr>
+                  <th>{t('model')}</th>
+                  <th className={css.numCol}>{t('inputTokens')}</th>
+                  <th className={css.numCol}>{t('outputTokens')}</th>
+                  <th className={css.numCol}>{t('tokenReasoningShort')}</th>
+                  <th className={css.numCol}>{t('cacheHitRate')}</th>
+                  <th className={css.numCol}>{t('tokenTotal')}</th>
+                  <th className={css.numCol}>{t('tokenShare')}</th>
+                  <th className={css.numCol}>{t('calls')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {models.map(m => (
+                  <tr
+                    key={m.key}
+                    data-testid="billing-token-model"
+                    className={clsx(modelViewAvailable && css.modelRowFocusable, activeFocus === m.key && css.modelRowActive)}
+                    aria-selected={modelViewAvailable ? activeFocus === m.key : undefined}
+                    onClick={modelViewAvailable ? () => { toggleFocus(m.key) } : undefined}
+                    /* 与会话折叠行同一 U1 键盘模式：Tab 聚焦，Enter/Space 切换聚焦模型；
+                    保留 tr 的 row 语义，不加 role 以免破坏表格结构。 */
+                    tabIndex={modelViewAvailable ? 0 : undefined}
+                    onKeyDown={modelViewAvailable ? (event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault()
+                        toggleFocus(m.key)
+                      }
+                    } : undefined}
+                  >
+                    <td><span className={css.modelName}>{m.name}</span></td>
+                    <td className={css.numCol}>{formatTokens(m.input)}</td>
+                    <td className={css.numCol}>{formatTokens(m.output)}</td>
+                    <td className={css.numCol}>{m.reasoning > 0 ? formatTokens(m.reasoning) : <span className={css.na}>—</span>}</td>
+                    <td className={css.numCol}>{m.cacheHitRate.toFixed(1)}%</td>
+                    <td className={css.numCol}>{formatTokens(m.total)}</td>
+                    <td className={css.numCol}>
+                      <span className={css.tokenModelShareRow}>
+                        <span className={css.tokenModelBar}>
+                          {/* 分段色：蓝=输入（含缓存命中）、琥珀=输出，段宽按各自 token 占比。 */}
+                          <span className={css.tokenModelParts} style={{ width: `${(m.share * 100).toFixed(2)}%` }}>
+                            <span className={css.tokenModelPartIn} style={{ width: `${m.total > 0 ? (m.input / m.total) * 100 : 0}%` }} />
+                            <span className={css.tokenModelPartOut} style={{ width: `${m.total > 0 ? (m.output / m.total) * 100 : 0}%` }} />
+                          </span>
+                        </span>
+                        {(m.share * 100).toFixed(1)}%
+                      </span>
+                    </td>
+                    <td className={css.numCol}>{m.calls.toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {/* 工具调用排行：byTool 计次（token 无法按工具归因），展示 agent 循环的工具使用结构。 */}
+      {toolRows.totalCalls > 0 && (
+        <section className={css.panel} data-testid="billing-token-tools">
+          <div className={css.panelHead}>
+            <h3 className={css.panelTitle}>{t('toolRank')}</h3>
+          </div>
+          <div className={css.tableScroll}>
+            <table className={css.modelTable} data-testid="billing-tool-table">
+              <thead>
+                <tr>
+                  <th>{t('toolName')}</th>
+                  <th className={css.numCol}>{t('calls')}</th>
+                  <th className={css.numCol}>{t('tokenShare')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[...toolRows.top, ...toolRows.rest].map(([name, count]) => (
+                  <tr key={name} data-testid="billing-tool-row">
+                    <td><span className={css.modelName}>{name}</span></td>
+                    <td className={css.numCol}>{count.toLocaleString()}</td>
+                    <td className={css.numCol}>{((count / toolRows.totalCalls) * 100).toFixed(1)}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {/* 费用构成（估算，自账单页迁入）：输出成本实测计价，输入成本按 user/tool
+      消息文本长度占比摊分（日志无角色级 token 实测，标注估算口径）。 */}
+      {roleRows.length > 0 && (
+        <section className={css.panel} data-testid="billing-panel-roles">
+          <div className={css.panelHead}>
+            <h3 className={css.panelTitle}>{t('roleCost')}</h3>
+            <span className={css.panelHint}>{t('roleHint')}</span>
+          </div>
+          <div className={css.shareTrack} data-testid="billing-role-track">
+            {roleRows.map(row => (
+              <div key={row.label} className={clsx(css.shareSeg, row.seg)} style={{ width: `${row.pct}%` }} />
+            ))}
+          </div>
+          <div className={css.shareLegend}>
+            {roleRows.map(row => (
+              <span key={row.label} className={css.shareItem}>
+                <span className={clsx(css.shareDot, row.seg)} />
+                {row.label}
+                <span className={css.shareValue}>
+                  {money(row.value)} · {row.pct.toFixed(1)}%
+                </span>
+              </span>
+            ))}
+          </div>
+        </section>
+      )}
+    </div>
+  )
+}
+
+/** 导出按日 token CSV（结构口径）。 */
+function tokenDayCsv(days: readonly DailyBucket[]): string {
+  const head = 'date,missInput,cacheHit,output,reasoning,total'
+  const rows = days.map(d => `${d.date},${d.miss},${d.hit},${d.output},${d.reasoning},${d.miss + d.hit + d.output}`)
+  return [head, ...rows].join('\n')
+}

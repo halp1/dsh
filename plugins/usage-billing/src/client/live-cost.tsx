@@ -1,0 +1,487 @@
+/**
+ * LiveCostBar: the session-scope cost ticker mounted beside the composer,
+ * showing the current session's accumulated spend and the latest turn's cost.
+ *
+ * It is registered on two host seats and renders in exactly one of them per the
+ * position preference: `conversation.composer.dock` (the stats-line family seat
+ * under the composer card, same posture as ui-conversation's own StatsLine) for
+ * 「下方」, and `conversation.input.dock` (the full-width seat above the composer
+ * card, where the host's todo panel and queue dock live) for 「上方」. Either way
+ * it stays visible while working without opening the full dashboard. Data comes
+ * from the same `/api/billing/usage-stats` endpoint the dashboard polls; the bar
+ * reads the current session id from the session-scope standard kit and matches
+ * `bySession` (session total) and `byTurn` (latest turn cost). Rendering is a
+ * pure function of props and polled data, never a side effect.
+ *
+ * The bar also carries two ambient signals: the current peak/off-peak pricing
+ * tier with a switch countdown (DeepSeek time-of-day pricing), and quota chips
+ * for subscription plans running low (≤20% remaining), so cost pressure is
+ * visible without opening the dashboard.
+ */
+
+import { useEffect, useMemo, useState } from 'react'
+import clsx from 'clsx'
+import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import { convertFromCny, formatMoney, formatSwitchCountdown, channelCountdown, rateChannelOf, tierCountdown, type CostCurrency, type RateChannel } from './pricing.ts'
+import { fetchBilling } from './api/http.ts'
+import { bandStateOf } from './band-dot.ts'
+import { loadPeakAlertConfig } from './peak-alert.ts'
+import { CURRENCY_PREF_EVENT, LIVE_COST_BAR_PREF_EVENT, PINNED_MODELS_EVENT, loadCurrency, loadLiveCostBarPrefs, loadPinnedModels } from './usage-billing-settings.ts'
+import type { LiveCostBarPrefs } from './usage-billing-settings.ts'
+import type { UsageBillingKey } from './locales.ts'
+import css from './UsageBilling.module.css'
+
+/** The usage-stats shape the composer bar needs (a thin slice, not the whole doc). */
+export interface LiveStats {
+  bySession?: readonly { id: string; cost: number; subCost?: number }[]
+  byTurn?: readonly { sessionId: string; turn: number; model?: string; cost: number }[]
+}
+
+/** 订阅额度的薄切片（/api/billing/subscriptions 响应的行）。 */
+export interface QuotaSlice {
+  displayName: string
+  status: string
+  windows: readonly { kind: string; remainingPercent: number }[]
+}
+
+/**
+ * 当前会话累计费用：bySession 里会话 id 匹配的那行（含后代子智能体费用
+ * subCost——子智能体是宿主的独立会话，其消耗按父链并入本对话的口径）；
+ * 缺省为 0。导出供测试：纯函数。
+ * @param stats - 薄统计切片。
+ * @param sessionId - 当前会话 id。
+ * @returns 该会话累计费用（人民币元，含子智能体）。
+ */
+export function sessionCostOf(stats: LiveStats | null, sessionId: string | undefined): number {
+  if (sessionId === undefined || stats?.bySession === undefined) return 0
+  const row = stats.bySession.find(item => item.id === sessionId)
+  return (row?.cost ?? 0) + (row?.subCost ?? 0)
+}
+
+/**
+ * 当前会话的后代子智能体费用（bySession 行的 subCost）：供「含子」拆分展示，
+ * 让胶囊上的总额与本体会话费用对得上账。导出供测试：纯函数。
+ * @param stats - 薄统计切片。
+ * @param sessionId - 当前会话 id。
+ * @returns 后代子会话费用合计（人民币元）；无则 0。
+ */
+export function sessionSubCostOf(stats: LiveStats | null, sessionId: string | undefined): number {
+  if (sessionId === undefined || stats?.bySession === undefined) return 0
+  const row = stats.bySession.find(item => item.id === sessionId)
+  return row?.subCost ?? 0
+}
+
+/**
+ * 当前轮费用：byTurn 里该会话最新一轮的 cost；缺省为 0。
+ * byTurn 服务端按起始时间倒序下发，但求 max(turn) 更稳健（不依赖顺序）。
+ * 导出供测试：纯函数。
+ * @param stats - 薄统计切片。
+ * @param sessionId - 当前会话 id。
+ * @returns 最新一轮费用（人民币元）。
+ */
+export function turnCostOf(stats: LiveStats | null, sessionId: string | undefined): number {
+  if (sessionId === undefined || stats?.byTurn === undefined) return 0
+  let latest = 0
+  let latestTurn = -1
+  for (const item of stats.byTurn) {
+    if (item.sessionId !== sessionId) continue
+    if (latestTurn === -1 || item.turn > latestTurn) {
+      latestTurn = item.turn
+      latest = item.cost
+    }
+  }
+  return latest
+}
+
+/**
+ * 低额度预警 chips：查询成功（ok）且任一窗口剩余 ≤ threshold 的套餐，
+ * 按剩余升序、最多 3 枚。导出供测试：纯函数。
+ * @param quotas - 订阅额度行切片。
+ * @param threshold - 剩余百分比阈值（默认 20%）。
+ */
+export function lowQuotaChips(
+  quotas: readonly QuotaSlice[],
+  threshold = 20,
+): readonly { name: string; kind: string; pct: number }[] {
+  const chips: { name: string; kind: string; pct: number }[] = []
+  for (const quota of quotas) {
+    if (quota.status !== 'ok') continue
+    for (const win of quota.windows) {
+      if (win.remainingPercent > threshold) continue
+      chips.push({ name: quota.displayName, kind: win.kind, pct: win.remainingPercent })
+    }
+  }
+  return chips.sort((a, b) => a.pct - b.pct).slice(0, 3)
+}
+
+/**
+ * 当前会话最近一轮的模型（峰谷窗口跟随它）：byTurn 里该会话轮次号最大的 model。
+ * 导出供测试：纯函数。
+ * @param stats - 薄统计切片。
+ * @param sessionId - 当前会话 id。
+ * @returns 该会话最近一轮的归因模型键；无轮次或轮行未带模型时 undefined。
+ */
+export function sessionModelOf(stats: LiveStats | null, sessionId: string | undefined): string | undefined {
+  if (sessionId === undefined || stats?.byTurn === undefined) return undefined
+  let latestTurn = -1
+  let model: string | undefined
+  for (const item of stats.byTurn) {
+    if (item.sessionId !== sessionId) continue
+    if (latestTurn === -1 || item.turn > latestTurn) {
+      latestTurn = item.turn
+      model = item.model
+    }
+  }
+  return model
+}
+
+/** Endpoint the node half serves (same constant the dashboard uses). */
+const USAGE_STATS_PATH = '/api/billing/usage-stats'
+
+/** 订阅额度端点（额度预警 chips 的数据源）。 */
+const SUBSCRIPTIONS_PATH = '/api/billing/subscriptions'
+
+/** Refresh cadence (ms): matching the dashboard so the bar stays current. */
+const REFRESH_INTERVAL_MS = 30_000
+
+/** Load the thin stats slice; null when the endpoint does not answer valid JSON. */
+async function loadLiveStats(): Promise<LiveStats | null> {
+  try {
+    const response = await fetchBilling(USAGE_STATS_PATH)
+    if (!response.ok) return null
+    const text = await response.text()
+    const parsed = JSON.parse(text) as unknown
+    if (parsed === null || typeof parsed !== 'object') return null
+    const doc = parsed as LiveStats
+    return {
+      ...(Array.isArray(doc.bySession) ? { bySession: doc.bySession } : {}),
+      ...(Array.isArray(doc.byTurn) ? { byTurn: doc.byTurn } : {}),
+    }
+  } catch {
+    return null
+  }
+}
+
+/** Load subscription quota slices; empty list on any failure. */
+async function loadQuotas(): Promise<readonly QuotaSlice[]> {
+  try {
+    const response = await fetchBilling(SUBSCRIPTIONS_PATH)
+    if (!response.ok) return []
+    const parsed = JSON.parse(await response.text()) as unknown
+    if (parsed === null || typeof parsed !== 'object' || !('quotas' in parsed)) return []
+    const quotas = (parsed as { quotas: unknown }).quotas
+    return Array.isArray(quotas) ? quotas as QuotaSlice[] : []
+  } catch {
+    return []
+  }
+}
+
+/** 额度窗口类型 → 文案 key（本次 / 本周 / 本月 / 计费周期）。 */
+function windowLabelKey(kind: string): UsageBillingKey {
+  switch (kind) {
+    case 'session': return 'subscriptionSession'
+    case 'weekly': return 'subscriptionWeekly'
+    case 'monthly': return 'subscriptionMonthly'
+    default: return 'subscriptionBilling'
+  }
+}
+
+/** 胶囊位置偏好（设置 Tab 三选）。 */
+type CapsulePosition = LiveCostBarPrefs['position']
+
+/** 胶囊条的宿主座位：above=input.dock（卡片上方）；below=composer.dock（卡片下方）。 */
+export type CapsuleSeat = Exclude<CapsulePosition, 'toolbar'>
+
+/**
+ * 宿主 SessionSnapshot 里决定 hero（空白新会话）态的字段薄切片。input.dock 座位
+ * 的 owner 快照（InputZone.session）按此结构读取。
+ */
+export interface SessionPhaseSlice {
+  readonly blank: boolean
+  readonly running: boolean
+  readonly promptAttempted: boolean
+  readonly awaitingFirstTurn: boolean
+}
+
+/**
+ * 会话是否处于宿主的 hero（空白）阶段：复刻 ui-conversation `conversationPhase`
+ * 的 blank 分支——无正在运行的轮次、用户尚未尝试提交、且会话仍空白或等待首轮。
+ * 宿主在 hero 态不渲染 composer.dock（输入框下方座位），但 input.dock 会渲染；
+ * 「上方」座位借此与「下方」保持同样的显隐语义，空白会话页不浮一只空壳药丸。
+ * 导出供测试：纯函数。
+ * @param session - 会话快照薄切片。
+ */
+export function isBlankPhase(session: SessionPhaseSlice): boolean {
+  return !session.running && !session.promptAttempted && (session.blank || session.awaitingFirstTurn)
+}
+
+/** Props: the framework's session identity plus the owning seat's locale and identity. */
+export interface LiveCostBarProps {
+  /** Current Session identity supplied by the session-scope standard kit. */
+  sessionId: SessionId
+  /** The owning seat's locale seat (bound to the billing NS). */
+  t: (key: UsageBillingKey) => string
+  /** Which host seat this instance occupies; it renders only when the position pref matches. */
+  seat: CapsuleSeat
+  /** Owner snapshot the input.dock seat receives (InputZone.session); absent on composer.dock. */
+  session?: SessionPhaseSlice
+}
+
+/**
+ * 被固定模型的峰谷指示点：在输入框旁常驻，不用打开仪表盘就能看到当前档位。
+ * 没有固定项（默认）时渲染 null，对未使用该功能的用户零开销。
+ */
+function PinnedBandDots({ hasBandPlan }: { hasBandPlan: boolean }): React.ReactNode {
+  const [keys, setKeys] = useState<readonly string[]>(() => loadPinnedModels())
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const reread = (): void => { setKeys(loadPinnedModels()) }
+    window.addEventListener(PINNED_MODELS_EVENT, reread)
+    window.addEventListener('storage', reread)
+    const timer = setInterval(() => { setNow(Date.now()) }, 30_000)
+    return () => {
+      window.removeEventListener(PINNED_MODELS_EVENT, reread)
+      window.removeEventListener('storage', reread)
+      clearInterval(timer)
+    }
+  }, [])
+  if (keys.length === 0) return null
+  const leadMs = loadPeakAlertConfig().leadMin * 60_000
+  const dots = keys
+    .map(key => ({ key, state: bandStateOf(channelCountdown(now, rateChannelOf(key, hasBandPlan)), leadMs) }))
+    .filter((d): d is { key: string; state: NonNullable<ReturnType<typeof bandStateOf>> } => d.state !== null)
+  if (dots.length === 0) return null
+  return (
+    <span className={css.bandDots} data-testid="billing-pinned-dots">
+      {dots.map(d => (
+        <span key={d.key} className={clsx(css.bandDot, css.bandDotOn, css[d.state])} role="img" aria-label={d.key} title={d.key} />
+      ))}
+    </span>
+  )
+}
+
+/** 币种订阅：仪表盘（另一棵 React 树）切换后经 CustomEvent/storage 事件驱动重读；
+ *  胶囊渲染在弹窗之外，弹窗关闭后仍须跟随选择（issue #58）。 */
+function useCurrencyPref(): CostCurrency {
+  const [currency, setCurrency] = useState<CostCurrency>(() => loadCurrency())
+  useEffect(() => {
+    const reread = (): void => { setCurrency(loadCurrency()) }
+    window.addEventListener(CURRENCY_PREF_EVENT, reread)
+    window.addEventListener('storage', reread)
+    return () => {
+      window.removeEventListener(CURRENCY_PREF_EVENT, reread)
+      window.removeEventListener('storage', reread)
+    }
+  }, [])
+  return currency
+}
+
+/** 偏好订阅：显隐 + 位置。设置 Tab（另一棵 React 树）改动经 CustomEvent/storage 事件驱动重读。 */
+function useLiveCostPrefs(): { visible: boolean; position: CapsulePosition } {
+  const [visible, setVisible] = useState(() => loadLiveCostBarPrefs().show)
+  const [position, setPosition] = useState(() => loadLiveCostBarPrefs().position)
+  useEffect(() => {
+    const reread = (): void => {
+      setVisible(loadLiveCostBarPrefs().show)
+      setPosition(loadLiveCostBarPrefs().position)
+    }
+    window.addEventListener(LIVE_COST_BAR_PREF_EVENT, reread)
+    window.addEventListener('storage', reread)
+    return () => {
+      window.removeEventListener(LIVE_COST_BAR_PREF_EVENT, reread)
+      window.removeEventListener('storage', reread)
+    }
+  }, [])
+  return { visible, position }
+}
+
+/** 即时代费数据：挂载/会话切换时拉取 + 周期刷新，派生会话/本轮费用、峰谷档与额度预警。
+ *  @param active - 调用方实际渲染与否：dock 条与工具行 chip 按位置互斥，
+ *  不渲染的座位（渲染 null）不应各跑一条 30s 双端点轮询。 */
+function useLiveCostData(sessionId: SessionId, active: boolean): {
+  sessionCost: number
+  /** 会话累计里的后代子智能体费用（sessionCost - 本体）；「含子」拆分展示用。 */
+  subCost: number
+  turnCost: number
+  tier: ReturnType<typeof tierCountdown> | null
+  chips: ReturnType<typeof lowQuotaChips>
+  /** 是否持有 Z.ai Coding Plan（决定智谱模型是否适用积分分时）。 */
+  hasBandPlan: boolean
+} {
+  const [stats, setStats] = useState<LiveStats | null>(null)
+  const [quotas, setQuotas] = useState<readonly QuotaSlice[]>([])
+  // 峰谷倒计时独立跳动（30 秒粒度足够，与数据轮询同频但无数据时也刷新）。
+  const [nowMs, setNowMs] = useState(() => Date.now())
+  // 审计 S3：后台标签页暂停轮询（与主面板同一策略），可见时立即补一次再回节拍。
+  const [visible, setVisible] = useState(() => typeof document === 'undefined' || !document.hidden)
+  useEffect(() => {
+    if (typeof document === 'undefined') return
+    const onVisibility = (): void => { setVisible(!document.hidden) }
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => { document.removeEventListener('visibilitychange', onVisibility) }
+  }, [])
+  useEffect(() => {
+    if (!visible || !active) return
+    let cancelled = false
+    // 在途闸门（issue #104）：上一轮还没落地就跳过本轮——服务端被上游拖住时
+    // 旧实现一轮接一轮地叠请求，浏览器同源连接（6 条）被占满，界面卡死。
+    let inFlight = false
+    const load = (): void => {
+      if (inFlight) return
+      inFlight = true
+      if (!cancelled) setNowMs(Date.now())
+      void Promise.all([loadLiveStats(), loadQuotas()]).then(([data, list]) => {
+        if (cancelled) return
+        if (data !== null) setStats(data)
+        setQuotas(list)
+      }).catch(() => {
+        // 兜底：取数失败已在各自链路里降级，这里只防未处理拒绝。
+      }).finally(() => { inFlight = false })
+    }
+    load()
+    const timer = setInterval(load, REFRESH_INTERVAL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+    // sessionId 变化时重新订阅，以对齐当前会话。
+  }, [sessionId, visible, active])
+  // 当前会话累计费用与当前轮费用：由纯函数派生，便于测试。
+  const sessionCost = useMemo(() => sessionCostOf(stats, sessionId), [stats, sessionId])
+  const subCost = useMemo(() => sessionSubCostOf(stats, sessionId), [stats, sessionId])
+  const turnCost = useMemo(() => turnCostOf(stats, sessionId), [stats, sessionId])
+  // 峰谷窗口跟随当前会话最近一轮的模型：DeepSeek 按量分时；智谱模型在持有
+  // Z.ai Coding Plan（status ok）时走积分分时；其余模型 null——档位 UI 整段隐藏。
+  const chips = useMemo(() => lowQuotaChips(quotas), [quotas])
+  const channel: RateChannel = useMemo(
+    () => rateChannelOf(sessionModelOf(stats, sessionId), quotas.some(q => q.displayName === 'Z.ai Coding Plan' && q.status === 'ok')),
+    [stats, sessionId, quotas],
+  )
+  const tier = useMemo(() => channelCountdown(nowMs, channel), [nowMs, channel])
+  const hasBandPlan = quotas.some(q => q.displayName === 'Z.ai Coding Plan' && q.status === 'ok')
+  return { sessionCost, subCost, turnCost, tier, chips, hasBandPlan }
+}
+
+/**
+ * Render the live cost ticker for the current session in one host seat.
+ * @param props - framework session identity, locale, the seat occupied, and
+ * (input.dock only) the owner session snapshot.
+ */
+export function LiveCostBar({ sessionId, t, seat, session }: LiveCostBarProps): React.ReactNode {
+  const { visible, position } = useLiveCostPrefs()
+  // 座位与位置偏好互斥：另一座位（以及工具行 chip）此时渲染 null，不各跑轮询。
+  // 「上方」座位额外复刻宿主 hero 门控——空白新会话页宿主不出下方 dock，上方同样不出。
+  const active = visible && position === seat && !(seat === 'above' && session !== undefined && isBlankPhase(session))
+  const { sessionCost, subCost, turnCost, tier, chips, hasBandPlan } = useLiveCostData(sessionId, active)
+
+  const currency = useCurrencyPref()
+  const money = (cny: number): string => formatMoney(convertFromCny(cny, currency), currency)
+
+  const hasCost = sessionCost > 0 || turnCost > 0
+  // 档位 chip 仅在当前会话模型涉及峰谷时渲染（tier 非 null）；倒计时随之隐藏。
+  const isPeak = tier?.tier === 'peak'
+  // 设置 Tab 里关闭「平价消耗胶囊」、切到其它座位或处于 hero 态时整条不渲染
+  // （槽位对 null 子元素安全，纯显隐门控：数据轮询与统计口径不受影响）。
+  if (!active) return null
+  // 设计 fee-bar：档位 chip → 倒计时 → 档位说明 → 本轮/会话 → 额度预警 chips。
+  // above 座位：input.dock 条目经 display:contents 锚点直排进宿主 composerStack
+  //（flex column），feeBarAbove 只负责在整行座位里居中，不再借 CSS order 挪位。
+  return (
+    <span
+      className={seat === 'above' ? clsx(css.feeBar, css.feeBarAbove) : css.feeBar}
+      data-testid="billing-live-cost-bar"
+      data-seat={seat}
+    >
+      <PinnedBandDots hasBandPlan={hasBandPlan} />
+      {tier !== null && (
+        <>
+          <span className={isPeak ? css.feeChipPrimary : css.feeChipOff} data-testid="billing-live-tier">
+            {isPeak ? t('tierPeak') : t('tierOff')}
+          </span>
+          <span className={css.feeCount}>{formatSwitchCountdown(tier.nextSwitchInMs)}</span>
+          <span className={css.feeSuffix}>{isPeak ? t('tierToOff') : t('tierToPeak')}</span>
+        </>
+      )}
+      {hasCost && (
+        <>
+          <span className={css.feeSep} aria-hidden="true">·</span>
+          <span className={css.feeItem} data-testid="billing-live-turn">
+            {t('liveTurn')} <span className={css.feeNum} data-tick="turn">{money(turnCost)}</span>
+          </span>
+          <span className={css.feeSep} aria-hidden="true">·</span>
+          <span className={css.feeItem} data-testid="billing-live-session">
+            {t('liveSession')} <span className={css.feeNum} data-tick="session">{money(sessionCost)}</span>
+            {/* 子智能体消耗并入会话口径后的拆分标注：总额可对本到账单的本体+子会话。 */}
+            {subCost > 0 && (
+              <span className={css.feeSuffix} data-testid="billing-live-session-sub">
+                {t('liveSessionSub').replace('{cost}', money(subCost))}
+              </span>
+            )}
+          </span>
+        </>
+      )}
+      {/* 额度预警 chips：套餐窗口剩余 ≤20% 时浮现（剩余最少者优先，最多 3 枚）。 */}
+      {chips.map(chip => (
+        <span key={`${chip.name}:${chip.kind}`}>
+          <span className={css.feeSep} aria-hidden="true">·</span>
+          <span className={chip.pct <= 10 ? css.feeChipError : css.feeChipAlert} data-testid="billing-live-quota">
+            {chip.name} {t(windowLabelKey(chip.kind))} {chip.pct}%
+          </span>
+        </span>
+      ))}
+    </span>
+  )
+}
+
+/** Props of the tool-row chip: session identity and locale only (its seat is fixed to input.right). */
+export type LiveCostChipProps = Pick<LiveCostBarProps, 'sessionId' | 't'>
+
+/**
+ * Render the compact inline chip for the composer tool row (position
+ * 「模型选择前」). Occupies a fixed minimal footprint — tier glyph + session
+ * spend — so it never crowds the model picker; the full breakdown (switch
+ * countdown, turn cost, quota alerts) rides the host Tooltip primitive (the
+ * native title never renders in the webview), and a low quota tints the chip
+ * amber/red instead of growing it.
+ * @param props - framework session identity and locale.
+ */
+export function LiveCostChip({ sessionId, t }: LiveCostChipProps): React.ReactNode {
+  const currency = useCurrencyPref()
+  const money = (cny: number): string => formatMoney(convertFromCny(cny, currency), currency)
+  const { visible, position } = useLiveCostPrefs()
+  const { sessionCost, subCost, turnCost, tier, chips, hasBandPlan } = useLiveCostData(sessionId, visible && position === 'toolbar')
+  // 非工具行位置时 chip 让位给 bar（同 id 双槽互斥由位置偏好门控）。
+  if (!visible || position !== 'toolbar') return null
+  // 档位小徽章仅在当前会话模型涉及峰谷时渲染；额度预警压到 chip 上：
+  // 最紧张的一档决定颜色（error > alert > normal）。告警色是**修饰类**，必须叠在
+  // 基础类 feeInline 之上——此前三元表达式用修饰类替换了基础类，inline-flex /
+  // 999px 圆角 / 高度 / 内距随之丢失，红底退化成紧贴文字、与档位 chip 不对齐的
+  // 矩形并溢出 chip 轮廓；正常态走基础类所以一直没暴露，首次有额度 ≤10% 才现形。
+  const isPeak = tier?.tier === 'peak'
+  const worst = chips.reduce<number>((min, c) => Math.min(min, c.pct), 100)
+  const tint = worst <= 10 ? css.feeInlineError : worst <= 20 ? css.feeInlineAlert : undefined
+  const cls = clsx(css.feeInline, tint)
+  const title = [
+    ...(tier !== null
+      ? [`${formatSwitchCountdown(tier.nextSwitchInMs)} ${isPeak ? t('tierToOff') : t('tierToPeak')}`]
+      : []),
+    `${t('liveTurn')} ${money(turnCost)}`,
+    `${t('liveSession')} ${money(sessionCost)}`,
+    ...(subCost > 0 ? [t('liveSessionSub').replace('{cost}', money(subCost))] : []),
+    ...chips.map(chip => `${chip.name} ${t(windowLabelKey(chip.kind))} ${chip.pct}%`),
+  ].join(' · ')
+  return (
+    <Tooltip label={title} side="top" delayMs={500}>
+      <span className={cls} data-testid="billing-live-cost-chip" role="note" aria-label={title}>
+        <PinnedBandDots hasBandPlan={hasBandPlan} />
+        {tier !== null && (
+          <span className={isPeak ? css.feeChipPrimary : css.feeChipOff} data-testid="billing-live-tier">
+            {isPeak ? t('tierPeak') : t('tierOff')}
+          </span>
+        )}
+        {sessionCost > 0 && <span className={css.feeInlineNum}>{money(sessionCost)}</span>}
+      </span>
+    </Tooltip>
+  )
+}

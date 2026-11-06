@@ -1,0 +1,594 @@
+import { applyBuiltinCatalog } from '../src/client/pricing.ts'
+import { BUILTIN_MODEL_CATALOG, BUILTIN_MODEL_KEY_ALIASES } from '../src/builtin-catalog.ts'
+
+// 测试套件承担宿主注入角色：目录与别名表在模块加载时全量注入（宿主 activate
+// 同一入口），否则聚合/计价消费方读到空目录。
+applyBuiltinCatalog(BUILTIN_MODEL_CATALOG, BUILTIN_MODEL_KEY_ALIASES)
+
+// @vitest-environment jsdom
+/**
+ * UsageBilling real-data smoke test: feeds the surface a realistic
+ * usage-stats snapshot (multi-model, multi-day, byDayModels) through the
+ * same fetch the browser uses, then opens the modal. Any render throw here
+ * unmounts the whole plugin surface in the host.
+ */
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { ComponentProps } from 'react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { bindSnapshotSelector } from './bind-snapshot-selector'
+import { UsageBilling } from '../src/client/UsageBilling.tsx'
+import { notifiedKeys } from '../src/client/domain/notify.ts'
+import { createBillingBudgetStore } from '../src/client/budget-store.ts'
+import { zh } from '../src/client/locales.ts'
+
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+})
+
+beforeEach(() => {
+  localStorage.clear()
+  localStorage.setItem('dsh.ui-usage-billing.currency', 'cny')
+  // 跨实例提醒认领的进程内 Set 是模块级状态：清掉前序用例的同键拦截（issue #44）。
+  notifiedKeys.clear()
+})
+
+const t = (key: string): string => (zh as Record<string, string>)[key] ?? key
+
+/** 组件 props：数据桥 stub 空实现 + 真实预算 store 实例（persist 经 localStorage）。 */
+function makeProps(): ComponentProps<typeof UsageBilling> {
+  const budgetStore = createBillingBudgetStore().create()
+  return {
+    wide: true,
+    t,
+    checkModels: async () => ({
+      checked: true, available: true, models: 1, failures: 0, okProviders: [], badProviders: [],
+    }),
+    // 装饰孔位在单测中无注册者：renderSlot 返回 null。
+    publishCosts: () => {},
+    registerOpen: () => () => {},
+    renderSlot: () => null,
+    useStore: bindSnapshotSelector(budgetStore),
+    actions: budgetStore.actions,
+  } as unknown as ComponentProps<typeof UsageBilling>
+}
+
+/** One day's stats row shape as the node half aggregates it. */
+function day(calls: number, input: number, output: number, cacheHit: number, cacheMiss: number, cost: number) {
+  return { calls, input, output, cacheHit, cacheMiss, cost }
+}
+
+/** Realistic multi-model multi-day snapshot (7-day window), with a monthly budget. */
+const REAL_STATS = {
+  budget: 10,
+  total: day(137, 88_000_000, 12_000_000, 40_000_000, 48_000_000, 3.42),
+  byModel: {
+    'flash': day(100, 60_000_000, 8_000_000, 30_000_000, 30_000_000, 2.1),
+    'pro': day(37, 28_000_000, 4_000_000, 10_000_000, 18_000_000, 1.32),
+  },
+  byDay: {
+    '2026-08-14': day(20, 12_000_000, 2_000_000, 5_000_000, 7_000_000, 0.51),
+    '2026-08-15': day(48, 31_000_000, 4_500_000, 14_000_000, 17_000_000, 1.2),
+    '2026-08-16': day(69, 45_000_000, 5_500_000, 21_000_000, 24_000_000, 1.71),
+  },
+  byDayModels: {
+    '2026-08-15': {
+      'flash': day(35, 21_000_000, 3_000_000, 10_000_000, 11_000_000, 0.74),
+      'pro': day(13, 10_000_000, 1_500_000, 4_000_000, 6_000_000, 0.46),
+    },
+    '2026-08-16': {
+      'flash': day(50, 32_000_000, 4_000_000, 15_000_000, 17_000_000, 1.12),
+      'pro': day(19, 13_000_000, 1_500_000, 6_000_000, 7_000_000, 0.59),
+    },
+  },
+  bySession: [
+    { id: 'sess-shop-1', title: '修复登录 bug', cwd: '/home/ken/shop-web', calls: 80, cost: 2.4, lastActive: Date.UTC(2026, 7, 16, 8, 0, 0) },
+    { id: 'sess-shop-2', title: '修复登录 bug', cwd: '/home/ken/shop-web', calls: 12, cost: 0.6, lastActive: Date.UTC(2026, 7, 16, 10, 0, 0) },
+    { id: 'sess-api-2', cwd: '/home/ken/api-server', calls: 20, cost: 1.02, lastActive: Date.UTC(2026, 7, 15, 9, 30, 0) },
+  ],
+  byDayModelsSite: {
+    '2026-08-16': {
+      'flash': { 'site:https://api.deepseek.com': day(50, 32_000_000, 4_000_000, 15_000_000, 17_000_000, 1.12) },
+      'pro': { 'site:https://api.deepseek.com': day(19, 13_000_000, 1_500_000, 6_000_000, 7_000_000, 0.59) },
+    },
+  },
+}
+
+/** 本地时区今日日期戳（与组件的 localDayStamp 同规则）。 */
+function todayStamp(): string {
+  const date = new Date()
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+}
+
+describe('UsageBilling real-data surface', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      const body = url.includes('/api/billing/pricing')
+        ? { source: 'builtin' }
+        : REAL_STATS
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+    }))
+  })
+
+  it('keeps the compact trigger number-only while retaining dashboard, metric switching, and hover access', async () => {
+    localStorage.setItem('dsh.ui-usage-billing.currency', 'usd')
+    localStorage.setItem('dsh.ui-usage-billing.card', JSON.stringify({ metric: 'tokens' }))
+    const usage = day(1, 700_000_000, 29_400_000, 0, 700_000_000, 6.79)
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify(
+      String(input).includes('/api/billing/usage-stats')
+        ? { total: usage, byModel: {}, byDay: { [todayStamp()]: usage } }
+        : { source: 'live', balances: [], quotas: [] },
+    ))))
+    render(<UsageBilling {...makeProps()} />)
+    const trigger = screen.getByTestId('billing-trigger')
+    await waitFor(() => { expect(trigger.textContent).toBe('729.4M') })
+    expect(trigger.querySelector('svg')).toBeNull()
+    expect(trigger.childElementCount).toBe(1)
+    expect(trigger.getAttribute('aria-label')).toContain('729.4M')
+    expect(trigger.getAttribute('aria-haspopup')).toBe('dialog')
+    fireEvent.focus(trigger)
+    expect(screen.getByTestId('billing-trigger-pop').getAttribute('aria-hidden')).toBe('false')
+    fireEvent.click(trigger)
+    expect(await screen.findByTestId('billing-dashboard')).toBeTruthy()
+    fireEvent.click(screen.getByTestId('billing-tab-settings'))
+    fireEvent.click(screen.getByTestId('billing-card-money'))
+    expect(trigger.textContent).toBe('$1.00')
+    expect(trigger.querySelector('svg')).toBeNull()
+    fireEvent.click(screen.getByTestId('billing-card-tokens'))
+    expect(trigger.textContent).toBe('729.4M')
+  })
+
+  it('opens the dashboard over a realistic snapshot without throwing', async () => {
+    const { container } = render(<UsageBilling {...makeProps()} />)
+    const trigger = container.querySelector('button')
+    expect(trigger).not.toBeNull()
+    fireEvent.click(trigger!)
+    // 弹窗标题 + 真实数据渲染完成（默认概览 Tab：Hero 与热力图面板）。
+    expect(await screen.findByText('使用统计')).toBeTruthy()
+    await waitFor(() => {
+      expect(screen.queryByTestId('billing-tab-panel-overview')).not.toBeNull()
+      expect(screen.queryByTestId('billing-panel-heatmap')).not.toBeNull()
+    })
+  })
+
+  it('renders decor anchors: hero in overview, trend in trends, footer always', async () => {
+    const positions: string[] = []
+    const props = {
+      ...makeProps(),
+      renderSlot: (_slot: string, anchor: { position: string }) => {
+        positions.push(anchor.position)
+        return null
+      },
+    } as unknown as ComponentProps<typeof UsageBilling>
+    const { container } = render(<UsageBilling {...props} />)
+    fireEvent.click(container.querySelector('button')!)
+    await screen.findByTestId('billing-tab-panel-overview')
+    expect(positions).toContain('head')
+    expect(positions).toContain('headTitle')
+    expect(positions).toContain('hero')
+    expect(positions).toContain('footer')
+    expect(positions).not.toContain('trend')
+    // 切到趋势 Tab：trend 锚点出现。
+    fireEvent.click(screen.getByTestId('billing-tab-trends'))
+    await screen.findByTestId('billing-tab-panel-trends')
+    expect(positions).toContain('trend')
+  })
+
+  it('switches the trend window between 7 and 30 days', async () => {
+    const { container } = render(<UsageBilling {...makeProps()} />)
+    fireEvent.click(container.querySelector('button')!)
+    // 趋势图在趋势 Tab：先切 Tab。
+    fireEvent.click(await screen.findByTestId('billing-tab-trends'))
+    const btn30 = await screen.findByTestId('billing-trend-30d')
+    // 默认 7 天窗口。
+    expect(screen.getByTestId('billing-trend-7d').getAttribute('aria-pressed')).toBe('true')
+    fireEvent.click(btn30)
+    expect(btn30.getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByTestId('billing-trend-7d').getAttribute('aria-pressed')).toBe('false')
+  })
+
+  it('toggles the budget strip on and edits the amount visually', async () => {
+    const { container } = render(<UsageBilling {...makeProps()} />)
+    fireEvent.click(container.querySelector('button')!)
+    // 预算设置在设置 Tab：先切换再操作。
+    fireEvent.click(await screen.findByTestId('billing-tab-settings'))
+    const toggle = await screen.findByTestId('billing-budget-toggle')
+    // 默认关闭：无进度条。
+    expect(screen.queryByTestId('billing-budget-track')).toBeNull()
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-checked')).toBe('true')
+    // 开启后沿用宿主默认金额（stats.budget = 10）：进度条与金额文本出现。
+    expect(await screen.findByTestId('billing-budget-track')).toBeTruthy()
+    expect(screen.getByTestId('billing-budget-value').textContent).toContain('¥10')
+    // 可视化编辑金额：改为 50 后文本与进度同步更新。
+    fireEvent.change(screen.getByTestId('billing-budget-input'), { target: { value: '50' } })
+    expect(screen.getByTestId('billing-budget-value').textContent).toContain('¥50')
+    // 关闭开关：进度与金额隐藏，只留标题行与开关。
+    fireEvent.click(toggle)
+    expect(screen.queryByTestId('billing-budget-track')).toBeNull()
+  })
+
+  it('shows the sessions panel with merged rows, project basenames, and readable untitled ids', async () => {
+    const { container } = render(<UsageBilling {...makeProps()} />)
+    fireEvent.click(container.querySelector('button')!)
+    // 会话明细在明细 Tab 内默认展开：切 Tab 后表格直接可见。
+    fireEvent.click(await screen.findByTestId('billing-tab-providers'))
+    const table = await screen.findByTestId('billing-sessions-table')
+    // 标题行按费用倒序；无标题会话显示「未命名会话 · 短id」（issue #42 可读化）。
+    // 同标题合并后 2 行（shop-web 合并行 + api 行）。预览线表格无项目列。
+    expect(table.textContent).toContain('修复登录 bug')
+    expect(table.textContent).toContain('未命名会话 · sess-api')
+    expect(table.querySelectorAll('tbody tr')).toHaveLength(2)
+  })
+
+  it('merges same-title sessions into a collapsible primary row (issue #42)', async () => {
+    const { container } = render(<UsageBilling {...makeProps()} />)
+    fireEvent.click(container.querySelector('button')!)
+    fireEvent.click(await screen.findByTestId('billing-tab-providers'))
+    const table = await screen.findByTestId('billing-sessions-table')
+    // 一级行默认收起：同标题两段合并为一行「修复登录 bug ×2」（calls/cost 合计
+    // 80+12=92、2.4+0.6=3.0），子段不出现。
+    const primary = screen.getByText('修复登录 bug ×2').closest('tr')!
+    expect(primary.textContent).toContain('92')
+    expect(table.textContent).not.toContain('sess-shop-1')
+    // 点击一级行展开：逐段明细（短 id + 各段费用）出现，再点收起。
+    fireEvent.click(primary)
+    expect(table.textContent).toContain('sess-sho')
+    expect(table.textContent).toContain('¥2.40')
+    expect(primary.getAttribute('aria-expanded')).toBe('true')
+    fireEvent.click(primary)
+    expect(table.textContent).not.toContain('sess-shop')
+    expect(primary.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('groups subagent sessions under their parent conversation (子智能体归并)', async () => {
+    // 子智能体是宿主的独立会话（parentId 指向父对话）：账单里默认收进父行，
+    // 父行徽标显示后代合计（服务端 subCost），展开可见逐个子会话；
+    // 父行不在切片内的孤儿子行回退为独立行，不丢数据。
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      const body = url.includes('/api/billing/pricing')
+        ? { source: 'builtin' }
+        : {
+          ...REAL_STATS,
+          bySession: [
+            { id: 'sess-root', title: '构建射击游戏', calls: 98, cost: 1.86, lastActive: Date.UTC(2026, 9, 18, 0, 54, 0), subCalls: 2, subCost: 1.78 },
+            { id: 'sess-sub-a', title: '你是关卡美术', calls: 35, cost: 0.92, lastActive: Date.UTC(2026, 9, 18, 0, 55, 0), parentId: 'sess-root' },
+            { id: 'sess-sub-b', title: '你是武器美术', calls: 35, cost: 0.86, lastActive: Date.UTC(2026, 9, 18, 0, 56, 0), parentId: 'sess-root' },
+            { id: 'sess-orphan', title: '孤儿子会话', calls: 5, cost: 0.2, lastActive: Date.UTC(2026, 9, 18, 1, 0, 0), parentId: 'sess-gone' },
+          ],
+        }
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+    }))
+    const { container } = render(<UsageBilling {...makeProps()} />)
+    fireEvent.click(container.querySelector('button')!)
+    fireEvent.click(await screen.findByTestId('billing-tab-providers'))
+    const table = await screen.findByTestId('billing-sessions-table')
+    // 父行带「含子智能体」徽标；子行收进父行默认不出现。
+    expect(table.textContent).toContain('含子智能体 ¥1.78')
+    expect(table.textContent).not.toContain('你是关卡美术')
+    // 展开父行：子智能体行出现（徽标 + 标题）。
+    fireEvent.click(screen.getByText('构建射击游戏').closest('tr')!)
+    expect(table.textContent).toContain('子智能体')
+    expect(table.textContent).toContain('你是关卡美术')
+    expect(table.textContent).toContain('你是武器美术')
+    // 父行已删的孤儿子行保持独立可见。
+    expect(table.textContent).toContain('孤儿子会话')
+  })
+
+  it('notifies once per tier per day as spend crosses budget tiers', async () => {
+    const notify = vi.fn()
+    vi.stubGlobal('Notification', Object.assign(notify, {
+      permission: 'granted' as NotificationPermission,
+      requestPermission: async () => 'granted' as NotificationPermission,
+    }))
+    // 今日花费 5 元（动态日期戳，任何月份跑都成立）。
+    const dynamicStats = {
+      budget: 10,
+      total: day(1, 1000, 100, 0, 1000, 5),
+      byModel: { flash: day(1, 1000, 100, 0, 1000, 5) },
+      byDay: { [todayStamp()]: day(1, 1000, 100, 0, 1000, 5) },
+      byDayModels: {},
+      bySession: [],
+    }
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      const body = url.includes('/api/billing/pricing') ? { source: 'builtin' } : dynamicStats
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+    }))
+    const { container } = render(<UsageBilling {...makeProps()} />)
+    fireEvent.click(container.querySelector('button')!)
+    // 预算设置在设置 Tab：先切换再操作。
+    fireEvent.click(await screen.findByTestId('billing-tab-settings'))
+    // 开启预算（默认 10 元）：5/10 = 50%，跨 50% 档 → 第一次通知。
+    fireEvent.click(await screen.findByTestId('billing-budget-toggle'))
+    await waitFor(() => { expect(notify).toHaveBeenCalledTimes(1) })
+    expect(notify.mock.calls[0]?.[1]?.body).toContain('50%')
+    // 预算改 1 元：500% 跨 80%/100% 两档 → 只发最高档（100%），第二次通知。
+    fireEvent.change(await screen.findByTestId('billing-budget-input'), { target: { value: '1' } })
+    await waitFor(() => { expect(notify).toHaveBeenCalledTimes(2) })
+    expect(notify.mock.calls[1]?.[1]?.body).toContain('100%')
+    // 同一天内金额再变（2 元，250%）：各档当日均已提醒，不再通知。
+    fireEvent.change(screen.getByTestId('billing-budget-input'), { target: { value: '2' } })
+    await waitFor(() => {
+      expect(screen.getByTestId('billing-budget-value').textContent).toContain('¥2')
+    })
+    expect(notify).toHaveBeenCalledTimes(2)
+  })
+
+  it('notifies the highest newly crossed budget tier once per day', async () => {
+    // 今日花费 5.5 元 / 预算 10 元 = 55%：跨 50% 档，通知一次且文案带 50%。
+    const notify = vi.fn()
+    vi.stubGlobal('Notification', Object.assign(notify, {
+      permission: 'granted' as NotificationPermission,
+      requestPermission: async () => 'granted' as NotificationPermission,
+    }))
+    const dynamicStats = {
+      budget: 10,
+      total: day(1, 1000, 100, 0, 1000, 5.5),
+      byModel: { flash: day(1, 1000, 100, 0, 1000, 5.5) },
+      byDay: { [todayStamp()]: day(1, 1000, 100, 0, 1000, 5.5) },
+      byDayModels: {},
+      bySession: [],
+    }
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      const body = url.includes('/api/billing/pricing') ? { source: 'builtin' } : dynamicStats
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+    }))
+    const { container } = render(<UsageBilling {...makeProps()} />)
+    fireEvent.click(container.querySelector('button')!)
+    // 预算设置在设置 Tab：先切换再操作。
+    fireEvent.click(await screen.findByTestId('billing-tab-settings'))
+    fireEvent.click(await screen.findByTestId('billing-budget-toggle'))
+    await waitFor(() => { expect(notify).toHaveBeenCalledTimes(1) })
+    expect(notify.mock.calls[0]?.[1]?.body).toContain('50%')
+  })
+
+  it('marks uncatalogued models and infers their provider from the model id', async () => {
+    // mi-mimo-2.5 不在计费目录（收录的是 mimo-v2.5）：落回「其他」并标注未收录，
+    // 提供方从 model id 反推为小米。提供商（通道）优先分组后，品牌只是行内副标
+    // /徽标——mi-mimo-2.5 与 flash/pro 同走 DeepSeek 官方通道，就落在同一组。
+    const stats = {
+      ...REAL_STATS,
+      byModel: {
+        ...REAL_STATS.byModel,
+        'mi-mimo-2.5': day(15, 9_000_000, 1_200_000, 3_000_000, 6_000_000, 0.4),
+      },
+      byDayModelsSite: {
+        ...REAL_STATS.byDayModelsSite,
+        '2026-08-16': {
+          ...REAL_STATS.byDayModelsSite['2026-08-16'],
+          'mi-mimo-2.5': { 'site:https://api.deepseek.com': day(15, 9_000_000, 1_200_000, 3_000_000, 6_000_000, 0.4) },
+        },
+      },
+    }
+    vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+      const url = input
+      const body = url.includes('/api/billing/pricing') ? { source: 'builtin' } : stats
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+    }))
+    const { container } = render(<UsageBilling {...makeProps()} />)
+    fireEvent.click(container.querySelector('button')!)
+    fireEvent.click(await screen.findByTestId('billing-tab-providers'))
+    const groups = await screen.findAllByTestId('billing-provider-group')
+    const deepseek = groups.find(group => group.textContent?.includes('DeepSeek 官方'))
+    expect(deepseek).toBeDefined()
+    // 厂商组默认收起（issue #77）：点击组头展开后模型用量表才渲染。
+    fireEvent.click(deepseek!.querySelector('[data-testid="billing-provider-group-head"]')!)
+    const table = deepseek!.querySelector('[data-testid="billing-table-scroll"]')
+    expect(table).not.toBeNull()
+    await waitFor(() => { expect(table!.textContent).toContain('mi-mimo-2.5') })
+    // 行内副标保留反推出的品牌「小米」。
+    expect(table!.textContent).toContain('小米')
+    // 只有这一行未收录（flash / pro 均在目录内）。
+    expect(table!.querySelectorAll('[data-testid="billing-uncatalogued-tag"]')).toHaveLength(1)
+  })
+
+  it('shows the days-left estimate next to a healthy balance', async () => {
+    // REAL_STATS 三天消耗合计 3.42 元 → 日均 1.14；DeepSeek 余额 20 元 → 约 17 天。
+    // deepseek-chat 不在目录：provider 由 model id 反推为 DeepSeek，余额列才匹配得上。
+    const stats = {
+      ...REAL_STATS,
+      byModel: {
+        ...REAL_STATS.byModel,
+        'deepseek-chat': day(25, 18_000_000, 2_000_000, 9_000_000, 9_000_000, 0.9),
+      },
+    }
+    vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+      const url = input
+      const body = url.includes('/api/billing/pricing')
+        ? { source: 'builtin' }
+        : url.includes('/api/billing/balance')
+          ? { balances: [{ provider: 'deepseek', displayName: 'DeepSeek', currency: 'CNY', totalBalance: 20, isAvailable: true }] }
+          : stats
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+    }))
+    const { container } = render(<UsageBilling {...makeProps()} />)
+    fireEvent.click(container.querySelector('button')!)
+    // 余额按厂商匹配：目录里 flash / pro 与 deepseek-chat 同属 DeepSeek，归并到同一
+    // 厂商组；余额只在厂商组头部显示一次（不再随每行重复），天数预估仍在头部。
+    // 厂商面板在厂商 Tab：先切 Tab。
+    fireEvent.click(await screen.findByTestId('billing-tab-providers'))
+    const days = await screen.findAllByTestId('billing-balance-days-badge')
+    expect(days).toHaveLength(1)
+    expect(days[0]?.textContent).toBe('?')
+  })
+
+  it('notifies once when any balance drops below the threshold', async () => {
+    // 类型化 stub：实现用普通 function（vitest 对箭头实现的 mock 不可 new，
+    // 组件里 new Notification 会抛 TypeError 并触发认领链的兜底重发）。
+    const notify = vi.fn(function mockNotification(this: unknown, _title: string, _options?: { body?: string }) {})
+    vi.stubGlobal('Notification', Object.assign(notify, {
+      permission: 'granted',
+      requestPermission: async () => 'granted',
+    }))
+    const dynamicStats = {
+      budget: 10,
+      total: day(1, 1000, 100, 0, 1000, 5),
+      byModel: { flash: day(1, 1000, 100, 0, 1000, 5) },
+      byDay: { [todayStamp()]: day(1, 1000, 100, 0, 1000, 5) },
+      byDayModels: {},
+      bySession: [],
+    }
+    // 余额 5 元低于默认阈值 50 元：每天提醒一次。
+    vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+      const url = input
+      const body = url.includes('/api/billing/pricing')
+        ? { source: 'builtin' }
+        : url.includes('/api/billing/balance')
+          ? { balances: [{ provider: 'deepseek', displayName: 'DeepSeek', currency: 'CNY', totalBalance: 5, isAvailable: true }] }
+          : url.includes('/api/billing/notify-claim')
+            ? { claimed: true }
+            : dynamicStats
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+    }))
+    const { container } = render(<UsageBilling {...makeProps()} />)
+    fireEvent.click(container.querySelector('button')!)
+    await waitFor(() => { expect(notify).toHaveBeenCalledTimes(1) })
+    // 通知正文带余额与天数。
+    expect(notify.mock.calls[0]?.[1]?.body).toContain('请及时充值')
+  })
+
+  it('groups subscription quotas under the matching model vendor', async () => {
+    // kimi-coding 订阅归并到「月之暗面」厂商组；无月之暗面模型，组内只有订阅卡片。
+    // DeepSeek 模型组只有模型用量表、无订阅卡片：验证按厂商聚合的单一容器。
+    const stats = { ...REAL_STATS, byModel: { 'deepseek-chat': day(25, 18_000_000, 2_000_000, 9_000_000, 9_000_000, 0.9) } }
+    vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+      const url = input
+      const body = url.includes('/api/billing/pricing')
+        ? { source: 'builtin' }
+        : url.includes('/api/billing/subscriptions')
+          ? { quotas: [{ provider: 'kimi-coding', displayName: 'Kimi For Coding', status: 'ok', windows: [{ kind: 'monthly', usedPercent: 30, remainingPercent: 70, resetsAt: '2026-09-01T00:00:00Z' }] }] }
+          : stats
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+    }))
+    const { container } = render(<UsageBilling {...makeProps()} />)
+    fireEvent.click(container.querySelector('button')!)
+    // 单一容器按厂商聚合：模型用量与订阅额度同属一个面板（厂商 Tab）。
+    fireEvent.click(await screen.findByTestId('billing-tab-providers'))
+    expect(await screen.findByTestId('billing-panel-providers')).toBeTruthy()
+    const groups = await screen.findAllByTestId('billing-provider-group')
+    // 月之暗面组：订阅卡片 + 套数徽标，无模型用量表（无该厂商模型）。
+    const kimi = groups.find(group => group.textContent?.includes('月之暗面'))
+    expect(kimi).toBeDefined()
+    // 厂商组默认收起（issue #77）：订阅卡片与模型表都收在组头之下，展开后断言。
+    fireEvent.click(kimi!.querySelector('[data-testid="billing-provider-group-head"]')!)
+    expect(kimi!.querySelector('[data-testid="billing-subscription-card"]')).not.toBeNull()
+    expect(kimi!.querySelector('[data-testid="billing-provider-sub-count"]')?.textContent).toContain('1')
+    expect(kimi!.querySelector('[data-testid="billing-table-scroll"]')).toBeNull()
+    // DeepSeek 组：模型用量表，无订阅卡片。
+    const deepseek = groups.find(group => group.textContent?.includes('DeepSeek'))
+    expect(deepseek).toBeDefined()
+    fireEvent.click(deepseek!.querySelector('[data-testid="billing-provider-group-head"]')!)
+    expect(deepseek!.querySelector('[data-testid="billing-table-scroll"]')).not.toBeNull()
+    expect(deepseek!.querySelector('[data-testid="billing-subscription-card"]')).toBeNull()
+  })
+
+  it('mixes non-subscription models and subscription quotas in the same channel group', async () => {
+    // mi-mimo-2.5 经 xiaomi 直连订阅路由调用：直连通道 direct:xiaomi-token-plan-cn
+    // 同时容纳订阅卡片与该模型行——「哪个入口」把订阅与用量天然归到一起。
+    const stats = {
+      ...REAL_STATS,
+      byModel: {
+        ...REAL_STATS.byModel,
+        'mi-mimo-2.5': day(15, 9_000_000, 1_200_000, 3_000_000, 6_000_000, 0.4),
+      },
+      byDayModelsSite: {
+        ...REAL_STATS.byDayModelsSite,
+        '2026-08-16': {
+          ...REAL_STATS.byDayModelsSite['2026-08-16'],
+          'mi-mimo-2.5': { 'direct:xiaomi-token-plan-cn': day(15, 9_000_000, 1_200_000, 3_000_000, 6_000_000, 0.4) },
+        },
+      },
+    }
+    vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+      const url = input
+      const body = url.includes('/api/billing/pricing')
+        ? { source: 'builtin' }
+        : url.includes('/api/billing/subscriptions')
+          ? { quotas: [{ provider: 'xiaomi-token-plan-cn', displayName: '小米 Token 计划', status: 'ok', windows: [{ kind: 'monthly', usedPercent: 40, remainingPercent: 60, resetsAt: '2026-09-01T00:00:00Z' }] }] }
+          : stats
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+    }))
+    const { container } = render(<UsageBilling {...makeProps()} />)
+    fireEvent.click(container.querySelector('button')!)
+    fireEvent.click(await screen.findByTestId('billing-tab-providers'))
+    const groups = await screen.findAllByTestId('billing-provider-group')
+    // 组头按模型名匹配改路由名：厂商组默认收起（issue #77）后模型行不在组内文本中。
+    const xiaomi = groups.find(group => group.textContent?.includes('xiaomi-token-plan-cn'))
+    expect(xiaomi).toBeDefined()
+    // 直连组头：「直连」徽章 + 拆出的路由名（direct:xiaomi-token-plan-cn 无前缀直呼）。
+    expect(xiaomi!.querySelector('[data-testid="billing-kind-badge"]')?.textContent).toBe('直连')
+    // 厂商组默认收起（issue #77）：展开后断言模型用量表与订阅卡片同组共存。
+    fireEvent.click(xiaomi!.querySelector('[data-testid="billing-provider-group-head"]')!)
+    expect(xiaomi!.querySelector('[data-testid="billing-table-scroll"]')).not.toBeNull()
+    expect(xiaomi!.querySelector('[data-testid="billing-subscription-card"]')).not.toBeNull()
+    // 非订阅模型显示实际费用（0.40 元），不挂「订阅」标签（订阅包含胶囊只出现在订阅通道行）。
+    expect(xiaomi!.querySelector('[data-testid="billing-table-scroll"]')!.textContent).toContain('¥0.40')
+    expect(xiaomi!.querySelector('[data-testid="billing-table-scroll"] [data-testid="billing-plan-badge"]')).toBeNull()
+  })
+})
+
+describe('UsageBilling budget-pressure trigger feedback', () => {
+  /** 当月今日费用快照：触发卡预算百分比 = 该费用 / 预算金额（今日即本月合计）。 */
+  const statsOf = (todayCost: number) => ({
+    budget: 10,
+    total: day(3, 3_000_000, 1_000_000, 1_000_000, 1_000_000, todayCost),
+    byModel: {},
+    byDay: { [todayStamp()]: day(3, 3_000_000, 1_000_000, 1_000_000, 1_000_000, todayCost) },
+    byDayModels: {},
+  })
+
+  /** 预算 store 预置开关与金额后挂载：其余 props 与主 describe 相同。 */
+  function renderWithBudget(enabled: boolean, amount: number, todayCost: number) {
+    const budgetStore = createBillingBudgetStore().create()
+    budgetStore.actions.setEnabled(enabled)
+    budgetStore.actions.setAmount(amount)
+    const props = {
+      ...makeProps(),
+      useStore: bindSnapshotSelector(budgetStore),
+      actions: budgetStore.actions,
+    } as unknown as ComponentProps<typeof UsageBilling>
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      const body = url.includes('/api/billing/pricing') ? { source: 'builtin' } : statsOf(todayCost)
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+    }))
+    return render(<UsageBilling {...props} />)
+  }
+
+  it('marks the trigger card with the warn pulse and hot icon at ≥80% of the budget', async () => {
+    const { container } = renderWithBudget(true, 10, 9)
+    // 触发卡常驻侧栏：无需打开面板，等 stats 到位后临界类出现（90% → warn 档）。
+    await waitFor(() => {
+      expect(screen.getByTestId('billing-trigger').className).toMatch(/triggerBudgetPulse/)
+    })
+    expect(screen.getByTestId('billing-trigger').className).not.toMatch(/triggerBudgetOver/)
+    // 指针/进度弧容器转红（CSS currentColor 级联）。
+    expect(screen.queryByTestId('billing-trigger-icon')).toBeNull()
+    expect(container).toBeTruthy()
+  })
+
+  it('escalates to the accelerated pulse at ≥100% of the budget', async () => {
+    renderWithBudget(true, 10, 11)
+    await waitFor(() => {
+      expect(screen.getByTestId('billing-trigger').className).toMatch(/triggerBudgetOver/)
+    })
+    expect(screen.getByTestId('billing-trigger').className).toMatch(/triggerBudgetPulse/)
+    expect(screen.queryByTestId('billing-trigger-icon')).toBeNull()
+  })
+
+  it('stays calm with the budget disabled even when the spend is over the amount', async () => {
+    renderWithBudget(false, 10, 11)
+    // 等一轮 stats 到位（monthCost 已超预算金额）后仍无任何临界类。
+    await waitFor(() => {
+      expect(screen.getByTestId('billing-trigger').textContent).not.toBe('¥0')
+    })
+    expect(screen.getByTestId('billing-trigger').className).not.toMatch(/triggerBudgetPulse/)
+    expect(screen.queryByTestId('billing-trigger-icon')).toBeNull()
+  })
+})

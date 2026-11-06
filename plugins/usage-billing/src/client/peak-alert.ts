@@ -1,0 +1,129 @@
+/**
+ * 峰谷切换提醒（增强版）纯逻辑：偏好持久化 + 切档前命中判定。
+ *
+ * 参照 dsh-cost-meter 的 peak/off-peak 提醒：在距下次「进入峰时 / 进入平价」
+ * 不足提前量时，弹可视化色条浮层 + 可选的系统通知。偏好经 localStorage 持久化
+ * （默认关闭，用户到面板设置开启）；「同一切换点只提醒一次」由 budget store 的
+ * `lastTierSwitchAt` 承担（与原系统通知共用一份去重，避免一条切换提醒弹两次）。
+ */
+
+import { channelUpcomingSwitch, type PriceTierId, type RateChannel } from './pricing.ts'
+import { swallowed } from '../silent.ts'
+
+/** 提醒模式：只提醒进入峰时 / 只提醒进入平价 / 峰与谷都提醒。 */
+export type PeakAlertMode = 'peak' | 'offPeak' | 'both'
+
+/** 浮层位置：右下角 / 屏幕居中。 */
+export type PeakAlertPosition = 'bottom-right' | 'center'
+
+/** 峰谷提醒偏好。 */
+export interface PeakAlertConfig {
+  /** 总开关：关 = 既不浮层也不系统通知。 */
+  enabled: boolean
+  /** 提前量（分钟）；1–30。 */
+  leadMin: number
+  /** 浮层位置。 */
+  position: PeakAlertPosition
+  /** 是否同步发浏览器系统通知（Notification 授权后生效）。 */
+  webNotify: boolean
+  /** 提醒模式。 */
+  mode: PeakAlertMode
+}
+
+/** 配置持久化 key。 */
+export const PEAK_ALERT_KEY = 'dsh-billing-peak-alert-v1'
+
+/** 默认配置：关、2 分钟提前、右下角、开系统通知、峰与谷都提醒。 */
+export const DEFAULT_PEAK_ALERT_CONFIG: PeakAlertConfig = {
+  enabled: false,
+  leadMin: 2,
+  position: 'bottom-right',
+  webNotify: true,
+  mode: 'both',
+}
+
+/** 一次命中：即将进入的档位、该切换时刻与命中的计费通道（决定文案口径）。 */
+export interface PeakAlertHit {
+  entering: PriceTierId
+  atMs: number
+  channel: RateChannel
+  /** Waiting DeepSeek queue items; informational only, never an execution action. */
+  queueCount?: number
+}
+
+/** Prefer the current model's alert; merge queue context only at the same switch. */
+export function mergeQueuePeakAlert(
+  current: PeakAlertHit | null,
+  queue: PeakAlertHit | null,
+  queuedCount: number,
+): PeakAlertHit | null {
+  if (queue === null || queuedCount <= 0) return current
+  if (current === null) return { ...queue, queueCount: queuedCount }
+  if (current.atMs === queue.atMs && current.entering === queue.entering) {
+    return { ...current, queueCount: queuedCount }
+  }
+  return current
+}
+
+/** Keep an already-visible banner truthful as the lightweight queue count changes. */
+export function refreshQueuePeakAlert(current: PeakAlertHit | null, queuedCount: number): PeakAlertHit | null {
+  if (current === null || current.queueCount === undefined) return current
+  if (queuedCount > 0) {
+    return current.queueCount === queuedCount ? current : { ...current, queueCount: queuedCount }
+  }
+  const { queueCount: _queueCount, ...withoutQueue } = current
+  return withoutQueue
+}
+
+/** 读取本地偏好（缺失/损坏回退默认，字段宽松校验）。 */
+export function loadPeakAlertConfig(): PeakAlertConfig {
+  try {
+    const raw = localStorage.getItem(PEAK_ALERT_KEY)
+    if (raw === null) return { ...DEFAULT_PEAK_ALERT_CONFIG }
+    const parsed = JSON.parse(raw) as Partial<PeakAlertConfig>
+    const mode = parsed.mode === 'peak' || parsed.mode === 'offPeak' ? parsed.mode : DEFAULT_PEAK_ALERT_CONFIG.mode
+    const position = parsed.position === 'center' ? 'center' : 'bottom-right'
+    return {
+      enabled: parsed.enabled === true,
+      leadMin: typeof parsed.leadMin === 'number' && Number.isFinite(parsed.leadMin)
+        ? Math.min(30, Math.max(1, Math.round(parsed.leadMin)))
+        : DEFAULT_PEAK_ALERT_CONFIG.leadMin,
+      position,
+      webNotify: parsed.webNotify !== false,
+      mode,
+    }
+  } catch {
+    return { ...DEFAULT_PEAK_ALERT_CONFIG }
+  }
+}
+
+/** 保存偏好；存储失败静默（降级为关闭，不影响其它能力）。 */
+export function savePeakAlertConfig(config: PeakAlertConfig): void {
+  try {
+    localStorage.setItem(PEAK_ALERT_KEY, JSON.stringify(config))
+  } catch {
+    // localStorage 不可用（隐私模式/沙箱）时忽略。
+    swallowed('peak-config-storage-unavailable')
+  }
+}
+
+/**
+ * 计算是否需要提醒：已启用、当前计费通道有峰谷窗口、距切换不足提前量、按模式过滤、
+ * 且该切换点未提醒过。通道由调用方按「当前会话最近一轮的模型 + 订阅状态」推导
+ * （rateChannelOf）；none（模型不涉及峰谷）恒不提醒。
+ * 导出供测试：纯函数。
+ * @param nowMs - 当前时刻（epoch 毫秒）。
+ * @param config - 峰谷提醒偏好。
+ * @param lastAlertedAt - 上次提醒过的切换点时刻（budget store 的 lastTierSwitchAt）；同点跳过。
+ * @param channel - 当前会话模型的计费通道；none 直接返回 null。
+ * @returns 命中（含即将进入的档位、切换时刻与通道），否则 null。
+ */
+export function computePeakAlert(nowMs: number, config: PeakAlertConfig, lastAlertedAt: number, channel: RateChannel): PeakAlertHit | null {
+  if (!config.enabled) return null
+  const upcoming = channelUpcomingSwitch(nowMs, channel, config.leadMin * 60_000)
+  if (upcoming === null) return null
+  if (config.mode === 'peak' && upcoming.entering !== 'peak') return null
+  if (config.mode === 'offPeak' && upcoming.entering !== 'offPeak') return null
+  if (upcoming.atMs === lastAlertedAt) return null
+  return { ...upcoming, channel }
+}

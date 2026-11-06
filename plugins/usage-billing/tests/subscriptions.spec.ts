@@ -1,0 +1,978 @@
+/**
+ * Subscription quota adapter unit tests: plan identification from the
+ * llm-pi-ai providers map, empty keys degrading without any network, and a
+ * stubbed upstream response mapping through the Kimi parser and the HTTP
+ * status classifier.
+ */
+
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { classifyMiniMaxPlanRoutes, collectSubscriptions, EMPTY_SUBSCRIPTION_KEYS, identifySubscriptionPlans, isMiniMaxProviderId, parseAnthropicUsage, parseCommandCodeCredits, parseMiniMaxRemains, parseOpenCodeAuthDocument, parseOpenRouterCredits, resolveSubscriptionAccess } from '../src/subscriptions.ts'
+import { routeKeyRefCandidates } from '../src/route-keys.ts'
+
+/** A stubbed fetch answering one JSON body with the given status. */
+function stubFetch(body: unknown, status = 200): void {
+  vi.stubGlobal('fetch', vi.fn(async () => ({
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+  })))
+}
+
+describe('identifySubscriptionPlans', () => {
+  it('recognizes subscription providers that carry an apiKeyEnv', () => {
+    const identified = identifySubscriptionPlans({
+      'kimi-coding': { apiKeyEnv: 'KIMI_CODING_API_KEY' },
+      'xiaomi-token-plan-cn': { apiKeyEnv: 'XIAOMI_TOKEN_PLAN_CN_API_KEY' },
+      // 非订阅 provider 与未配 key 的订阅 id 都不识别。
+      'deepseek': { apiKeyEnv: 'DEEPSEEK_API_KEY' },
+      'qwen-token-plan': {},
+    })
+    expect(identified.map(item => item.provider)).toEqual(['kimi-coding', 'xiaomi-token-plan-cn'])
+    // kimi 有额度适配器；小米 token plan 识别但无适配器。
+    expect(identified[0]).toMatchObject({ adapter: true, displayName: 'Kimi For Coding' })
+    expect(identified[1]).toMatchObject({ adapter: false, displayName: '小米 Token Plan（国内）' })
+  })
+
+  it('recognizes MiniMax CN as a subscription provider with an adapter', () => {
+    const identified = identifySubscriptionPlans({
+      // `minimax-cn` is the id shipped by DSH pi-ai's own catalog
+      // (https://api.minimaxi.com). The plugin treats it as a sibling alias
+      // of `minimax-token-plan-cn`.
+      'minimax-cn': { apiKeyEnv: 'MINIMAX_CN_API_KEY' },
+      'minimax-token-plan-cn': { apiKeyEnv: 'MINIMAX_CN_ALT_API_KEY' },
+      'minimax': { apiKeyEnv: 'MINIMAX_API_KEY' },
+    })
+    expect(identified.map(item => item.provider)).toEqual(['minimax-cn', 'minimax-token-plan-cn', 'minimax'])
+    // All three provider ids must be recognised as subscriptions and routed
+    // to the same collectMiniMax adapter.
+    expect(identified[0]).toMatchObject({
+      provider: 'minimax-cn',
+      adapter: true,
+      displayName: 'MiniMax Token Plan（国内）',
+    })
+    expect(identified[1]).toMatchObject({
+      provider: 'minimax-token-plan-cn',
+      adapter: true,
+      displayName: 'MiniMax Token Plan（国内）',
+    })
+    expect(identified[2]).toMatchObject({
+      provider: 'minimax',
+      adapter: true,
+      displayName: 'MiniMax Coding Plan',
+    })
+  })
+
+  it('recognizes a models-only route (new-host settings shape, no apiKeyEnv)', () => {
+    // 新版宿主设置页把路由 key 存成凭据 refs，providers 配置里只剩 models 列表。
+    const identified = identifySubscriptionPlans({
+      'kimi-coding': { hasModels: true },
+      'zai-coding-cn': { hasModels: true },
+      // 空路由（无任何信号）仍不识别。
+      'minimax-cn': {},
+      'openrouter': { apiKeyEnv: '' },
+    })
+    expect(identified.map(item => item.provider)).toEqual(['kimi-coding', 'zai-coding-cn'])
+    expect(identified[0]).toMatchObject({ adapter: true, displayName: 'Kimi For Coding' })
+    expect(identified[1]).toMatchObject({ adapter: true, displayName: 'Z.ai Coding Plan（国内）', region: 'bigmodel-cn' })
+  })
+
+  it('recognizes a route whose conventional credential ref resolved (refResolved)', () => {
+    const identified = identifySubscriptionPlans({ 'minimax-cn': { refResolved: true } })
+    expect(identified.map(item => item.provider)).toEqual(['minimax-cn'])
+    expect(identified[0]).toMatchObject({ adapter: true })
+  })
+
+  it('returns an empty list for an empty providers map', () => {
+    expect(identifySubscriptionPlans(undefined)).toEqual([])
+    expect(identifySubscriptionPlans({})).toEqual([])
+  })
+})
+
+describe('routeKeyRefCandidates', () => {
+  it('leads with the route-id convention name', () => {
+    expect(routeKeyRefCandidates('minimax-cn')).toEqual(['MINIMAX_CN_API_KEY'])
+    expect(routeKeyRefCandidates('zai-coding-cn')).toEqual(['ZAI_CODING_CN_API_KEY'])
+    expect(routeKeyRefCandidates('openrouter')).toEqual(['OPENROUTER_API_KEY'])
+  })
+
+  it('appends the pi-ai catalog ambient name where it differs from the convention', () => {
+    // 目录把 kimi-coding 指到 KIMI_API_KEY（约定名 KIMI_CODING_API_KEY 仍在先）。
+    expect(routeKeyRefCandidates('kimi-coding')).toEqual(['KIMI_CODING_API_KEY', 'KIMI_API_KEY'])
+    // opencode-go 与 opencode 路由共用 OPENCODE_API_KEY。
+    expect(routeKeyRefCandidates('opencode-go')).toEqual(['OPENCODE_GO_API_KEY', 'OPENCODE_API_KEY'])
+  })
+})
+
+describe('resolveSubscriptionAccess', () => {
+  /** 凭据 seam 桩：按 ref 名查表，未命中返回 undefined。 */
+  function refsTable(entries: Record<string, string>) {
+    return async (name: string) => entries[name]
+  }
+
+  const testKey = (...parts: string[]) => parts.join('-')
+  const kimiTestKey = testKey('sk', 'kimi', 'test')
+
+  it('resolves an explicit apiKeyEnv ref first (classic shape)', async () => {
+    const { keys, keyConfigured } = await resolveSubscriptionAccess(
+      { 'kimi-coding': { apiKeyEnv: 'MY_KIMI_REF' } },
+      refsTable({ MY_KIMI_REF: testKey('sk', 'kimi', 'explicit') }),
+    )
+    expect(keys.kimiApiKey).toBe(testKey('sk', 'kimi', 'explicit'))
+    expect(keyConfigured.has('kimi-coding')).toBe(true)
+  })
+
+  it('recovers a models-only route key via the conventional ref (new-host shape)', async () => {
+    const { keys, keyConfigured } = await resolveSubscriptionAccess(
+      {
+        'kimi-coding': { hasModels: true },
+        'minimax-cn': { hasModels: true },
+        'zai-coding-cn': { hasModels: true },
+      },
+      refsTable({
+        KIMI_CODING_API_KEY: kimiTestKey,
+        MINIMAX_CN_API_KEY: testKey('sk', 'cp', 'minimax'),
+        ZAI_CODING_CN_API_KEY: testKey('zai', 'cn', 'key'),
+      }),
+    )
+    expect(keys.kimiApiKey).toBe(kimiTestKey)
+    expect(keys.minmaxApiKey).toBe(testKey('sk', 'cp', 'minimax'))
+    expect(keys.zaiCnApiKey).toBe(testKey('zai', 'cn', 'key'))
+    expect(keyConfigured).toEqual(new Set(['kimi-coding', 'minimax-cn', 'zai-coding-cn']))
+  })
+
+  it('falls back to the catalog ambient name when the convention ref is absent', async () => {
+    const { keys } = await resolveSubscriptionAccess(
+      { 'kimi-coding': { hasModels: true } },
+      refsTable({ KIMI_API_KEY: testKey('sk', 'kimi', 'ambient') }),
+    )
+    expect(keys.kimiApiKey).toBe(testKey('sk', 'kimi', 'ambient'))
+  })
+
+  it('lets an explicit apiKeyEnv win over the convention refs', async () => {
+    const { keys } = await resolveSubscriptionAccess(
+      { 'kimi-coding': { apiKeyEnv: 'MY_KIMI_REF', hasModels: true } },
+      refsTable({
+        MY_KIMI_REF: testKey('sk', 'explicit'),
+        KIMI_CODING_API_KEY: testKey('sk', 'convention'),
+      }),
+    )
+    expect(keys.kimiApiKey).toBe(testKey('sk', 'explicit'))
+  })
+
+  it('leaves keys empty when no ref resolves', async () => {
+    const { keys, keyConfigured } = await resolveSubscriptionAccess(
+      { 'kimi-coding': { hasModels: true }, 'openrouter': { apiKeyEnv: 'MISSING_REF' } },
+      refsTable({}),
+    )
+    expect(keys.kimiApiKey).toBe('')
+    expect(keys.openrouterApiKey).toBe('')
+    expect(keyConfigured.size).toBe(0)
+  })
+})
+
+describe('collectSubscriptions', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('returns nothing for an empty plan list (no network)', async () => {
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    const quotas = await collectSubscriptions(EMPTY_SUBSCRIPTION_KEYS)
+    expect(quotas).toEqual([])
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('parses the Kimi usage payload into session and weekly windows', async () => {
+    stubFetch({
+      data: {
+        plan: 'Kimi For Coding',
+        limits: [{ detail: { limit: 1000, remaining: 400, resetTime: '2026-09-01T00:00:00Z' } }],
+        usage: { limit: 5000, remaining: 2000 },
+      },
+    })
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, kimiApiKey: 'kimi-key' },
+      [{ provider: 'kimi-coding' }],
+    )
+    const kimi = quotas[0]
+    expect(kimi?.provider).toBe('kimi-coding')
+    expect(kimi?.status).toBe('ok')
+    expect(kimi?.plan).toBe('Kimi For Coding')
+    expect(kimi?.windows).toHaveLength(2)
+    // 会话窗口：已用 600/1000 → 剩余 40%。
+    expect(kimi?.windows[0]).toMatchObject({ kind: 'session', remainingPercent: 40 })
+    // 周窗口：已用 3000/5000 → 剩余 40%。
+    expect(kimi?.windows[1]).toMatchObject({ kind: 'weekly', remainingPercent: 40 })
+  })
+
+  it('keeps the session window when its quota is exhausted (remaining=0)', async () => {
+    // 本次额度用尽：remaining=0，接口可能把 limit 报为 0（无正额度）。
+    stubFetch({
+      data: {
+        plan: 'Kimi For Coding',
+        limits: [{ detail: { limit: 0, remaining: 0, resetTime: '2026-08-22T00:00:00Z' } }],
+        usage: { limit: 5000, remaining: 3000 },
+      },
+    })
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, kimiApiKey: 'kimi-key' },
+      [{ provider: 'kimi-coding' }],
+    )
+    const kimi = quotas[0]
+    expect(kimi?.status).toBe('ok')
+    expect(kimi?.windows).toHaveLength(2)
+    // 本次窗口必须保留，标记为已用尽（remainingPercent 0）。
+    expect(kimi?.windows[0]).toMatchObject({ kind: 'session', usedPercent: 100, remainingPercent: 0, remaining: 0 })
+    // 周窗口未用尽，照常返回剩余百分比。
+    expect(kimi?.windows[1]).toMatchObject({ kind: 'weekly', remainingPercent: 60 })
+  })
+
+  it('keeps the session window when Kimi omits the remaining field (exhausted)', async () => {
+    // 用尽后 Kimi 可能把 remaining 置为 null/缺省，只保留 limit 与 resetTime。
+    stubFetch({
+      data: {
+        plan: 'Kimi For Coding',
+        limits: [{ detail: { limit: 0, remaining: null, resetTime: '2026-08-22T00:00:00Z' } }],
+        usage: { limit: 5000, remaining: 3000 },
+      },
+    })
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, kimiApiKey: 'kimi-key' },
+      [{ provider: 'kimi-coding' }],
+    )
+    const kimi = quotas[0]
+    expect(kimi?.status).toBe('ok')
+    expect(kimi?.windows).toHaveLength(2)
+    // remaining 缺失时按用尽处理，窗口保留（剩余 0%）。
+    expect(kimi?.windows[0]).toMatchObject({ kind: 'session', usedPercent: 100, remainingPercent: 0 })
+  })
+
+  it('maps an unauthorized upstream answer to the status', async () => {
+    stubFetch({}, 401)
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, kimiApiKey: 'bad' },
+      [{ provider: 'kimi-coding' }],
+    )
+    expect(quotas[0]?.status).toBe('unauthorized')
+  })
+
+  it('degrades unknown plan ids to unavailable without a network call', async () => {
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    const quotas = await collectSubscriptions(EMPTY_SUBSCRIPTION_KEYS, [{ provider: 'not-a-real-provider' }])
+    expect(quotas).toHaveLength(1)
+    expect(quotas[0]).toMatchObject({ provider: 'not-a-real-provider', status: 'unavailable' })
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+})
+
+describe('collectSubscriptions MiniMax baseUrl routing', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('queries the MiniMax CN endpoint for `minimax-token-plan-cn`', async () => {
+    const fetchSpy = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ model_remains: [{ model_name: 'general', current_interval_status: 1, current_interval_remaining_percent: 90, current_weekly_status: 1, current_weekly_remaining_percent: 80 }] }),
+    }))
+    vi.stubGlobal('fetch', fetchSpy)
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, minmaxApiKey: 'cn-key' },
+      [{ provider: 'minimax-token-plan-cn' }],
+    )
+    expect(quotas[0]).toMatchObject({
+      provider: 'minimax-token-plan-cn',
+      status: 'ok',
+      displayName: 'MiniMax Token Plan（国内）',
+    })
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('https://api.minimaxi.com/v1/token_plan/remains')
+    expect((init.headers as Record<string, string>).authorization).toBe('Bearer cn-key')
+  })
+
+  it('treats `minimax-cn` as an alias for the MiniMax CN endpoint', async () => {
+    // DSH pi-ai's installed catalog ships `minimax-cn` as the official
+    // domestic route (https://api.minimaxi.com). It must hit the same CN
+    // /v1/token_plan/remains endpoint as `minimax-token-plan-cn`, otherwise
+    // domestic users won't see the Token Plan quota row in the dashboard.
+    const fetchSpy = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ model_remains: [{ model_name: 'general', current_interval_status: 1, current_interval_remaining_percent: 90, current_weekly_status: 1, current_weekly_remaining_percent: 80 }] }),
+    }))
+    vi.stubGlobal('fetch', fetchSpy)
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, minmaxApiKey: 'cn-key' },
+      [{ provider: 'minimax-cn' }],
+    )
+    expect(quotas[0]).toMatchObject({
+      provider: 'minimax-cn',
+      status: 'ok',
+      displayName: 'MiniMax Token Plan（国内）',
+    })
+    const [url] = fetchSpy.mock.calls[0] as unknown as [string]
+    expect(url).toBe('https://api.minimaxi.com/v1/token_plan/remains')
+  })
+
+  it('queries the international MiniMax endpoint for `minimax`/`minimax-token-plan`', async () => {
+    const fetchSpy = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ model_remains: [{ model_name: 'general', current_interval_status: 1, current_interval_remaining_percent: 90, current_weekly_status: 1, current_weekly_remaining_percent: 80 }] }),
+    }))
+    vi.stubGlobal('fetch', fetchSpy)
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, minmaxApiKey: 'intl-key' },
+      [{ provider: 'minimax-token-plan' }],
+    )
+    expect(quotas[0]).toMatchObject({
+      provider: 'minimax-token-plan',
+      status: 'ok',
+      displayName: 'MiniMax Token Plan',
+    })
+    const [url] = fetchSpy.mock.calls[0] as unknown as [string]
+    expect(url).toBe('https://www.minimaxi.com/v1/token_plan/remains')
+  })
+
+  it('honors an explicit per-plan baseUrl origin over the region default', async () => {
+    const fetchSpy = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ model_remains: [] }),
+    }))
+    vi.stubGlobal('fetch', fetchSpy)
+    await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, minmaxApiKey: 'any-key' },
+      [{ provider: 'minimax-token-plan-cn', baseUrl: 'https://staging.example.com/minimax-cn' }],
+    )
+    const [url] = fetchSpy.mock.calls[0] as unknown as [string]
+    // issue #75：显式 origin 仍覆盖 region 默认，但 chat 网关风格的路径前缀
+    // （/minimax-cn）不再进订阅端点——版本段由 miniMaxEndpoint 自行补齐。
+    expect(url).toBe('https://staging.example.com/v1/token_plan/remains')
+  })
+})
+
+describe('parseMiniMaxRemains', () => {
+  it('extracts 5h/7d windows from the general model_remains row', () => {
+    const windows = parseMiniMaxRemains({
+      model_remains: [{
+        model_name: 'general',
+        current_interval_status: 1,
+        current_interval_remaining_percent: 60,
+        current_weekly_status: 1,
+        current_weekly_remaining_percent: 30,
+        end_time: '2026-08-22T12:00:00Z',
+        weekly_end_time: '2026-08-28T00:00:00Z',
+      }],
+    })
+    expect(windows).toHaveLength(2)
+    // 5h 档：剩余 60% → 已用 40%。
+    expect(windows[0]).toMatchObject({ kind: 'session', usedPercent: 40, remainingPercent: 60 })
+    // 7d 档：剩余 30% → 已用 70%。
+    expect(windows[1]).toMatchObject({ kind: 'weekly', usedPercent: 70, remainingPercent: 30 })
+  })
+
+  it('skips unlimited (status=3) windows', () => {
+    const windows = parseMiniMaxRemains({
+      model_remains: [{
+        model_name: 'general',
+        current_interval_status: 3,
+        current_interval_remaining_percent: 60,
+        current_weekly_status: 3,
+        current_weekly_remaining_percent: 30,
+      }],
+    })
+    expect(windows).toEqual([])
+  })
+})
+
+describe('collectMiniMax key/region discrimination (sk-cp- vs sk-)', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  const remains = async () => ({ ok: true, status: 200, json: async () => ({ model_remains: [{ model_name: 'general', current_interval_status: 1, current_interval_remaining_percent: 90, current_weekly_status: 1, current_weekly_remaining_percent: 80 }] }) })
+
+  it('recognises a sk-cp- Token Plan key without a hint', async () => {
+    const fetchSpy = vi.fn(remains)
+    vi.stubGlobal('fetch', fetchSpy)
+    const [row] = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, minmaxApiKey: ['sk', 'cp', 'abc123'].join('-') },
+      [{ provider: 'minimax-cn' }],
+    )
+    expect(row).toMatchObject({ status: 'ok', windows: [{ kind: 'session' }, { kind: 'weekly' }] })
+    expect((row as { hint?: string }).hint).toBeUndefined()
+  })
+
+  it('flags a non sk-cp- key that still returns quota', async () => {
+    const fetchSpy = vi.fn(remains)
+    vi.stubGlobal('fetch', fetchSpy)
+    const [row] = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, minmaxApiKey: ['sk', 'plain', 'key'].join('-') },
+      [{ provider: 'minimax-cn' }],
+    )
+    expect(row).toMatchObject({ status: 'ok' })
+    expect((row as { hint?: string }).hint).toContain('sk-cp-')
+  })
+
+  it('gives a non-token hint when a plain key returns no quota', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ model_remains: [] }) })))
+    const [row] = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, minmaxApiKey: ['sk', 'plain', 'key'].join('-') },
+      [{ provider: 'minimax-cn' }],
+    )
+    expect(row).toMatchObject({ status: 'invalid-response' })
+    expect((row as { hint?: string }).hint).toContain('按量')
+  })
+
+  it('gives a region hint when a sk-cp- key returns no quota', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ model_remains: [] }) })))
+    const [row] = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, minmaxApiKey: ['sk', 'cp', 'abc123'].join('-') },
+      [{ provider: 'minimax-cn' }],
+    )
+    expect(row).toMatchObject({ status: 'invalid-response' })
+    expect((row as { hint?: string }).hint).toContain('region')
+  })
+})
+
+describe('parseOpenRouterCredits', () => {
+  it('maps credits usage to a used-percent billing window', () => {
+    const windows = parseOpenRouterCredits({ data: { total_credits: 100, total_usage: 25 } })
+    expect(windows).toHaveLength(1)
+    expect(windows[0]).toMatchObject({ kind: 'billing', usedPercent: 25, remainingPercent: 75 })
+  })
+
+  it('returns empty when credits are missing or zero', () => {
+    expect(parseOpenRouterCredits({ data: {} })).toEqual([])
+    expect(parseOpenRouterCredits({ data: { total_credits: 0, total_usage: 5 } })).toEqual([])
+    expect(parseOpenRouterCredits(null)).toEqual([])
+  })
+})
+
+describe('vendor hints (Management Key / OpenCode auth note)', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('tells the user that OpenRouter needs a Management Key when it 401s', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 401, json: async () => ({}) })))
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, openrouterApiKey: 'inference-key' },
+      [{ provider: 'openrouter' }],
+    )
+    expect(quotas[0]).toMatchObject({ status: 'unauthorized' })
+    expect(quotas[0]?.hint).toContain('Management Key')
+  })
+
+  it('notes the Management Key requirement when the OpenRouter key is unconfigured', async () => {
+    vi.stubGlobal('fetch', vi.fn())
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS },
+      [{ provider: 'openrouter' }],
+    )
+    expect(quotas[0]).toMatchObject({ status: 'not-configured' })
+    expect(quotas[0]?.hint).toContain('Management Key')
+  })
+
+  it('notes the auth.json fallback when the OpenCode key is unconfigured', async () => {
+    vi.stubGlobal('fetch', vi.fn())
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS },
+      [{ provider: 'opencode-go' }],
+    )
+    expect(quotas[0]).toMatchObject({ status: 'not-configured' })
+    expect(quotas[0]?.hint).toContain('auth.json')
+  })
+})
+
+describe('tencent-token-plan adapter (TokenHub control plane)', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('is identified with an adapter and a display name', () => {
+    const identified = identifySubscriptionPlans({ 'tencent-token-plan': { apiKeyEnv: 'TENCENT_TOKEN_PLAN_API_KEY' } })
+    expect(identified).toHaveLength(1)
+    expect(identified[0]).toMatchObject({ provider: 'tencent-token-plan', adapter: true, displayName: '腾讯云 Token Plan' })
+  })
+
+  it('degrades to not-configured with a credential-format hint when no key is set', async () => {
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS },
+      [{ provider: 'tencent-token-plan' }],
+    )
+    expect(quotas[0]).toMatchObject({ provider: 'tencent-token-plan', status: 'not-configured' })
+    expect(quotas[0]?.hint).toContain('SecretId')
+  })
+
+  it('marks a non cloud-API credential (inference key without colon) unauthorized', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, tencentCloudApi: ['sk', 'inference', 'key'].join('-') },
+      [{ provider: 'tencent-token-plan' }],
+    )
+    expect(quotas[0]).toMatchObject({ status: 'unauthorized' })
+    // 未通过凭据格式校验就绝不发网络请求。
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('queries plan list then detail and maps remaining/total into a monthly window', async () => {
+    // TC3 管控面两跳：先 DescribeTokenPlanList 取 TeamId，再 DescribeTokenPlan 读额度。
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const action = new Headers(init?.headers).get('x-tc-action') ?? ''
+      const envelope = action === 'describetokenplanlist'
+        ? { Response: { TeamSet: [{ TeamId: 'team-1', Status: 'enable' }] } }
+        : { Response: { Name: 'Token Plan Pro', PackageInfo: { TotalQuota: 1000, RemainingQuota: 250 } } }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => envelope,
+      }
+    }))
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, tencentCloudApi: 'AKIDexample:secret-key' },
+      [{ provider: 'tencent-token-plan' }],
+    )
+    expect(quotas[0]).toMatchObject({ status: 'ok', plan: 'Token Plan Pro' })
+    expect(quotas[0]?.windows).toHaveLength(1)
+    expect(quotas[0]?.windows[0]).toMatchObject({ kind: 'monthly', remainingPercent: 25, usedPercent: 75, remaining: 250 })
+  })
+
+  it('keeps windows empty when only the remaining amount is exposed (never guesses total)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const action = new Headers(init?.headers).get('x-tc-action') ?? ''
+      const envelope = action === 'describetokenplanlist'
+        ? { Response: { TeamSet: [{ TeamId: 'team-1', Status: 'enable' }] } }
+        : { Response: { PackageInfo: { RemainingQuota: 250 } } }
+      return { ok: true, status: 200, json: async () => envelope }
+    }))
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, tencentCloudApi: 'AKIDexample:secret-key' },
+      [{ provider: 'tencent-token-plan' }],
+    )
+    expect(quotas[0]?.status).toBe('ok')
+    expect(quotas[0]?.windows).toHaveLength(0)
+  })
+})
+
+describe('anthropic adapter (Claude Pro/Max OAuth usage)', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('is not identified from a bare anthropic llm-pi-ai route (pay-as-you-go must stay metered)', () => {
+    // anthropic 有意不在 SUBSCRIPTION_ID_RE：该正则同时是聚合层按 token 计费的
+    // 豁免判定，按量 sk-ant key 一旦豁免费用会错误归零。订阅行走 Claude Code
+    // 登录态自动发现补行（resolveSubscriptionKeys），不经这张正则。
+    const identified = identifySubscriptionPlans({ 'anthropic': { apiKeyEnv: 'ANTHROPIC_API_KEY' } })
+    expect(identified).toEqual([])
+  })
+
+  it('maps five_hour/seven_day onto session/weekly and drops model-scoped sub-windows', () => {
+    const windows = parseAnthropicUsage({
+      five_hour: { utilization: 42.5, resets_at: 1_789_600_000 },
+      seven_day: { utilization: 18, resets_at: 1_789_900_000 },
+      // 单模型系列子配额：口径更窄，整体丢弃，不得覆盖主窗口。
+      seven_day_sonnet: { utilization: 3, resets_at: 1_789_900_000 },
+      five_hour_opus: { utilization: 9 },
+      extra_usage: { utilization: 7 },
+    })
+    expect(windows).toHaveLength(2)
+    expect(windows[0]).toMatchObject({ kind: 'session', usedPercent: 42.5, remainingPercent: 57.5 })
+    expect(windows[1]).toMatchObject({ kind: 'weekly', usedPercent: 18, remainingPercent: 82 })
+  })
+
+  it('clamps out-of-range utilization and skips windows without a percent', () => {
+    const windows = parseAnthropicUsage({
+      five_hour: { utilization: 140 },
+      seven_day: { resets_at: 1_789_900_000 },
+    })
+    expect(windows).toHaveLength(1)
+    expect(windows[0]).toMatchObject({ kind: 'session', usedPercent: 100, remainingPercent: 0 })
+  })
+
+  it('returns empty for a null/shapeless body', () => {
+    expect(parseAnthropicUsage(null)).toEqual([])
+    expect(parseAnthropicUsage({})).toEqual([])
+  })
+
+  it('hits the OAuth usage endpoint with the bearer token', async () => {
+    const fetchSpy = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ five_hour: { utilization: 10, resets_at: 1_789_600_000 } }),
+    }))
+    vi.stubGlobal('fetch', fetchSpy)
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, anthropicApiKey: 'oauth-token' },
+      [{ provider: 'anthropic' }],
+    )
+    expect(quotas[0]).toMatchObject({ provider: 'anthropic', status: 'ok', displayName: 'Claude (Anthropic)' })
+    expect(quotas[0]?.windows).toHaveLength(1)
+    const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('https://api.anthropic.com/api/oauth/usage')
+    expect((init.headers as Record<string, string>).authorization).toBe('Bearer oauth-token')
+  })
+
+  it('degrades to not-configured with an OAuth hint when no token is found', async () => {
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS },
+      [{ provider: 'anthropic' }],
+    )
+    expect(quotas[0]).toMatchObject({ status: 'not-configured' })
+    expect(quotas[0]?.hint).toContain('.credentials.json')
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('maps a 401 to unauthorized', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 401, json: async () => ({}) })))
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, anthropicApiKey: 'expired-token' },
+      [{ provider: 'anthropic' }],
+    )
+    expect(quotas[0]?.status).toBe('unauthorized')
+  })
+})
+
+describe('commandcode adapter (5h/weekly windows + monthly credits)', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('is identified from a commandcode llm-pi-ai route with an adapter', () => {
+    const identified = identifySubscriptionPlans({ 'commandcode': { apiKeyEnv: 'COMMANDCODE_API_KEY' } })
+    expect(identified).toHaveLength(1)
+    expect(identified[0]).toMatchObject({ provider: 'commandcode', adapter: true, displayName: 'CommandCode' })
+  })
+
+  it('maps fiveHour/weekly used-cap rows onto session/weekly windows', () => {
+    const windows = parseCommandCodeCredits({
+      windowLimits: {
+        fiveHour: { used: 30, cap: 100, resetAt: 1_789_600_000_000 },
+        weekly: { used: 250, cap: 1000, resetAt: 1_789_900_000_000 },
+      },
+      credits: { monthlyCredits: 84.5 },
+    })
+    expect(windows).toHaveLength(2)
+    expect(windows[0]).toMatchObject({ kind: 'session', usedPercent: 30, remainingPercent: 70 })
+    expect(windows[1]).toMatchObject({ kind: 'weekly', usedPercent: 25, remainingPercent: 75 })
+  })
+
+  it('skips rows without a positive cap and yields no window from the credits pool', () => {
+    // monthlyCredits 是余额池（无总量字段），算不出百分比，不产出窗口。
+    const windows = parseCommandCodeCredits({
+      windowLimits: {
+        fiveHour: { used: 30 },
+        weekly: { used: 0, cap: 0 },
+      },
+      credits: { monthlyCredits: 120 },
+    })
+    expect(windows).toEqual([])
+    expect(parseCommandCodeCredits(null)).toEqual([])
+  })
+
+  it('hits the billing credits endpoint with the bearer key', async () => {
+    const fetchSpy = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ windowLimits: { fiveHour: { used: 10, cap: 100 } } }),
+    }))
+    vi.stubGlobal('fetch', fetchSpy)
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, commandcodeApiKey: 'user_abc' },
+      [{ provider: 'commandcode' }],
+    )
+    expect(quotas[0]).toMatchObject({ provider: 'commandcode', status: 'ok', displayName: 'CommandCode' })
+    expect(quotas[0]?.windows).toHaveLength(1)
+    const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('https://api.commandcode.ai/alpha/billing/credits')
+    expect((init.headers as Record<string, string>).authorization).toBe('Bearer user_abc')
+  })
+
+  it('degrades to not-configured with a key hint when unconfigured', async () => {
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS },
+      [{ provider: 'commandcode' }],
+    )
+    expect(quotas[0]).toMatchObject({ status: 'not-configured' })
+    expect(quotas[0]?.hint).toContain('user_')
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('keeps the chat path prefix out of the billing endpoint (issue #75)', async () => {
+    // 用户在 chat 路由上配的 baseUrl 带网关前缀（/provider/v1）；订阅端点挂在
+    // origin 下，整段拼接会打出 /provider/v1/alpha/... 而 404。
+    const fetchSpy = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ windowLimits: { fiveHour: { used: 10, cap: 100 } } }),
+    }))
+    vi.stubGlobal('fetch', fetchSpy)
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, commandcodeApiKey: 'user_abc' },
+      [{ provider: 'commandcode', baseUrl: 'https://api.commandcode.ai/provider/v1' }],
+    )
+    expect(quotas[0]).toMatchObject({ status: 'ok' })
+    const [url] = fetchSpy.mock.calls[0] as unknown as [string]
+    expect(url).toBe('https://api.commandcode.ai/alpha/billing/credits')
+  })
+
+  it('falls back to the official origin when baseUrl is not a valid URL', async () => {
+    const fetchSpy = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ windowLimits: { weekly: { used: 5, cap: 100 } } }),
+    }))
+    vi.stubGlobal('fetch', fetchSpy)
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, commandcodeApiKey: 'user_abc' },
+      [{ provider: 'commandcode', baseUrl: 'not a url' }],
+    )
+    expect(quotas[0]).toMatchObject({ status: 'ok' })
+    const [url] = fetchSpy.mock.calls[0] as unknown as [string]
+    expect(url).toBe('https://api.commandcode.ai/alpha/billing/credits')
+  })
+
+  it('applies the same origin rule to the other subscription adapters (kimi)', async () => {
+    const fetchSpy = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: {
+          plan: 'Kimi For Coding',
+          limits: [{ detail: { limit: 100, remaining: 50 } }],
+          usage: { limit: 100, remaining: 50 },
+        },
+      }),
+    }))
+    vi.stubGlobal('fetch', fetchSpy)
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, kimiApiKey: 'kimi-key' },
+      [{ provider: 'kimi-coding', baseUrl: 'https://api.kimi.com/v1' }],
+    )
+    expect(quotas[0]).toMatchObject({ status: 'ok' })
+    const [url] = fetchSpy.mock.calls[0] as unknown as [string]
+    expect(url).toBe('https://api.kimi.com/coding/v1/usages')
+  })
+})
+
+describe('Z.ai Coding Plan (zai-coding / zai-coding-cn)', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  // 真实响应结构（抓包自 z.ai coding plan 账号）：5 小时 / 周两个 TOKENS_LIMIT
+  // 窗（percentage 直给），外加一条 TIME_LIMIT 计费窗。
+  const ZAI_QUOTA_BODY = {
+    code: 200,
+    msg: 'Operation successful',
+    data: {
+      limits: [
+        { type: 'TOKENS_LIMIT', unit: 3, number: 5, percentage: 56, nextResetTime: 1790963959375 },
+        { type: 'TOKENS_LIMIT', unit: 6, number: 1, percentage: 11, nextResetTime: 1791550732999 },
+        { type: 'TIME_LIMIT', unit: 5, number: 1, usage: 100, currentValue: 1, remaining: 99, percentage: 1, nextResetTime: 1791452191983 },
+      ],
+      level: 'lite',
+    },
+    success: true,
+  }
+  const ZAI_SUBSCRIPTION_BODY = {
+    code: 200,
+    msg: 'Operation successful',
+    data: [{ product_name: 'GLM Coding Pro', next_renew_time: 1791550732999 }],
+    success: true,
+  }
+
+  /** Answer quota requests per host so both regions can share one spy. */
+  function stubZaiFetch(): ReturnType<typeof vi.fn> {
+    const fetchSpy = vi.fn(async (url: string | URL | Request) => ({
+      ok: true,
+      status: 200,
+      json: async () => (String(url).includes('/api/biz/subscription') ? ZAI_SUBSCRIPTION_BODY : ZAI_QUOTA_BODY),
+    }))
+    vi.stubGlobal('fetch', fetchSpy)
+    return fetchSpy
+  }
+
+  it('identifies both Z.ai routes as adapter-backed plans with fixed regions', () => {
+    const identified = identifySubscriptionPlans({
+      'zai-coding-cn': { apiKeyEnv: 'ZAI_CN_API_KEY' },
+      'zai-coding': { apiKeyEnv: 'ZAI_API_KEY' },
+    })
+    expect(identified).toEqual([
+      { provider: 'zai-coding-cn', displayName: 'Z.ai Coding Plan（国内）', adapter: true, region: 'bigmodel-cn' },
+      { provider: 'zai-coding', displayName: 'Z.ai Coding Plan', adapter: true, region: 'global' },
+    ])
+  })
+
+  it('queries api.z.ai with the raw international key and parses three windows', async () => {
+    const fetchSpy = stubZaiFetch()
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, zaiApiKey: 'intl-key' },
+      [{ provider: 'zai-coding' }],
+    )
+    expect(quotas[0]).toMatchObject({
+      provider: 'zai-coding',
+      displayName: 'Z.ai Coding Plan',
+      plan: 'GLM Coding Pro',
+      status: 'ok',
+    })
+    expect(quotas[0]?.windows.map(window => window.usedPercent)).toEqual([56, 11, 1])
+    const urls = fetchSpy.mock.calls.map(call => String(call[0]))
+    expect(urls[0]).toBe('https://api.z.ai/api/monitor/usage/quota/limit')
+    expect(urls[1]).toBe('https://api.z.ai/api/biz/subscription/list')
+    const [, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit]
+    // Coding Plan 端点要求裸 key（非 Bearer 前缀）。
+    expect((init.headers as Record<string, string>).authorization).toBe('intl-key')
+  })
+
+  it('routes domestic and international keys to their own hosts (no cross-talk)', async () => {
+    // 不同于 MiniMax 的同 key 双域：Z.ai 国内 / 国际是两个平台的独立 key，
+    // 各 route 打各的 host、带各的 key。
+    const fetchSpy = stubZaiFetch()
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, zaiCnApiKey: 'cn-key', zaiApiKey: 'intl-key' },
+      [
+        { provider: 'zai-coding-cn', region: 'bigmodel-cn' },
+        { provider: 'zai-coding', region: 'global' },
+      ],
+    )
+    expect(quotas.map(quota => quota.displayName)).toEqual(['Z.ai Coding Plan（国内）', 'Z.ai Coding Plan'])
+    const authByUrl = new Map(fetchSpy.mock.calls.map(call => [String(call[0]), ((call[1] as RequestInit).headers as Record<string, string>).authorization]))
+    expect(authByUrl.get('https://open.bigmodel.cn/api/monitor/usage/quota/limit')).toBe('cn-key')
+    expect(authByUrl.get('https://api.z.ai/api/monitor/usage/quota/limit')).toBe('intl-key')
+  })
+
+  it('reports not-configured for an empty key without touching the network', async () => {
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    const quotas = await collectSubscriptions({ ...EMPTY_SUBSCRIPTION_KEYS }, [{ provider: 'zai-coding' }])
+    expect(quotas[0]).toMatchObject({ provider: 'zai-coding', status: 'not-configured' })
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+})
+
+describe('Z.ai 200-enveloped business errors (found in source-host verification)', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('classifies a 200-wrapped 401 envelope as unauthorized, not invalid-response', async () => {
+    // 实测 api.z.ai 对坏 key 回 HTTP 200 + {"code":401,"msg":...,"success":false}，
+    // 只看 HTTP 层会把它误报成 invalid-response，用户拿不到"检查 key"的定向提示。
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ code: 401, msg: 'token expired or incorrect', success: false }),
+    })))
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, zaiApiKey: 'bad-key' },
+      [{ provider: 'zai-coding' }],
+    )
+    expect(quotas[0]).toMatchObject({ provider: 'zai-coding', status: 'unauthorized' })
+  })
+
+  it('keeps parsing normal envelopes untouched', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ code: 200, msg: 'Operation successful', data: { limits: [], level: 'lite' }, success: true }),
+    })))
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, zaiApiKey: 'good-key' },
+      [{ provider: 'zai-coding' }],
+    )
+    expect(quotas[0]).toMatchObject({ status: 'invalid-response' })
+  })
+
+  it('treats an enveloped subscription body as absent data, keeping quota windows', async () => {
+    // quota 正常但订阅端点回 200 信封错误：plan 标签是可选增强，降级为 quota 的
+    // level 字段，额度窗解析不受影响（与订阅请求的网络失败同语义）。
+    const ZAI_QUOTA_BODY = {
+      code: 200,
+      msg: 'Operation successful',
+      data: {
+        limits: [
+          { type: 'TOKENS_LIMIT', unit: 3, number: 5, percentage: 56, nextResetTime: 1790963959375 },
+          { type: 'TOKENS_LIMIT', unit: 6, number: 1, percentage: 11, nextResetTime: 1791550732999 },
+        ],
+        level: 'lite',
+      },
+      success: true,
+    }
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request) => ({
+      ok: true,
+      status: 200,
+      json: async () => (String(url).includes('/api/biz/subscription')
+        ? { code: 500, msg: 'internal error', success: false }
+        : ZAI_QUOTA_BODY),
+    })))
+    const quotas = await collectSubscriptions(
+      { ...EMPTY_SUBSCRIPTION_KEYS, zaiApiKey: 'good-key' },
+      [{ provider: 'zai-coding' }],
+    )
+    expect(quotas[0]).toMatchObject({ status: 'ok', plan: 'lite' })
+    expect(quotas[0]?.windows.map(window => window.usedPercent)).toEqual([56, 11])
+  })
+})
+
+describe('parseOpenCodeAuthDocument', () => {
+  it('reads the provider-bucketed auth.json OpenCode actually writes', () => {
+    // 实测形态（issue：回退一直读不到）：{"opencode-go": {"type": "api", "key": "..."}}
+    const token = parseOpenCodeAuthDocument({
+      'opencode-go': { type: 'api', key: 'oc-go-token' },
+      'minimax-cn-coding-plan': { type: 'api', key: 'other-provider-key' },
+    })
+    expect(token).toBe('oc-go-token')
+  })
+
+  it('still accepts the flat shapes and rejects unusable documents', () => {
+    expect(parseOpenCodeAuthDocument({ token: 'flat-token' })).toBe('flat-token')
+    expect(parseOpenCodeAuthDocument({ key: 'flat-key' })).toBe('flat-key')
+    expect(parseOpenCodeAuthDocument('bare-string-token')).toBe('bare-string-token')
+    expect(parseOpenCodeAuthDocument({})).toBe('')
+    expect(parseOpenCodeAuthDocument(null)).toBe('')
+    expect(parseOpenCodeAuthDocument({ 'opencode-go': { type: 'api' } })).toBe('')
+  })
+})
+
+describe('MiniMax plan classification by key prefix (订阅豁免按 key 而非路由 id)', () => {
+  const refs = (table: Record<string, string>) => async (name: string) => table[name]
+
+  it('recognizes the MiniMax route family and nothing else', () => {
+    for (const id of ['minimax', 'minimax-cn', 'minimax-token-plan', 'minimax-token-plan-cn']) {
+      expect(isMiniMaxProviderId(id)).toBe(true)
+    }
+    for (const id of ['minimax-m3', 'kimi-coding', 'minimaxi', 'deepseek']) {
+      expect(isMiniMaxProviderId(id)).toBe(false)
+    }
+  })
+
+  it('marks a route as Coding Plan only when its own key starts with sk-cp-', async () => {
+    const classified = await classifyMiniMaxPlanRoutes(
+      {
+        // 官方目录路由，新版宿主形态（key 在约定 ref）：套餐 key。
+        'minimax-cn': { hasModels: true },
+        // 同族另一路由，显式 apiKeyEnv 指向按量 key。
+        'minimax': { apiKeyEnv: 'MY_MINIMAX_PAYG' },
+        // 非 MiniMax 路由不参与。
+        'kimi-coding': { hasModels: true },
+      },
+      refs({
+        MINIMAX_CN_API_KEY: ['sk', 'cp', 'abc'].join('-'),
+        MY_MINIMAX_PAYG: ['sk', 'plain'].join('-'),
+      }),
+    )
+    expect(classified.get('minimax-cn')).toBe(true)
+    expect(classified.get('minimax')).toBe(false)
+    expect(classified.has('kimi-coding')).toBe(false)
+  })
+
+  it('treats an unresolvable key as pay-as-you-go (conservative: no exemption)', async () => {
+    const classified = await classifyMiniMaxPlanRoutes({ 'minimax-token-plan-cn': { hasModels: true } }, refs({}))
+    expect(classified.get('minimax-token-plan-cn')).toBe(false)
+  })
+
+  it('lets an explicit apiKeyEnv win over the convention ref for the prefix check', async () => {
+    const classified = await classifyMiniMaxPlanRoutes(
+      { 'minimax-cn': { apiKeyEnv: 'EXPLICIT' } },
+      refs({
+        EXPLICIT: ['sk', 'plain'].join('-'),
+        MINIMAX_CN_API_KEY: ['sk', 'cp', 'shadow'].join('-'),
+      }),
+    )
+    expect(classified.get('minimax-cn')).toBe(false)
+  })
+})

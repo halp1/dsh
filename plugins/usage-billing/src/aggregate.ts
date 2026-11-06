@@ -1,0 +1,2738 @@
+/**
+ * Real-usage aggregation: folds every persisted session log into the
+ * usage-stats document the dashboard renders.
+ *
+ * Each LLM call is attributed to the `message.source` carried by its own
+ * `assistant/message` event (copied from the request at write time); the
+ * sparse `request/header` is only a fallback. Costs are estimated with the
+ * shared billing catalog (`pricing.ts`, in CNY), so only models the catalog
+ * prices incur a cost — subscription-plan routes and unknown models price
+ * zero while their tokens still count. Pure functions only: the persistence
+ * handle is injected, so the fold is unit-testable without a host.
+ */
+
+import { stat } from 'node:fs/promises'
+import * as sessionTypes from '@deepseek-ai/dsh-session/types'
+import type { SessionEvent, SessionHeader, SessionId, SessionLogOffset as SessionLogOffsetT } from '@deepseek-ai/dsh-session/types'
+import type { TokenUsage } from '@deepseek-ai/dsh-llm'
+import { isPriced, resolveCatalogKey, computeCostAt, modelOf, tierAt } from './client/pricing.ts'
+import { BUILTIN_MODEL_KEY_ALIASES } from './builtin-catalog.ts'
+import { isSubscriptionProviderId } from './subscriptions.ts'
+
+/** 会话日志偏移：宿主 0.1.2-alpha.4 前的 dsh-session/types 不导出 SessionLogOffset
+ * 值，具名导入让这些宿主装载即崩（v1.4.19~v1.4.22 实测，alpha.3 真机复现）；
+ * namespace 导入不做具名导出校验，缺导出时退化为恒等——偏移类型是
+ * BrandedNumber，值域与 number 同构，老宿主的 readFrom 原样收数字。 */
+export const sessionLogOffsetOf: (value: number) => SessionLogOffsetT =
+  (sessionTypes as { SessionLogOffset?: (value: number) => SessionLogOffsetT }).SessionLogOffset
+  ?? ((value: number): SessionLogOffsetT => value as SessionLogOffsetT)
+
+// 模型别名（真实 provider id → 计费目录键）数据本体在 builtin-catalog.ts，
+// 注入与消费逻辑在 client/pricing.ts；聚合层折叠与客户端渲染共用同一张表，
+// 避免两侧不一致导致「未收录」。
+export { BUILTIN_MODEL_KEY_ALIASES, resolveCatalogKey }
+
+/**
+ * 走订阅套餐（coding / token plan / opencode 订阅）的 provider id：这些通道的
+ * 调用按套餐计费，不再按 token 计费，因此即使模型 id 与计费表撞名也一律豁免。
+ * 此列表保留为显式配置的参考基线；聚合层缺省改用与订阅卡一致的
+ * `isSubscriptionProviderId` 判定（覆盖本列表与全部 `*-token-plan` / `*-coding` 变体），
+ * 部署仍可在 plugin config 的 `subscriptionProviders` 中显式覆盖。
+ */
+export const DEFAULT_SUBSCRIPTION_PROVIDERS: readonly string[] = [
+  'kimi-coding',
+  'zai-coding-cn',
+  'opencode',
+  'opencode-go',
+  'qwen-token-plan',
+  'qwen-token-plan-cn',
+  'xiaomi-token-plan-ams',
+  'xiaomi-token-plan-cn',
+  'xiaomi-token-plan-sgp',
+  'tencent-token-plan',
+  // 订阅管理插件（dsh-plugin-subscrip）注册的订阅直连：provider 名即官方订阅，
+  // 不经路由表——不豁免会落 unknown 桶并按 token 误计费（issue #37 的 grok build）。
+  'grok',
+]
+
+/**
+ * 官方渠道 provider id 判定：`deepseek` 前缀（DeepSeek 官方直连）视为官方，
+ * 其余 provider（第三方中转/代理）视为「三方」。用于「官方 vs 三方」token、
+ * 调用与费用分桶展示；部署可由配置覆盖（见 {@link AggregateOptions}）。
+ */
+export function isOfficialProvider(provider: string): boolean {
+  return /^deepseek(?:-[a-z0-9-]+)?$/i.test(provider.trim())
+}
+
+/**
+ * 已知的「第三方插件注册 adapter」通道名单：这些 provider 由别的插件经
+ * `ctx.llm.registerAdapter` 注册，**不经 llm-pi-ai 路由表**，因此
+ * {@link siteRefOf} 的路由查询必然 miss。与订阅豁免（issue #37 的 grok
+ * build）同构：显式列出、不做「猜通道」的通用发现——猜错会把来源不明的
+ * 路由也归位成可计价通道，违背 issue #82「支出主体无法核实不计价」的初衷。
+ *
+ * 收录语义：这些通道的支出主体是可核实的（WorkBuddy = 腾讯 WorkBuddy
+ * 桌面 App 账号），计费用模型官方目录价折算 Token 成本，与积分制解耦。
+ * 它们**不是** DeepSeek 官方渠道——{@link isOfficialProvider} 与
+ * {@link officialChannelOf} 都不会因本名单把调用算进官方口径。
+ */
+export const KNOWN_ADAPTER_PROVIDERS: ReadonlySet<string> = new Set([
+  // dsh-workbuddy-connect（corrinehu）：国内版 provider id。
+  'workbuddy',
+  // dsh-workbuddy-connect：国际版（WorkBuddy AI）provider id。
+  'workbuddy-ai',
+])
+
+/**
+ * 一个 provider 是否命中已知 adapter 通道名单。判定与 {@link isOfficialProvider}
+ * 同姿态：trim + 大小写不敏感——dsh-workbuddy-connect 注册的是小写 id
+ *（`workbuddy` / `workbuddy-ai`），宿主不强制 route 小写，按大小写归一化可避免
+ * 日志里出现大小写变体时静默落回 unknown 桶。路由表命中仍优先于本名单
+ *（见 {@link siteRefOf}），用户自配的大小写变体走配置路径。
+ */
+export function isKnownAdapterProvider(provider: string): boolean {
+  return KNOWN_ADAPTER_PROVIDERS.has(provider.trim().toLowerCase())
+}
+
+/** DeepSeek 官方直连端点的归一化 origin（`siteOriginOf` 口径）：有 baseURL 的路由只有它算官方。 */
+export const OFFICIAL_DEEPSEEK_ORIGIN = 'https://api.deepseek.com'
+
+/**
+ * 官方渠道判定（通道优先）：显式 `officialProviderIds` 配置最优先；否则看站点归组——
+ * 有 baseURL 的路由只有 origin 为 DeepSeek 官方域才算官方（修复：名为 `deepseek-*`
+ * 的中转/网关路由曾被按 id 前缀误判为官方，腾讯网关的 DeepSeek 全被计成官方渠道）；
+ * 直连路由（配置在册、无 baseURL）与路由表查不到的未知名都退回按 provider id
+ * 前缀判定——宿主内置的官方直连不经 llm-pi-ai 路由，其 provider 名不在路由表中，
+ * 按 unknown 一刀切会把它错杀成三方（回归修复）；配置外的同名网关残留可用
+ * `routeAliases` 显式归位到真实通道。
+ */
+export function officialChannelOf(
+  provider: string,
+  ref: SiteRef,
+  officialProviderIds?: ReadonlySet<string>,
+): boolean {
+  if (officialProviderIds !== undefined) return officialProviderIds.has(provider)
+  if (ref.kind === 'site') return ref.origin === OFFICIAL_DEEPSEEK_ORIGIN
+  return isOfficialProvider(provider)
+}
+
+/**
+ * 订阅制 provider 匹配器：显式列表（配置覆盖）或判定函数（默认
+ * {@link isSubscriptionProviderId}，与订阅卡识别同一正则口径，修复两者不一致）。
+ */
+export type SubscriptionMatcher = ReadonlySet<string> | ((provider: string) => boolean)
+
+/** 一个 provider 是否走订阅套餐计费（豁免按 token 计价）。 */
+export function isSubscriptionCall(subscription: SubscriptionMatcher, provider: string): boolean {
+  return typeof subscription === 'function' ? subscription(provider) : subscription.has(provider)
+}
+
+// ── 中转站（站点）归组 ──────────────────────────────────────────────────────
+
+/** 一个 provider 路由的站点视图（来自 llm-pi-ai providers 的 baseURL）。 */
+export interface ProviderRouteView {
+  /** 该路由配置的端点地址；无值 = 直连厂商（非中转站）。 */
+  baseURL?: string
+}
+
+/** 站点归属分类：site=中转站（有 baseURL origin）；direct=直连；unknown=未知路由（配置已删）。 */
+export type SiteKind = 'site' | 'direct' | 'unknown'
+
+/** 一个 provider 路由归类后的站点引用。 */
+export interface SiteRef {
+  kind: SiteKind
+  /** 站点归一化 origin（仅 site）。 */
+  origin?: string
+  /** 原 provider 路由名。 */
+  provider: string
+}
+
+/** 由 baseURL 归一化出站点 origin（协议 + 主机 + 端口）；解析失败回退原值。 */
+export function siteOriginOf(baseURL: string): string {
+  try {
+    return new URL(baseURL).origin
+  } catch {
+    return baseURL
+  }
+}
+
+/**
+ * 把一个 provider 路由归类为站点引用。判定顺序（与路由在 provider 配置里的状态一致）：
+ * - 路由存在于当前配置且配了 baseURL → 中转站 `site`（按 origin 归组，同站多 key 合并）；
+ * - 路由存在于当前配置但无 baseURL → 厂商直连 `direct`；
+ * - 路由不在当前配置里：内置官方直连（`deepseek` / `deepseek-*` 形态，不经 llm-pi-ai
+ *   网关）按 `direct` 归位——unknown 一刀切会把官方直连的费用堆进「未知路由」组、
+ *   且不算官方渠道（回归修复）；订阅豁免命中的通道（显式 `subscriptionProviders`
+ *   配置或判定函数）同样按 `direct` 归位——订阅管理类插件注册的通道不经路由表，
+ *   unknown 桶既掩盖归属又按 token 误计费（issue #37 的 grok build）；已知的第三方
+ *   插件注册 adapter 通道（{@link KNOWN_ADAPTER_PROVIDERS}，如 workbuddy）同样按
+ *   `direct` 归位——支出主体可核实、按模型官方目录价计 Token 成本，unknown 桶会让
+ *   费用恒为 0；其余配置外名称保留 unknown（无法核实通道）。
+ * @param provider - 会话日志里的 provider 路由名（request/header 的 `config.provider`）。
+ * @param routes - 当前 provider 路由视图（来自 llm-pi-ai providers）。
+ * @param opts - `subscription`：该调用是否已被订阅豁免判定命中。
+ */
+export function siteRefOf(
+  provider: string,
+  routes: Readonly<Record<string, ProviderRouteView>>,
+  opts: { subscription?: boolean } = {},
+): SiteRef {
+  const view = routes[provider]
+  if (view !== undefined) {
+    if (view.baseURL !== undefined) return { kind: 'site', origin: siteOriginOf(view.baseURL), provider }
+    return { kind: 'direct', provider }
+  }
+  if (isOfficialProvider(provider)) return { kind: 'direct', provider }
+  if (opts.subscription === true) return { kind: 'direct', provider }
+  if (isKnownAdapterProvider(provider)) return { kind: 'direct', provider }
+  return { kind: 'unknown', provider }
+}
+
+/** 站点桶的稳定 key：`site:<origin>` 与 `direct:<provider>` 分开，`unknown` 单一桶。 */
+export function siteBucketKey(ref: SiteRef): string {
+  if (ref.kind === 'site') return `site:${ref.origin ?? ''}`
+  if (ref.kind === 'direct') return `direct:${ref.provider}`
+  return 'unknown'
+}
+
+/**
+ * 站点桶按范围求和（usage_stats 工具的 bySite/relay 口径）：bySite 全量累计；
+ * relay 只计中转站桶（`site:<origin>` 键）——`direct:*` 与 `unknown` 不计入，
+ * 否则 relay 总额与 all 相同，中转站费用被高估。
+ */
+export function sumSiteBuckets(
+  bySite: Readonly<Record<string, { cost: number; calls: number; input: number; output: number }>>,
+  range: 'bySite' | 'relay',
+): { cost: number; calls: number; input: number; output: number } {
+  let cost = 0
+  let calls = 0
+  let input = 0
+  let output = 0
+  for (const [bucket, usage] of Object.entries(bySite)) {
+    if (range === 'relay' && !bucket.startsWith('site:')) continue
+    cost += usage.cost
+    calls += usage.calls
+    input += usage.input
+    output += usage.output
+  }
+  return { cost, calls, input, output }
+}
+
+/** Aggregation tuning options. */
+export interface AggregateOptions {
+  /** Retain catalog-cost estimates for historical providers no longer configured. */
+  estimateUnknownRoutes?: boolean
+  /** 订阅制 provider id 列表；缺省按订阅卡同款 id 判定（`isSubscriptionProviderId`）。 */
+  subscriptionProviders?: readonly string[]
+  /**
+   * 订阅判定集合（**引用语义**，优先于 subscriptionProviders）：聚合器直接持有
+   * 传入的 Set 实例，调用方可在运行期原地增删——同一路由 id 按量/套餐两用的
+   * 厂商（MiniMax：`sk-cp-` 前缀 key 才是 Coding Plan）只能按 key 动态判定；
+   * 集合内容变化经 configFingerprint（按内容序列化）自动触发历史行全量重折。
+   */
+  subscriptionMatcher?: ReadonlySet<string>
+  /** 官方渠道 provider id 列表；缺省按 {@link officialChannelOf} 判定（通道 origin 优先）。 */
+  officialProviderIds?: readonly string[]
+  /**
+   * 历史路由别名（旧路由名 → 当前路由名）：改过名 / 删除过的 provider 路由，
+   * 其历史用量原会落「未知路由」桶；配置别名后按目标路由归组（站点、订阅、
+   * 官方判定都用别名后的路由名）。
+   */
+  routeAliases?: Readonly<Record<string, string>>
+  /** 折叠时模型 id → 目录键的用户自定义别名（与 pricing 模块注入的同源）：仅用于
+   *  折叠指纹——别名改动必须让历史行失效重折，否则 byModel 新旧 key 并存（issue #91 P2）。 */
+  modelKeyAliases?: Readonly<Record<string, string>>
+  /** 每会话折叠缓存的上限（默认 {@link DEFAULT_MAX_CACHE_SESSIONS}）；
+   *  超限时按最近使用先后淘汰最久未用的会话，防长期运行内存膨胀。 */
+  maxCacheSessions?: number
+  /** 中转站归组来源：返回当前 provider 路由视图（llm-pi-ai providers 的 baseURL）。
+   *  每次聚合时调用取最新值；缺省时全部路由按「未知路由」处理（无配置发现）。 */
+  resolveRoutes?: () => Readonly<Record<string, ProviderRouteView>>
+  /** 已注册 adapter 的 provider 集合（宿主 llm 注册表，llm-pi-ai 之外的插件路由，
+   *  issue #91）：每次聚合时调用取最新值。这些通道宿主只会把请求发给已注册的
+   *  adapter，身份可核实——合成无 baseURL 的路由视图归位 `direct:<provider>` 按
+   *  官方目录价计费，不再落「未知路由」记 0；缺省时保持 unknown 口径。 */
+  resolveRegisteredProviders?: () => ReadonlySet<string>
+  /** 工作区标题解析：给定会话 cwd 返回项目显示标题；undefined = 回退到 cwd 末级目录名
+   *  （host 的 workspaceRegistry 为可选依赖，缺失时不注入，行为保持不变）。 */
+  resolveWorkspaceTitle?: (cwd: string) => string | undefined
+  /**
+   * 会话标题兜底解析：给定会话头（宿主持久层列表元数据）返回宿主侧的会话标题。
+   *
+   * 只在**日志读不动**的会话上用（宿主拒绝该格式/代际，插件折叠失败）：此时插件
+   * 只能吃账本里的旧行，标题会永远停在重命名前的值——宿主自己的投影缓存仍可能
+   * 记得这个标题（格式代际边缘的既定能力），用它兜底可让标题跟随工作区
+   * （issue #103）。读得动的会话一律以日志为准，本回调不参与。
+   */
+  resolveSessionTitle?: (header: SessionHeader) => string | undefined
+  /** 独立的持久用量账本。启用后，已经成功折叠过的会话即使随后从
+   *  sessionPersistence 中永久删除，也会继续计入累计用量。 */
+  ledger?: UsageLedgerStore
+  /** 联网搜索请求（`web/deepseek-search-llm-request`，无用量事件）的单次费用
+   *  估算（人民币元）；默认 {@link DEFAULT_SEARCH_CALL_ESTIMATE_CNY}，设 0 关闭。 */
+  searchCallEstimateCny?: number
+  /**
+   * 启动冷phase时长（毫秒，自聚合器创建起算，issue #105）：期间 aggregate()
+   * 只出账本轻文档——不 list 会话、不读任何日志，文档带 `staleSnapshot: true`，
+   * UI 一加载的轮询不再把「全量折叠」拉进启动关键路径。到点后首个请求（或预热
+   * 定时器）照常完整折叠。0 / 缺省 = 不设闸（旧行为：随到随折）。
+   */
+  deferFoldMs?: number
+}
+
+/** 每会话折叠缓存默认上限：超过则按 LRU 淘汰（P1-6 峰值内存治理）。 */
+export const DEFAULT_MAX_CACHE_SESSIONS = 400
+
+/** One model's aggregated usage plus estimated cost in CNY. */
+export interface ModelUsage {
+  calls: number
+  input: number
+  output: number
+  cacheHit: number
+  cacheMiss: number
+  /**
+   * 显式缓存写入 token（部分厂商单独计价的 cache creation）——已包含在
+   * `cacheMiss` 内，单列供结构展示；旧快照缺失。
+   */
+  cacheWrite?: number
+  cost: number
+  /** 输出中的 reasoning（思考）token；已包含在 `output` 内，单列用于结构展示。 */
+  reasoning: number
+  /** 该模型本次统计的所有调用是否都走订阅通道（coding/token plan）；混合通道不置位。 */
+  plan?: boolean
+  /** 走官方渠道的调用数（DeepSeek 官方直连；其余为三方）。 */
+  officialCalls: number
+  /** 走官方渠道的费用（CNY）；三方费用 = cost - officialCost。 */
+  officialCost: number
+  /**
+   * 联网搜索辅助请求的估算调用数（`web/deepseek-search-llm-request`，日志只有
+   * 请求无用量事件）；已按每次 `searchCallEstimateCny` 估算计入 `cost`，不计
+   * token。旧快照缺失。
+   */
+  searchCalls?: number
+}
+
+/** Zeroed usage accumulator. */
+export function emptyUsage(): ModelUsage {
+  return { calls: 0, input: 0, output: 0, cacheHit: 0, cacheMiss: 0, cost: 0, reasoning: 0, officialCalls: 0, officialCost: 0 }
+}
+
+/**
+ * Fold one token usage event into an accumulator and re-price its cost.
+ * The stats `input` is the TOTAL prompt tokens (cacheHit + cacheMiss), so the
+ * miss bucket is uncached input plus cache writes.
+ * @param acc - the accumulator to mutate.
+ * @param usage - the provider-reported usage of one call.
+ * @param key - the billing-catalog key this call belongs to.
+ * @param subscription - whether the call went through a subscription plan; such calls never cost money.
+ * @param timeMs - the call's wall-clock time (epoch ms); drives peak/off-peak pricing.
+ * @param official - whether the call went through the official DeepSeek channel (vs a third-party relay).
+ * @param pricedCost - 调用方预算好的本次费用（同一条消息折叠进多个桶时计价结果相同，
+ *   逐桶重算会让最热路径付出 N 倍常数）；提供时跳过内部的计价闸门与计算，
+ *   调用方保证其已按 `!subscription && isPriced(key)` 判定。
+ * @param unverifiedChannel - 本次调用是否来自未知通道（配置外 provider）。未知通道的
+ *   支出主体无法核实，费用一律记 0（token 照常统计，issue #82）。
+ */
+export function foldUsage(acc: ModelUsage, usage: TokenUsage, key: string, subscription: boolean, timeMs: number, official = false, pricedCost?: number, unverifiedChannel = false): void {
+  const cacheHit = usage.cacheReadTokens ?? 0
+  const cacheMiss = usage.inputTokens + (usage.cacheWriteTokens ?? 0)
+  acc.calls += 1
+  acc.input += usage.inputTokens + cacheHit + (usage.cacheWriteTokens ?? 0)
+  acc.output += usage.outputTokens
+  acc.reasoning += usage.reasoningTokens ?? 0
+  acc.cacheHit += cacheHit
+  acc.cacheMiss += cacheMiss
+  // 显式缓存写入是 cacheMiss 的子集，仅部分厂商单独报告；无该维度的调用不写字段。
+  if ((usage.cacheWriteTokens ?? 0) > 0) acc.cacheWrite = (acc.cacheWrite ?? 0) + (usage.cacheWriteTokens ?? 0)
+  // 官方/三方分桶：官方直连调用数与其费用分别累加；三方=总量-官方。
+  if (official) acc.officialCalls += 1
+  // 订阅套餐不计费；未定价的模型（目录与 models.dev 补充条目都没有）记 0。
+  // 费用按本次调用增量累加（计价是线性的）：同一桶内混入订阅/未知调用时，
+  // 后面免费调用不再把整个桶的 cost 覆盖成 0。时段按本次调用的实际时刻精确判定。
+  if (pricedCost !== undefined) {
+    acc.cost += pricedCost
+    if (official) acc.officialCost += pricedCost
+    return
+  }
+  if (!subscription && !unverifiedChannel && isPriced(key)) {
+    const thisCost = computeCostAt(modelOf(key), {
+      input: cacheHit + cacheMiss,
+      cacheHit,
+      cacheMiss,
+      output: usage.outputTokens,
+    }, timeMs)
+    acc.cost += thisCost
+    if (official) acc.officialCost += thisCost
+  }
+}
+
+/**
+ * 联网搜索辅助请求的单次费用估算默认值（人民币元）。DeepSeek 官方对搜索请求
+ * （web_search 服务端工具注入上下文）照常计费，实测每次约 0.01~0.03 元，取中值；
+ * 部署可在插件配置 `searchCallEstimateCny` 覆盖（设 0 关闭估算）。
+ */
+export const DEFAULT_SEARCH_CALL_ESTIMATE_CNY = 0.02
+
+/**
+ * Fold one auxiliary web-search LLM request (issue #15) into an accumulator.
+ * 这类调用绕过对话通道直连官方端点，日志只记请求（无响应/用量事件），token
+ * 不可知：按「每次估值」计入费用并单独累计 `searchCalls`，不产生 token 维度。
+ * @param acc - the accumulator to mutate.
+ * @param estimateCny - per-call cost estimate in CNY; 0 disables the estimate.
+ */
+export function foldSearchCall(acc: ModelUsage, estimateCny: number): void {
+  acc.calls += 1
+  acc.searchCalls = (acc.searchCalls ?? 0) + 1
+  // 搜索请求固定走 api.deepseek.com 官方端点（web-search-deepseek provider 私有 fetch）。
+  acc.officialCalls += 1
+  if (estimateCny > 0) {
+    acc.cost += estimateCny
+    acc.officialCost += estimateCny
+  }
+}
+
+/** Local-time date stamp (the host runs in the user's timezone). */
+export function dayStamp(time: number): string {
+  const date = new Date(time)
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+}
+
+/** Local-time hour stamp `YYYY-MM-DDTHH` — the performance series bucket key. */
+export function hourStamp(time: number): string {
+  const date = new Date(time)
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}`
+}
+
+/**
+ * 宿主进程的 IANA 时区名与 UTC 偏移，供面板标注「天按哪个时区切分」。
+ * `getTimezoneOffset` 是 UTC 以西的分钟数，符号与日常写法相反，故取反。
+ * @returns `{ name, offset }`，如 `{ name: "Asia/Shanghai", offset: "UTC+08:00" }`。
+ */
+export function hostTimeZone(now = new Date()): { name: string; offset: string } {
+  const minutes = -now.getTimezoneOffset()
+  const sign = minutes < 0 ? '-' : '+'
+  const abs = Math.abs(minutes)
+  const hh = String(Math.floor(abs / 60)).padStart(2, '0')
+  const mm = String(abs % 60).padStart(2, '0')
+  let name: string
+  try {
+    name = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+  } catch {
+    name = 'UTC'
+  }
+  return { name, offset: `UTC${sign}${hh}:${mm}` }
+}
+
+/** cwd 未知时工作区聚合的占位名（UI 显示 em dash，保持语言无关）。 */
+export const UNKNOWN_WORKSPACE_NAME = '—'
+
+/** 工作区名：取 cwd 的末级目录名；无 cwd 时返回 {@link UNKNOWN_WORKSPACE_NAME}。 */
+export function workspaceNameOf(cwd: string | undefined): string {
+  if (cwd === undefined || cwd === '') return UNKNOWN_WORKSPACE_NAME
+  const parts = cwd.split(/[\\/]/).filter(Boolean)
+  return parts.at(-1) ?? UNKNOWN_WORKSPACE_NAME
+}
+
+/** readFrom 返回的后缀切片：与宿主 0.1.2 的 SessionEventSuffix 同构，本地结构声明。 */
+export interface UsageEventSuffix {
+  readonly meta: SessionHeader
+  readonly inheritedEventCount: SessionLogOffsetT
+  readonly fromSeq: SessionLogOffsetT
+  readonly events: readonly SessionEvent[]
+}
+
+/**
+ * The persistence surface the aggregate reads: enough of the host
+ * `SessionPersistence` to list sessions and read each log once. Declared
+ * structurally (not via `Pick` off a host package) so the same bundle type
+ * checks against every host generation. Two optional invalidation-stamp
+ * sources, checked in order: `stampOf` (host 0.1.3+: the persistence
+ * revision token, exposed by the host-shape adapter) then `locate` (host
+ * 0.1.2: artifact mtime + size). Neither present means every round re-folds.
+ */
+export interface UsagePersistence {
+  list(): Promise<readonly SessionHeader[]>
+  readFrom(id: SessionId, fromSeq: SessionLogOffsetT): Promise<UsageEventSuffix>
+  locate?(meta: SessionHeader): { path: string } | undefined
+  stampOf?(id: SessionId): Promise<string | null>
+}
+
+/** The usage-stats document served to the billing dashboard. */
+export interface UsageStatsDocument {
+  version: number
+  updatedAt: number
+  source: 'session-logs'
+  /** 宿主进程时区（IANA 名 + UTC 偏移）：天按此切分，面板据此标注。 */
+  timezone?: { name: string; offset: string }
+  total: ModelUsage
+  byModel: Record<string, ModelUsage>
+  byDay: Record<string, ModelUsage>
+  /** 模型 × 日期 二维统计：趋势图按模型堆叠的输入（[date][modelKey]）。 */
+  byDayModels: Record<string, Record<string, ModelUsage>>
+  /**
+   * 模型 × 日期 × 站点 三维统计（[date][modelKey][siteKey]）：供「按 origin 绑定
+   * 自定义价」的显示层重估（issue #16）——只有这个维度能知道「某模型从某中转站
+   * 消耗了多少 token」。旧算法快照缺失。
+   */
+  byDayModelsSite?: Record<string, Record<string, Record<string, ModelUsage>>>
+  /**
+   * 峰谷分桶（真实判档）：折叠时逐调用按 `tierAt(event.time)` 归入高峰/低谷桶，
+   * 峰谷占比与「挪谷省钱」据此展示，不再按比例估算。旧快照可能缺失。
+   */
+  byTier?: { peak: ModelUsage; offPeak: ModelUsage }
+  /** 工具调用次数排行（键 = 工具名，按调用数倒序）；token 无法按工具归因，仅计次。旧快照可能缺失。 */
+  byTool?: Record<string, number>
+  /** 会话明细：按费用倒序，封顶 {@link SESSION_ROW_LIMIT} 行；旧快照可能缺失。 */
+  bySession: SessionUsageRow[]
+  /** 每轮费用明细：按起始时间倒序，封顶 {@link TURN_ROW_LIMIT} 行；旧快照可能缺失。 */
+  byTurn?: TurnUsageRow[]
+  /** 工作区聚合：按 cwd 末级目录归并，按费用倒序；旧快照可能缺失。 */
+  byWorkspace?: WorkspaceUsageRow[]
+  /**
+   * 中转站归组：按 provider 路由归类到站点（有 baseURL 按 origin 归组）、直连、未知路由；
+   * key 为 {@link siteBucketKey} 的稳定值（`site:<origin>` / `direct:<provider>` / `unknown`）。
+   * 旧快照可能缺失。
+   */
+  bySite?: Record<string, ModelUsage>
+  /**
+   * 按角色费用归因（人民币元）：助手输出成本为实测计价；输入成本按会话内
+   * 用户消息 / 工具结果的文本长度占比启发式摊分（日志无角色级 token 实测，
+   * 属估算口径，UI 需标注）。旧快照可能缺失。
+   */
+  byRole?: RoleCost
+  /** 不可计价的模型 id（未收录 / 无价，费用按 0 计）；供面板提示用户自查与反馈。 */
+  unpricedModels?: readonly string[]
+  /** 联网搜索请求的单次费用估算（人民币元，配置回显）；0 或缺省 = 未启用估算。 */
+  searchCallEstimateCny?: number
+  /**
+   * 性能指标（TTFT / 生成速度 / 总延迟）按模型与按小时聚合；旧快照可能缺失。
+   * 口径：TTFT = request/header → 首个内容 chunk；生成速度 = 输出 token ÷ 生成时长；
+   * 总延迟 = request/header → assistant/message。工具续写步骤无独立请求头，
+   * 以 step/start 为起点估算并计 estimated。
+   */
+  perf?: PerfStats
+  /** 只存在于账本、且缺 foldVersion 的旧会话数；无旧行时省略。 */
+  staleLedgerSessions?: number
+  /** 本轮未完整计入的会话数（新失败 + 负缓存命中，跨轮次稳定；有账本旧行的按存档计入最近可用点）；无失败时省略。 */
+  unreadableSessions?: number
+  /** 未统计中因会话格式拒读（SessionFormatUnsupportedError）的子集；无格式拒读时省略。 */
+  unreadableFormatSessions?: number
+  /** 未统计中无任何账本存档、完全未计入的子集（区别于有存档按最近可用点计入的）；无存档缺失时省略。 */
+  unreadableNoLedgerSessions?: number
+  /**
+   * 冷phase轻文档标记（issue #105）：本档全部出自账本存档、未读任何会话日志
+   * （启动后 replayDelayMs 内的请求）。客户端复用既有「数据滞后」横幅呈现
+   * （issue #103 加的 staleSnapshot 通道，此前无生产方），零新增客户端体积。
+   */
+  staleSnapshot?: boolean
+}
+
+/** 按角色费用归因：user / tool 为输入成本的启发式摊分，assistant 为输出成本实测。 */
+export interface RoleCost {
+  user: number
+  assistant: number
+  tool: number
+}
+
+/**
+ * 性能指标（TTFT / 生成速度 / 总延迟）：按模型与按小时聚合，供「性能」面板渲染。
+ * 旧快照（无 perf 字段）缺失时客户端按无数据兜底。
+ */
+export interface PerfStats {
+  /** 按模型聚合（键 = 计费目录键；未收录模型原样保留）。 */
+  byModel: Record<string, ModelPerf>
+  /** 按小时×模型聚合（外键 = {@link hourStamp}，内键 = 模型目录键；北京时间）。 */
+  byHourModel: Record<string, Record<string, HourModelPerf>>
+}
+
+/** 一个模型的性能统计：首字延时均值 / P50 / P90、生成速度均值、总延迟均值。 */
+export interface ModelPerf {
+  /** 有效性能样本数（有可测 TTFT 的调用；不含损毁样本）。 */
+  samples: number
+  /** 平均首字延时（毫秒）。 */
+  ttftAvg: number
+  /** 首字延时 P50（毫秒）。 */
+  ttftP50: number
+  /** 首字延时 P90（毫秒）。 */
+  ttftP90: number
+  /** 首字延时最大值（毫秒）；定位偶发慢响应。 */
+  ttftMax: number
+  /** 首字延时尖峰样本数（> 10s）；定位服务端抖动。 */
+  ttftSpikes: number
+  /** 平均生成速度（tokens/s）；生成了有效输出且时长可测时存在。 */
+  tpsAvg?: number
+  /** 平均总延迟（首次请求 → 响应完成，毫秒）。 */
+  latencyAvg: number
+  /** 以 step/start 估算的样本数（工具续写步骤无独立 request/header）。 */
+  estimatedSamples: number
+}
+
+/** 一个小时单模型的性能统计（外键 = {@link hourStamp}，内键 = 模型目录键）。 */
+export interface HourModelPerf {
+  samples: number
+  ttftAvg: number
+  /** 平均生成速度（tokens/s）；该小时该模型无可测生成窗口时缺失。 */
+  tpsAvg?: number
+}
+
+/** 会话明细行：仪表盘「会话明细」面板的数据源。 */
+export interface SessionUsageRow {
+  /** 会话 id（字符串形式）。 */
+  id: string
+  /** 日志里最新的 session/title 文本；无标题事件时缺失。 */
+  title?: string
+  /** 会话创建时的工作目录（项目路径）；未知时缺失。 */
+  cwd?: string
+  /**
+   * 直接父会话 id（仅子智能体会话携带）：宿主 header 的 `origin: "subagent"`
+   * 会话经 parentSession 指向委派它的对话。fork/resume 的种子血缘
+   * （isSeeded）不满足子智能体门，不带本字段。旧宿主 header 无标记，
+   * 按顶层会话处理。
+   */
+  parentId?: string
+  /** 全部后代子会话的费用合计（人民币元，多级委派整链递归）；无后代或后代全免费时缺失。 */
+  subCost?: number
+  /** 全部后代子会话的调用数；无后代时缺失。 */
+  subCalls?: number
+  calls: number
+  cost: number
+  /** 最后一个事件的时间戳（毫秒）。 */
+  lastActive: number
+  /** 数据来自旧算法折叠的持久账本行（日志已删/不可读，无法重算）；UI 据此标注置信度。 */
+  stale?: boolean
+}
+
+/**
+ * 从会话 header 提取子智能体归并标记（直接父会话 id）：`origin: "subagent"`
+ * （宿主的产品分类）或 `delegationDepth > 0`（持久化委派深度）任一命中即视为
+ * 子会话。子会话但 header 无 parentSession（异常数据）返回 undefined——无法
+ * 归位就按顶层会话处理，保守不标。导出供测试。
+ */
+export function subParentOf(meta: SessionHeader): string | undefined {
+  if (meta.origin !== 'subagent' && !((meta.delegationDepth ?? 0) > 0)) return undefined
+  const parent = meta.parentSession
+  return typeof parent === 'string' && parent !== '' ? parent : undefined
+}
+
+/**
+ * 给会话行补后代合计（subCost/subCalls）：按 parentId 建子索引，对每行递归
+ * 汇总全部后代子会话（多级委派整链计入根对话）。纯展示层归因——不改任何
+ * 总额桶（子会话费用本就在 total/byDay/byModel 里，行级只是拆出来给人看）。
+ * 环引用（异常数据）按 visited 跳过，不死循环。原地修改传入行。导出供测试。
+ */
+export function foldSubagentFamilies(rows: SessionUsageRow[]): void {
+  const subsOf = new Map<string, SessionUsageRow[]>()
+  for (const row of rows) {
+    const parent = row.parentId
+    if (parent === undefined) continue
+    const list = subsOf.get(parent)
+    if (list !== undefined) list.push(row)
+    else subsOf.set(parent, [row])
+  }
+  const familyOf = (id: string, visited: Set<string>): { cost: number; calls: number } => {
+    let cost = 0
+    let calls = 0
+    for (const child of subsOf.get(id) ?? []) {
+      if (visited.has(child.id)) continue
+      visited.add(child.id)
+      cost += child.cost
+      calls += child.calls
+      const nested = familyOf(child.id, visited)
+      cost += nested.cost
+      calls += nested.calls
+    }
+    return { cost, calls }
+  }
+  for (const row of rows) {
+    const family = familyOf(row.id, new Set([row.id]))
+    if (family.calls > 0) {
+      row.subCalls = family.calls
+      if (family.cost > 0) row.subCost = family.cost
+    }
+  }
+}
+
+/** 每轮费用明细行：仪表盘「每轮费用」图的数据源。 */
+export interface TurnUsageRow {
+  /** 会话 id（字符串形式）：不同会话的轮次号相互独立，展示时需区分。 */
+  sessionId: string
+  /** 会话内轮次号。 */
+  turn: number
+  /** 归因模型 key（计费目录键；未收录原样保留）。 */
+  model: string
+  input: number
+  output: number
+  cacheHit: number
+  cacheMiss: number
+  /** 该轮成本（人民币元，按调用时刻精确判高峰/空闲档）。 */
+  cost: number
+  /** 轮起始时刻（毫秒）。 */
+  startedAt: number
+  /** 轮结束时刻（毫秒）；未结束轮缺失。 */
+  endedAt?: number
+}
+
+/** 会话内折叠的每轮行（不含 sessionId，合并时补齐）。 */
+type SessionTurnRow = Omit<TurnUsageRow, 'sessionId'>
+
+/** 工作区聚合行：按会话 cwd 的末级目录归并。 */
+export interface WorkspaceUsageRow {
+  /** 目录末级名；cwd 未知的会话归入「未命名」。 */
+  name: string
+  calls: number
+  cost: number
+  input: number
+  output: number
+  /** 该工作区最近一次活跃时刻（毫秒）。 */
+  lastActive: number
+}
+
+/** 会话明细行的响应封顶：控制 payload 体积，重度用户的完整长尾不逐行下发。 */
+export const SESSION_ROW_LIMIT = 100
+
+/** 每轮费用行的响应封顶：同样控制 payload 体积。 */
+export const TURN_ROW_LIMIT = 200
+
+/** 聚合文档的短 TTL（毫秒）：合并密集轮询，TTL 内直接复用上次的合并结果。 */
+export const AGGREGATE_TTL_MS = 5000
+
+/** 账本落盘节流间隔（毫秒）：保存是 O(会话数) 的全量序列化+原子重写，重度用户
+ *  上万会话时单次即秒级 CPU，每轮聚合都写会周期性白占宿主事件循环。首次保存
+ *  不受节流（冷启动全量折叠的成果要立即落盘），节流窗口内的改动由 flush 兜底。 */
+export const LEDGER_SAVE_INTERVAL_MS = 60_000
+
+/** TTFT 尖峰阈值（毫秒）：超过计为一次尖峰样本，用于定位服务端抖动。 */
+export const PERF_SPIKE_MS = 10_000
+
+/** 单步性能样本（foldSession 的折叠产物；跨会话合并时按模型/小时再聚合）。 */
+export interface PerfSample {
+  /** 计费目录键（模型；未收录模型原样保留）。 */
+  model: string
+  /** 北京时间小时戳（{@link hourStamp}）——性能曲线的时间桶键。 */
+  hour: string
+  /** 首字延时（毫秒）；无效样本（超出 sane 上限）不入样本集。 */
+  ttftMs: number
+  /** 生成速度（tokens/s）；无有效生成窗口或无输出时缺失。 */
+  tps?: number
+  /** 总延迟（首次请求 → 响应完成，毫秒）；只测到内容但完成时刻优先于起点时缺失。 */
+  latencyMs?: number
+  /** 无独立 request/header，以 step/start 起算（工具续写步骤）。 */
+  estimated: boolean
+}
+
+/**
+ * 会话级性能摘要（per model）：账本持久化形态——替代逐样本持久化，体积
+ * O(模型数) 而非 O(样本数)。计数/求和/极值精确合并；分位数（P50/P90）
+ * 在跨会话合并时按样本数加权（展示级近似）。进程内折叠的会话仍保留
+ * 完整样本（doc 生成走精确插值），仅账本恢复行以摘要参与聚合。
+ */
+export interface PerfModelDigest {
+  /** 样本数。 */
+  samples: number
+  ttftSum: number
+  ttftMax: number
+  ttftSpikes: number
+  ttftP50: number
+  ttftP90: number
+  /** 有可测生成速度的样本数。 */
+  tpsCount: number
+  tpsSum: number
+  /** 有可测总延迟的样本数。 */
+  latencyCount: number
+  latencySum: number
+  /** 以 step/start 估算的样本数。 */
+  estimated: number
+}
+
+/** 会话级 小时×模型 性能摘要（只用均值，合并无损）。 */
+export interface PerfHourDigest {
+  samples: number
+  ttftSum: number
+  tpsCount: number
+  tpsSum: number
+}
+
+/** 全零摘要（合并的恒等元）。 */
+const EMPTY_MODEL_DIGEST: PerfModelDigest = {
+  samples: 0, ttftSum: 0, ttftMax: 0, ttftSpikes: 0, ttftP50: 0, ttftP90: 0,
+  tpsCount: 0, tpsSum: 0, latencyCount: 0, latencySum: 0, estimated: 0,
+}
+
+/** 从样本集构建模型级摘要（样本侧精确：P50/P90 为精确插值）。 */
+function modelDigestOf(samples: readonly PerfSample[]): PerfModelDigest {
+  const ttfts: number[] = []
+  let ttftSum = 0
+  let ttftMax = 0
+  let ttftSpikes = 0
+  let tpsCount = 0
+  let tpsSum = 0
+  let latencyCount = 0
+  let latencySum = 0
+  let estimated = 0
+  for (const sample of samples) {
+    ttfts.push(sample.ttftMs)
+    ttftSum += sample.ttftMs
+    if (sample.ttftMs > ttftMax) ttftMax = sample.ttftMs
+    if (sample.ttftMs > PERF_SPIKE_MS) ttftSpikes += 1
+    if (sample.tps !== undefined) {
+      tpsCount += 1
+      tpsSum += sample.tps
+    }
+    if (sample.latencyMs !== undefined) {
+      latencyCount += 1
+      latencySum += sample.latencyMs
+    }
+    if (sample.estimated) estimated += 1
+  }
+  return {
+    samples: samples.length,
+    ttftSum,
+    ttftMax,
+    ttftSpikes,
+    ttftP50: percentile(ttfts, 0.5),
+    ttftP90: percentile(ttfts, 0.9),
+    tpsCount,
+    tpsSum,
+    latencyCount,
+    latencySum,
+    estimated,
+  }
+}
+
+/** 合并两个模型级摘要：计数/求和/极值精确；分位数按样本数加权。 */
+function mergeModelDigest(a: PerfModelDigest, b: PerfModelDigest): PerfModelDigest {
+  const n = a.samples + b.samples
+  const weighted = (x: number, y: number): number => n === 0 ? 0 : (x * a.samples + y * b.samples) / n
+  return {
+    samples: n,
+    ttftSum: a.ttftSum + b.ttftSum,
+    ttftMax: Math.max(a.ttftMax, b.ttftMax),
+    ttftSpikes: a.ttftSpikes + b.ttftSpikes,
+    ttftP50: weighted(a.ttftP50, b.ttftP50),
+    ttftP90: weighted(a.ttftP90, b.ttftP90),
+    tpsCount: a.tpsCount + b.tpsCount,
+    tpsSum: a.tpsSum + b.tpsSum,
+    latencyCount: a.latencyCount + b.latencyCount,
+    latencySum: a.latencySum + b.latencySum,
+    estimated: a.estimated + b.estimated,
+  }
+}
+
+/** 从样本集构建小时级摘要（均值可无损重建）。 */
+function hourDigestOf(samples: readonly PerfSample[]): PerfHourDigest {
+  let ttftSum = 0
+  let tpsCount = 0
+  let tpsSum = 0
+  for (const sample of samples) {
+    ttftSum += sample.ttftMs
+    if (sample.tps !== undefined) {
+      tpsCount += 1
+      tpsSum += sample.tps
+    }
+  }
+  return { samples: samples.length, ttftSum, tpsCount, tpsSum }
+}
+
+/** 全零小时摘要（合并的恒等元）。 */
+const EMPTY_HOUR_DIGEST: PerfHourDigest = { samples: 0, ttftSum: 0, tpsCount: 0, tpsSum: 0 }
+
+/** 合并两个小时级摘要（纯字段加法，无损）。 */
+function mergeHourDigest(a: PerfHourDigest, b: PerfHourDigest): PerfHourDigest {
+  return {
+    samples: a.samples + b.samples,
+    ttftSum: a.ttftSum + b.ttftSum,
+    tpsCount: a.tpsCount + b.tpsCount,
+    tpsSum: a.tpsSum + b.tpsSum,
+  }
+}
+
+/**
+ * 样本集 → 账本摘要形态（模型 → 摘要；小时 → 模型 → 摘要）。serializeFold
+ * 与账本迁移共用同一转换，两处口径不会漂移。
+ * @param samples - 一个会话的全部性能样本。
+ * @returns `{ byModel, byHourModel }` 的 JSON-safe 记录。
+ */
+function perfDigestsOf(samples: readonly PerfSample[]): {
+  byModel: Record<string, PerfModelDigest>
+  byHourModel: Record<string, Record<string, PerfHourDigest>>
+} {
+  const byModelSamples = new Map<string, PerfSample[]>()
+  const byHourModelSamples = new Map<string, Map<string, PerfSample[]>>()
+  for (const sample of samples) {
+    let modelSamples = byModelSamples.get(sample.model)
+    if (modelSamples === undefined) {
+      modelSamples = []
+      byModelSamples.set(sample.model, modelSamples)
+    }
+    modelSamples.push(sample)
+    let hourModels = byHourModelSamples.get(sample.hour)
+    if (hourModels === undefined) {
+      hourModels = new Map()
+      byHourModelSamples.set(sample.hour, hourModels)
+    }
+    let hourModelSamples = hourModels.get(sample.model)
+    if (hourModelSamples === undefined) {
+      hourModelSamples = []
+      hourModels.set(sample.model, hourModelSamples)
+    }
+    hourModelSamples.push(sample)
+  }
+  return {
+    byModel: Object.fromEntries([...byModelSamples].map(([model, list]) => [model, modelDigestOf(list)])),
+    byHourModel: Object.fromEntries([...byHourModelSamples].map(([hour, models]) =>
+      [hour, Object.fromEntries([...models].map(([model, list]) => [model, hourDigestOf(list)]))])),
+  }
+}
+
+/** 一个 step 的性能时间状态机（keyed `${turn}:${step}`）。 */
+interface StepPerf {
+  /** step/start 时刻；无独立请求头时作为 TTFT 估算起点。 */
+  startTime: number
+  /** request/header 时刻（TTFT 起点）；工具续写步骤缺失。 */
+  requestTime?: number
+  /** 首个内容 chunk 时刻。 */
+  firstContentTime?: number
+  /** 最后一个内容 chunk 时刻。 */
+  lastContentTime?: number
+}
+
+/** One persisted session's folded usage plus drill-down metadata. */
+export interface SessionFold {
+  total: ModelUsage
+  byModel: Map<string, ModelUsage>
+  byDay: Map<string, ModelUsage>
+  byDayModels: Map<string, Map<string, ModelUsage>>
+  /** 模型×日期×站点三维（issue #16）：供按 origin 绑定自定义价的显示层重估。 */
+  byDayModelsSite: Map<string, Map<string, Map<string, ModelUsage>>>
+  /** 峰谷分桶：折叠时按调用时刻精确判档（tierAt），键 = 'peak' / 'offPeak'。 */
+  byTier: Map<string, ModelUsage>
+  /** 工具调用次数（键 = 工具名；tool-call-delta 首见计数）。 */
+  byTool: Map<string, number>
+  /** 中转站归组：按 provider 路由归类到站点/直连/未知路由（key = {@link siteBucketKey}）。 */
+  bySite: Map<string, ModelUsage>
+  /** 不可计价模型 id（未收录/无价，且非订阅）集合；跨会话合并后输出给面板提示。 */
+  unpricedModels: Set<string>
+  /** 每个模型 key 在本会话内走订阅通道的调用数（合并时跨会话累加判定 plan）。 */
+  planCalls: Map<string, number>
+  /** 三维格（日期×模型×站点）各自的订阅调用数，键 = {@link planSiteKey}：
+   *  provider 视图的行 plan 按本格判定，不再借模型全局口径（混通道模型会把
+   *  本格全订阅的行判成无标记）。 */
+  planSiteCalls: Map<string, number>
+  /** 每轮费用明细（按轮次号升序，不含 sessionId）；sessionId 在合并时补齐。 */
+  turns: SessionTurnRow[]
+  /** 性能样本（有可测 TTFT 的调用，按事件次序折叠）；仅进程内折叠产生，
+   *  账本恢复行恒为空（其性能在 {@link SessionFold.perfDigest} 里）。 */
+  perf: PerfSample[]
+  /** 账本恢复行的模型级性能摘要；进程内折叠恒为空（序列化时从样本构建）。 */
+  perfDigest: Map<string, PerfModelDigest>
+  /** 账本恢复行的小时×模型性能摘要；进程内折叠恒为空。 */
+  perfHourDigest: Map<string, Map<string, PerfHourDigest>>
+  /** 角色归因中间量：消息文本长度（user/tool）与输入/输出成本实测拆分。 */
+  roles: RoleFold
+  /** 日志里最新的 session/title 文本（无标题事件时 undefined）。 */
+  title?: string
+  /** 最后一个事件的时间戳（毫秒）；空日志为 0。 */
+  lastActive: number
+}
+
+/** 角色归因的会话级中间量：字符占比用于把输入成本摊到 user/tool。 */
+interface RoleFold {
+  userChars: number
+  toolChars: number
+  /** 输入侧成本（缓存命中 + 未命中 + 缓存写入，人民币元）。 */
+  inputCost: number
+  /** 输出侧成本（人民币元）。 */
+  outputCost: number
+}
+
+/** JSON-safe form of one session fold, used by the durable usage ledger. */
+export interface SerializedSessionFold {
+  total: ModelUsage
+  byModel: Record<string, ModelUsage>
+  byDay: Record<string, ModelUsage>
+  byDayModels: Record<string, Record<string, ModelUsage>>
+  /** 会话标题（session/title 事件的最新文本）；1.0.30 前的账本行不持久化它，缺失回退 id。 */
+  title?: string
+  /** 1.0.10（issue #16）新增；模型×日期×站点三维，旧账本行缺失（合并按空处理）。 */
+  byDayModelsSite?: Record<string, Record<string, Record<string, ModelUsage>>>
+  /** 1.0.8 起新增；旧账本行缺失（合并时按空处理，不触发重折算）。 */
+  byTier?: Record<string, ModelUsage>
+  byTool?: Record<string, number>
+  bySite: Record<string, ModelUsage>
+  unpricedModels: string[]
+  planCalls: Record<string, number>
+  /** 三维格订阅计数；旧账本行缺失（合并按空处理，格级 plan 保守不置位）。 */
+  planSiteCalls?: Record<string, number>
+  turns: SessionTurnRow[]
+  /** v16 起以摘要持久化性能（体积 O(模型数) 而非 O(样本数)）；旧行的
+   *  `perf` 逐样本数组由加载边界迁移转换为摘要。 */
+  perfDigest: Record<string, PerfModelDigest>
+  /** 小时×模型摘要（键 = {@link hourStamp}）；同上由迁移补齐。 */
+  perfHourDigest: Record<string, Record<string, PerfHourDigest>>
+  roles: RoleFold
+  lastActive: number
+}
+
+/** One independently retained session in the durable usage ledger. */
+export interface UsageLedgerSession {
+  id: string
+  cwd?: string
+  /**
+   * 子智能体归并标记（直接父会话 id）：仅宿主 header 带 `origin: "subagent"`
+   * 的会话行携带。日志已删、只剩账本行时仍能归位到父对话；缺失 = 顶层会话
+   * （含 fork/resume 血缘）。可选字段，旧账本行缺失按顶层处理，无需迁移。
+   */
+  subOf?: string
+  /** Stable log stamp (mtime + size) when the persistence backend exposes it. */
+  stamp?: string
+  /**
+   * 折叠该行时的算法版本（{@link FOLD_VERSION}）。缺失 = 1.0.6 及更早写入的
+   * 旧算法行（加载边界由迁移统一回填为 1）。
+   */
+  foldVersion?: number
+  /**
+   * 折叠该行时的聚合配置指纹（{@link configFingerprint}）。缺失 = 1.0.32 及
+   * 更早写入的行（配置不参与复用判定）；与当前指纹不一致的行不复用、全量重折。
+   */
+  fingerprint?: string
+  /**
+   * 该行最近一次折叠落盘的时刻（epoch 毫秒）。多实例共享同一账本文件时，
+   * save 侧按它做行级合并（后折覆盖先折），防止整份覆盖式落盘丢掉另一实例
+   * 刚写入的行；缺失 = 合并语义引入前的旧行，视为最旧。
+   */
+  foldedAt?: number
+  fold: SerializedSessionFold
+}
+
+/** On-disk durable usage ledger. Versioned independently from the dashboard document. */
+export interface UsageLedgerDocument {
+  version: 1
+  updatedAt: number
+  sessions: UsageLedgerSession[]
+  /** 已应用的一次性配置迁移 id 列表（随文档落盘；缺省 = 尚未跑过任何迁移）。 */
+  appliedMigrations?: string[]
+  /**
+   * 拒读会话负缓存（issue #105）：读失败（含格式拒读）会话的失败时 stamp。落盘
+   * 后重启不再重读——宿主对读不动的日志要解压解析到拒绝点才抛错，单条数百 ms、
+   * 老用户上百条时是每次启动的固定大头（负缓存此前只在内存，重启即失）。stamp
+   * 变化（日志被改写/追加）后照常失效重试；会话消失由 seen 清理兜底。
+   */
+  refused?: UsageLedgerRefusal[]
+}
+
+/** 账本里的一条拒读记录：会话 id + 失败时的失效键 + 是否格式拒读（计数细分用）。 */
+export interface UsageLedgerRefusal {
+  id: string
+  stamp: string
+  format: boolean
+}
+
+/**
+ * 账本行谁更新：{@link UsageLedgerSession.foldedAt} 新者胜（缺失视为 0 =
+ * 合并语义引入前的旧行）；时刻相同比 {@link UsageLedgerSession.foldVersion}
+ * （新算法胜）；再相同视为等价，取 incoming（本进程刚折出的当前视图）。
+ */
+function ledgerRowWins(incoming: UsageLedgerSession, existing: UsageLedgerSession): boolean {
+  const at = incoming.foldedAt ?? 0
+  const bt = existing.foldedAt ?? 0
+  if (at !== bt) return at > bt
+  return (incoming.foldVersion ?? 1) > (existing.foldVersion ?? 1)
+}
+
+/**
+ * 多实例账本合并（自审计延期项：save 路径 last-writer-wins 丢写）：同一
+ * DSH_HOME 下多个宿主实例各自持有内存账本，整份覆盖式落盘会让后写者抹掉
+ * 先写者刚保存的行。本进程要落的文档与磁盘现存文档按会话 id 行级合并：
+ * 双方都有的行按「谁更新谁胜」，仅磁盘有的行（他实例写入、本进程内存没有）
+ * 原样保留——账本行从不按 seen 剪除（见 aggregateOnce 尾部注释），合并不会
+ * 复活已删会话。合并只发生在落盘边界：跨实例的即时可见性仍靠重启重载，
+ * 此处保证的是磁盘上不丢数据（最终一致）。
+ * @param document - 本进程刚聚合出的完整账本文档。
+ * @param existing - 磁盘上现存（他实例可能写入过）的账本文档。
+ * @returns 合并后的文档（sessions 行序：incoming 在前、existing 独有行按原序追加）。
+ */
+export function mergeUsageLedgerDocuments(document: UsageLedgerDocument, existing: UsageLedgerDocument): UsageLedgerDocument {
+  const byId = new Map<string, UsageLedgerSession>()
+  for (const row of existing.sessions) byId.set(row.id, row)
+  const sessions: UsageLedgerSession[] = []
+  for (const row of document.sessions) {
+    const prev = byId.get(row.id)
+    sessions.push(prev !== undefined && ledgerRowWins(prev, row) ? prev : row)
+    byId.delete(row.id)
+  }
+  for (const row of byId.values()) sessions.push(row)
+  // appliedMigrations 取并集：任一实例已应用的迁移不需要其他实例重跑。
+  const applied = document.appliedMigrations === undefined && existing.appliedMigrations === undefined
+    ? undefined
+    : [...new Set([...(document.appliedMigrations ?? []), ...(existing.appliedMigrations ?? [])])]
+  return {
+    ...document,
+    sessions,
+    ...(applied === undefined ? {} : { appliedMigrations: applied }),
+  }
+}
+
+/**
+ * 折叠算法版本：归账语义变化时递增。v1 = 按 request/header 归账（稀疏 header 把
+ * 两次 header 之间的用量串到上一个模型，订阅模型首当其冲，issue #14）；v2 =
+ * `assistant/message` 自带 source 归账（1.0.7 起）；v3 = 联网搜索请求按次估算
+ * 计费（issue #15，1.0.9 起）；v4 = 模型×日期×站点三维桶（issue #16，按 origin
+ * 绑定自定义价的显示层重估）——旧行缺该维度，按无 origin 价处理；v5 = 峰谷
+ * 时代之前（2026-08-16T16:00Z）的 DeepSeek 事件按当时基础价计费（v4 把全部
+ * 历史套现行峰/谷档价，高估约 50%）；v6 = v1 峰谷窗口（至 2026-08-22T16:00Z）
+ * 的周末不豁免峰时（v5 错套现行周末全谷规则，低估该窗口周六日的峰时费用）；
+ * v7 = fork 种子边界改用持久化 `SessionHeader.seedLength`（v6 及更早扫描最后一个
+ * `session/end-seed`，resume 续写后继续对话时把本会话历史段误判为种子丢弃，
+ * 会话费用只剩最近一段，issue #29）。
+ * 持久账本行据此区分新旧算法：日志已删/不可读而只能沿用旧行时，UI 标注置信度提示。
+ */
+// 8：通道感知归属（腾讯云网关修复）——模型 id 归一化（日期后缀/组织前缀/短 id）、
+// 官方渠道改按 baseURL origin 判定、订阅豁免集合加入 tencent-token-plan。旧版本
+// 折叠的账本行语义已过时，bump 后日志仍在的会话全量重折，日志已删的行标记 stale 保留。
+// 9：未知路由（不在 llm-pi-ai 配置里的 provider 名）按名兜底判官方——宿主内置官方
+// 直连不经路由表（provider 名 deepseek-official 不在任何配置里），v8 的 unknown 一刀切
+// 把官方直连全量错杀进三方桶。v8 折叠的账本行同样过时，bump 触发全量重折。
+// 10：账本行开始持久化会话标题（serializeFold 白名单此前漏了 title），v9 行重启复用
+// 后会话明细只剩 id 前缀；bump 让存量账本行全量重折补回标题。
+// 11：flash 系 2026-09-10 12:00 调价（目录写新价 + FLASH_REPRICE_MS 前回算旧价），
+// v10 及更早的账本行按调价前目录价折算，bump 全量重折对齐时间线计价。
+// 12：官方公告自同一分界起 V4 Pro 请求路由至 V4.1 Flash 按 Flash 单价计费
+// （V4.1 Pro 上线前）——pro 目录价改写为 Flash 价、V4 Pro 刊例进 FLASH_REPRICED_OFFPEAK
+// 回算，v11 及更早的行把 pro 全部按 V4 Pro 刊例折算（分界后高估数倍），bump 全量重折。
+// 13：V4.1 Flash 内测端点 id（expires-on-0910）收录进别名表——此前该 id 落目录兜底
+// 条目（Custom/其他），费用按 0 计且把「主力消耗模型余额」挤成「未配置」（issue #40
+// 反馈）；bump 让存量账单的内测用量按 flash 时间线重折归并。
+// 14：官方把 V4 Pro 路由时点从 09-10 12:00 推迟到 09-14 12:00（价目页注释 (2)），
+// pro 的回算分界改用 PRO_OFFLINE_MS——09-10 ~ 09-14 之间 V4 Pro 请求仍按 V4 Pro
+// 刊例计费（v12/v13 行按 Flash 价折算，低估）；bump 全量重折。同时收录官方新规范名
+// deepseek-flash → flash。
+// 15：官方取消 09-14 的路由计划，公告「09-14 之后继续提供 V4 Pro，计费方式保持不变」
+// （价目页注释 (2) 改写）——pro 目录价由 Flash 价改回 V4 Pro 峰谷刊例，路由分界常量与
+// 显示层覆盖一并移除。v14 及更早的行把 09-14 之后的 pro 按 Flash 价折算（低估数倍），
+// bump 全量重折。
+// 16：折叠形态变更——性能持久化改摘要（`perf` 逐样本数组 → `perfDigest`/
+// `perfHourDigest`）。归账语义未变，但 stamp 复用旧行会把本可精确插值的活样本
+// 困在近似分位数上；bump 让日志仍在的会话重折，仅日志已删的行留在摘要口径。
+// 17：计价语义变更——未知通道（配置外 provider）费用记 0（issue #82）。旧口径
+// 下 unknown 桶的已收录模型按目录价计入了金额，复用旧行会让报告人的历史累计
+// 金额在升级后原样保留；bump 让日志仍在的会话重折出零费用，仅日志已删的行
+// 留在旧口径（账本「历史定格」语义的固有残留）。
+// 18：三维格补订阅计数（`planSiteCalls`）——provider 视图行的 plan 徽标改按通道
+// 判定，不再借模型全局口径（混通道模型会把本格全订阅的行判成无标记）。计价语义
+// 未变；bump 让日志仍在的会话重折出格级 plan，仅日志已删的行留在全局口径
+//（客户端回退 byModel.plan）。
+// 19：计价语义变更——补录 xAI Grok 4.5/4.6、OpenAI GPT-5.5 / GPT-6.1 Sol、
+// Anthropic Claude Opus 4.7 / 4.8 与 Fable 5 的目录条目，并把 Anthropic 带日期
+// 快照 id（claude-haiku-4-5-20251001）归一到既有键。此前这些 id 因不在目录且无
+// 别名而落「未收录」、费用记 0，复用旧行会让已发生的用量在升级后仍为 0；bump 让
+// 日志仍在的会话按目录价重折，仅日志已删的行留在旧口径（账本「历史定格」语义的
+// 固有残留）。
+// 20：计价语义变更——补录 OpenAI 绘图模型 gpt-image-2 / gpt-image-2.5-sunburst
+// 目录条目（issue #88，中转站绘图通道的实付人民币单价）。与 19 同因：fingerprint
+// 不含目录，复用旧行会让已按「未收录」记 0 的用量在升级后继续为 0；bump 让日志
+// 仍在的会话按目录价重折。
+// 21：计价语义变更——已知的第三方插件注册 adapter 通道（KNOWN_ADAPTER_PROVIDERS，
+// 如 dsh-workbuddy-connect 的 workbuddy / workbuddy-ai）从 unknown 桶归位
+// direct:<provider> 并按模型官方目录价计价。旧口径下这些调用（issue #82 的
+// unknown 记 0）费用恒为 0、token 照常统计，复用旧行会让已发生的用量在升级后
+// 仍为 0；bump 让日志仍在的会话重折出费用，仅日志已删的行留在旧口径（账本
+// 「历史定格」语义的固有残留）。
+// 22：计价语义变更——通用化 21 的通道归位：宿主 llm 注册表里已注册 adapter 的
+// provider（llm-pi-ai 之外的任意插件路由，如 dsh-commandcode-provider 的
+// commandcode）不再依赖白名单，合成直连路由视图按官方目录价计价（issue #91）；
+// 同时模型别名（modelKeyAliases）进折叠指纹，别名改动后历史行按新目录键重算。
+// bump 让存量 unknown 行升级后重折补齐费用，仅日志已删的行留在旧口径。
+// 23：聚合语义变更——峰谷分桶（byTier）不再把延迟档模型（tierSemantics =
+// 'latency'，Gemini Standard/Flex）按 DeepSeek 北京峰谷窗归桶：其计价与时刻
+// 无关（peakShare 混合），套窗分桶会让峰谷占比条虚含「时间窗计费」的流量。
+// bump 让日志仍在的会话重折出新峰谷口径；费用总额不受影响（byTier 仅展示层）。
+// 24: gateway catalog additions and optional historical unknown-route estimates.
+export const FOLD_VERSION = 24
+
+/** 账本里拒读记录的条数上限：防异常环境（大量损坏日志）把账本撑爆；
+ *  超限按 Map 插入序保留前 N 条（最早发现的先留，stamp 失效的自然被清理让位）。 */
+export const LEDGER_REFUSED_CAP = 500
+
+/**
+ * 一次性账本迁移：id 唯一，apply 在加载边界对原始文档执行，已应用过的跳过。
+ * 未来账本/schema 字段变更（重命名、拆桶、语义调整）时，在此追加一条迁移并
+ * bump {@link UsageLedgerDocument.version}；引擎保证幂等，重启不会重复执行。
+ * 可选字段的向后兼容回填（如 foldVersion）不 bump version：旧版本插件仍能读新文件。
+ */
+export interface LedgerMigration {
+  id: string
+  /** 对原始文档执行就地变更；返回是否产生了需要落盘的实际修改。 */
+  apply(document: UsageLedgerDocument): boolean
+}
+
+/**
+ * 账本迁移注册表。首条迁移给 1.0.6 及更早的行回填 foldVersion = 1（它们全部出自
+ * header 归因算法）；perf 摘要化迁移把 v15 及更早行的逐样本 `perf` 数组转换为
+ * `perfDigest`/`perfHourDigest` 摘要（日志已删的行不再被重折，迁移是它们唯一的
+ * 收缩机会）；此后新写入的行总带当前 {@link FOLD_VERSION} 与摘要形态。
+ */
+export const LEDGER_MIGRATIONS: readonly LedgerMigration[] = [
+  {
+    id: 'fold-version-backfill',
+    apply(document) {
+      let changed = false
+      for (const session of document.sessions) {
+        if (session.foldVersion === undefined) {
+          session.foldVersion = 1
+          changed = true
+        }
+      }
+      return changed
+    },
+  },
+  {
+    id: 'perf-sample-to-digest',
+    apply(document) {
+      let changed = false
+      for (const session of document.sessions) {
+        // durable 边界：旧行的 perf 是逐样本数组；已迁移行带摘要记录。
+        const fold = session.fold as Partial<SerializedSessionFold> & { perf?: unknown }
+        if (Array.isArray(fold.perf)) {
+          const { byModel, byHourModel } = perfDigestsOf(fold.perf as PerfSample[])
+          fold.perfDigest = byModel
+          fold.perfHourDigest = byHourModel
+          delete fold.perf
+          changed = true
+        } else if (fold.perfDigest === undefined || fold.perfHourDigest === undefined) {
+          fold.perfDigest ??= {}
+          fold.perfHourDigest ??= {}
+          changed = true
+        }
+      }
+      return changed
+    },
+  },
+]
+
+/**
+ * 在加载边界对账本文档应用未执行的迁移，并记录已应用 id 供写回。
+ * @param document - 从持久化读出的原始账本文档。
+ * @param migrations - 待执行的迁移注册表；缺省用模块级 {@link LEDGER_MIGRATIONS}。
+ * @returns 是否发生了需要重新落盘的修改。
+ */
+export function runLedgerMigrations(
+  document: UsageLedgerDocument,
+  migrations: readonly LedgerMigration[] = LEDGER_MIGRATIONS,
+): boolean {
+  const applied = new Set(document.appliedMigrations ?? [])
+  let changed = false
+  for (const migration of migrations) {
+    if (applied.has(migration.id)) continue
+    if (migration.apply(document)) changed = true
+    applied.add(migration.id)
+  }
+  if (applied.size > 0 && (document.appliedMigrations === undefined
+    || document.appliedMigrations.length !== applied.size
+    || document.appliedMigrations.some(id => !applied.has(id)))) {
+    document.appliedMigrations = [...applied]
+    changed = true
+  }
+  return changed
+}
+
+/** Storage seam for the durable ledger; the host supplies an atomic file implementation. */
+export interface UsageLedgerStore {
+  load(): Promise<unknown | undefined>
+  save(document: UsageLedgerDocument): Promise<void>
+}
+
+/** Serialize Map/Set-heavy fold state into a JSON-safe ledger entry. */
+function serializeFold(fold: SessionFold): SerializedSessionFold {
+  // 性能以摘要持久化（P0-2）：体积 O(模型数+小时×模型数)，逐样本数组不再落盘。
+  const { byModel: perfDigest, byHourModel: perfHourDigest } = perfDigestsOf(fold.perf)
+  return {
+    total: fold.total,
+    byModel: Object.fromEntries(fold.byModel),
+    byDay: Object.fromEntries(fold.byDay),
+    byDayModels: Object.fromEntries([...fold.byDayModels].map(([day, models]) => [day, Object.fromEntries(models)])),
+    byDayModelsSite: Object.fromEntries([...fold.byDayModelsSite].map(([day, models]) =>
+      [day, Object.fromEntries([...models].map(([model, sites]) => [model, Object.fromEntries(sites)]))])),
+    byTier: Object.fromEntries(fold.byTier),
+    byTool: Object.fromEntries(fold.byTool),
+    bySite: Object.fromEntries(fold.bySite),
+    unpricedModels: [...fold.unpricedModels],
+    planCalls: Object.fromEntries(fold.planCalls),
+    planSiteCalls: Object.fromEntries(fold.planSiteCalls),
+    turns: fold.turns,
+    perfDigest,
+    perfHourDigest,
+    roles: fold.roles,
+    lastActive: fold.lastActive,
+    // 标题随账本持久化：缺失时重启从账本复用的会话明细回退到 id 前缀（用户可读性差）。
+    ...(fold.title !== undefined ? { title: fold.title } : {}),
+  }
+}
+
+/** Restore a JSON-safe ledger fold into the in-memory Map/Set representation. */
+function deserializeFold(fold: SerializedSessionFold): SessionFold {
+  return {
+    total: fold.total,
+    byModel: new Map(Object.entries(fold.byModel)),
+    byDay: new Map(Object.entries(fold.byDay)),
+    byDayModels: new Map(Object.entries(fold.byDayModels).map(([day, models]) => [day, new Map(Object.entries(models))])),
+    // 1.0.10 前的账本行没有三维桶：按空处理（「按 origin 绑定自定义价」对这些会话不可用）。
+    byDayModelsSite: new Map(Object.entries(fold.byDayModelsSite ?? {}).map(([day, models]) =>
+      [day, new Map(Object.entries(models).map(([model, sites]) => [model, new Map(Object.entries(sites))]))])),
+    // 1.0.8 前的账本行没有这两个桶：按空处理，峰谷占比等新维度对这些会话缺省。
+    byTier: new Map(Object.entries(fold.byTier ?? {})),
+    byTool: new Map(Object.entries(fold.byTool ?? {})),
+    bySite: new Map(Object.entries(fold.bySite)),
+    unpricedModels: new Set(fold.unpricedModels),
+    planCalls: new Map(Object.entries(fold.planCalls)),
+    planSiteCalls: new Map(Object.entries(fold.planSiteCalls ?? {})),
+    turns: fold.turns,
+    // 账本行无逐样本：性能以摘要形态参与聚合（进程内折叠才保留样本）。
+    perf: [],
+    perfDigest: new Map(Object.entries(fold.perfDigest)),
+    perfHourDigest: new Map(Object.entries(fold.perfHourDigest).map(([hour, models]) =>
+      [hour, new Map(Object.entries(models))])),
+    roles: fold.roles,
+    lastActive: fold.lastActive,
+    ...(fold.title !== undefined ? { title: fold.title } : {}),
+  }
+}
+
+/** Runtime boundary for a user-editable/corrupt ledger file. Invalid rows are ignored. */
+function ledgerSessionsOf(value: unknown): UsageLedgerSession[] {
+  if (value === null || typeof value !== 'object') return []
+  const document = value as { version?: unknown; sessions?: unknown }
+  if (document.version !== 1 || !Array.isArray(document.sessions)) return []
+  return document.sessions.filter((entry): entry is UsageLedgerSession => {
+    if (entry === null || typeof entry !== 'object') return false
+    const row = entry as { id?: unknown; fold?: unknown }
+    if (typeof row.id !== 'string' || row.id === '' || row.fold === null || typeof row.fold !== 'object') return false
+    const fold = row.fold as Partial<SerializedSessionFold>
+    return fold.total !== undefined
+      && fold.byModel !== undefined
+      && fold.byDay !== undefined
+      && fold.byDayModels !== undefined
+      && fold.bySite !== undefined
+      && Array.isArray(fold.unpricedModels)
+      && fold.planCalls !== undefined
+      && Array.isArray(fold.turns)
+      && fold.perfDigest !== undefined
+      && fold.perfHourDigest !== undefined
+      && fold.roles !== undefined
+      && typeof fold.lastActive === 'number'
+  })
+}
+
+/**
+ * 消息文本长度：user/tool 角色分摊输入成本的启发式依据。字符串内容取其
+ * 长度；内容块数组累计文本块长度；其余形状按 0 计（durable 边界收窄）。
+ */
+export function messageTextLength(message: unknown): number {
+  if (message === null || typeof message !== 'object') return 0
+  const content = (message as { content?: unknown }).content
+  if (typeof content === 'string') return content.length
+  if (!Array.isArray(content)) return 0
+  let total = 0
+  for (const block of content) {
+    const text = (block as { text?: unknown } | null)?.text
+    if (typeof text === 'string') total += text.length
+  }
+  return total
+}
+
+/** Get-or-create one model cell inside a usage map (avoids non-null assertions). */
+function usageCell(map: Map<string, ModelUsage>, key: string): ModelUsage {
+  const existing = map.get(key)
+  if (existing !== undefined) return existing
+  const fresh = emptyUsage()
+  map.set(key, fresh)
+  return fresh
+}
+
+/** Get-or-create one day's model cell inside the two-dimensional map. */
+function modelDayCell(map: Map<string, Map<string, ModelUsage>>, day: string, modelKey: string): ModelUsage {
+  let models = map.get(day)
+  if (models === undefined) {
+    models = new Map()
+    map.set(day, models)
+  }
+  return usageCell(models, modelKey)
+}
+
+/** 订阅计数的三维键：日期×模型×站点三元组的 JSON 形态（免分隔符转义歧义）。 */
+function planSiteKey(day: string, modelKey: string, siteKey: string): string {
+  return JSON.stringify([day, modelKey, siteKey])
+}
+
+/** Get-or-create one day×model×site cell inside the three-dimensional map. */
+function modelDaySiteCell(
+  map: Map<string, Map<string, Map<string, ModelUsage>>>,
+  day: string,
+  modelKey: string,
+  siteKey: string,
+): ModelUsage {
+  let models = map.get(day)
+  if (models === undefined) {
+    models = new Map()
+    map.set(day, models)
+  }
+  let sites = models.get(modelKey)
+  if (sites === undefined) {
+    sites = new Map()
+    models.set(modelKey, sites)
+  }
+  return usageCell(sites, siteKey)
+}
+
+/** 每轮折叠的中间状态：turn/start 设起点，turn/end 设终点，调用累加桶与成本。 */
+interface TurnState {
+  turn: number
+  model: string
+  input: number
+  output: number
+  cacheHit: number
+  cacheMiss: number
+  cost: number
+  startedAt: number
+  endedAt?: number
+}
+
+/** Get-or-create one turn's accumulation state. */
+function turnState(turns: Map<number, TurnState>, turn: number): TurnState {
+  const existing = turns.get(turn)
+  if (existing !== undefined) return existing
+  const fresh: TurnState = { turn, model: 'other', input: 0, output: 0, cacheHit: 0, cacheMiss: 0, cost: 0, startedAt: Number.MAX_SAFE_INTEGER }
+  turns.set(turn, fresh)
+  return fresh
+}
+
+/**
+ * 跨事件折叠状态机：header/来源归因态、轮次与性能步骤、工具去重。
+ * 增量折叠（issue #30）时跨批次延续，由内存 cache 持有；不入 ledger
+ * （跨进程不序列化——重启后的会话退回全量重折，语义保守正确）。
+ */
+interface FoldMachine {
+  key: string
+  subscription: boolean
+  official: boolean
+  siteBucket: string
+  turns: Map<number, TurnState>
+  steps: Map<string, StepPerf>
+  lastOpenStepKey: string | undefined
+  toolSeen: Set<string>
+}
+
+/** 空白折叠状态机（与全量折叠的初值逐字一致）。 */
+function freshMachine(): FoldMachine {
+  return {
+    key: 'other',
+    subscription: false,
+    official: false,
+    siteBucket: 'unknown',
+    turns: new Map(),
+    steps: new Map(),
+    lastOpenStepKey: undefined,
+    toolSeen: new Set(),
+  }
+}
+
+/** 空白 fold 的统一构造：foldSession 与聚合器的分片/增量路径共用同一字段初值。 */
+function freshFold(): SessionFold {
+  return {
+    total: emptyUsage(),
+    byModel: new Map(),
+    byDay: new Map(),
+    byDayModels: new Map(),
+    byDayModelsSite: new Map(),
+    byTier: new Map(),
+    byTool: new Map(),
+    bySite: new Map(),
+    unpricedModels: new Set(),
+    planCalls: new Map(),
+    planSiteCalls: new Map(),
+    turns: [],
+    perf: [],
+    perfDigest: new Map(),
+    perfHourDigest: new Map(),
+    roles: { userChars: 0, toolChars: 0, inputCost: 0, outputCost: 0 },
+    lastActive: 0,
+  }
+}
+
+/**
+ * 把一批事件折进既有 fold（状态机跨批次延续）。全量折叠、超大会话的分片折叠、
+ * 活跃会话的 seq 增量折叠共用同一段循环体，保证三种路径的字段语义逐字一致。
+ * @param fold - 累计目标（原地修改）。
+ * @param machine - 折叠状态机：进入时为上一批次末态，返回时为本批次末态。
+ * @param events - 本批次事件（日志顺序）。
+ * @param subscriptionProviders - 订阅套餐匹配器（显式集合或判定函数）。
+ * @param officialProviderIds - 官方直连 provider 集合（undefined = 按 {@link officialChannelOf} 通道判定）。
+ * @param routes - 当前 provider 路由视图（中转站归组）。
+ * @param searchCallEstimateCny - 联网搜索请求的单次费用估算（人民币元）。
+ * @param seedLength - fork 血缘边界（seq 低于它的事件是父会话种子，跳过）；
+ *   来源为存储元数据的 `inheritedEventCount`。
+ * @param routeAliases - 历史路由别名（旧路由名 → 当前路由名），改名/删除路由的
+ *   历史用量按别名归位，不再落「未知路由」桶。
+ */
+function foldInto(
+  fold: SessionFold,
+  machine: FoldMachine,
+  events: readonly { type: string; time: number; data: unknown; seq?: number }[],
+  subscriptionProviders: SubscriptionMatcher,
+  officialProviderIds: ReadonlySet<string> | undefined,
+  routes: Readonly<Record<string, ProviderRouteView>>,
+  searchCallEstimateCny: number,
+  seedLength: number,
+  routeAliases: Readonly<Record<string, string>> = {},
+  estimateUnknownRoutes = false,
+): void {
+  // 归因状态在进出时与 machine 同步：循环体保持与全量折叠完全相同的写法。
+  let key = machine.key
+  let subscription = machine.subscription
+  let official = machine.official
+  let siteBucket = machine.siteBucket
+  const turns = machine.turns
+  const steps = machine.steps
+  let lastOpenStepKey = machine.lastOpenStepKey
+  const toolSeen = machine.toolSeen
+  for (const event of events) {
+    // Fork 种子跳过：`seq < seedLength` 的事件是父会话拷贝来的种子，已计过一次费。
+    // 边界取持久化 header 而非扫描日志里的 end-seed：resume 每续写一段就追加一个
+    // end-seed，按最后一个 end-seed 扫描会把本会话自己的历史段误判为种子（issue #29）。
+    if (seedLength > 0 && typeof event.seq === 'number' && Number.isFinite(event.seq) && event.seq < seedLength) {
+      continue
+    }
+    fold.lastActive = Math.max(fold.lastActive, event.time)
+    // session/title 由 dsh-session-title 经声明合并注册，本包不引用它，
+    // 故按持久化数据的字面类型判定并做运行时收窄（durable 边界）。
+    if (event.type === 'session/title') {
+      const title = (event.data as { title?: unknown }).title
+      if (typeof title === 'string' && title.length > 0) fold.title = title
+      continue
+    }
+    // 角色归因：用户消息与工具结果的文本长度（输入成本摊分的启发式依据）。
+    if (event.type === 'user/message') {
+      fold.roles.userChars += messageTextLength((event.data as { message?: unknown }).message)
+      continue
+    }
+    if (event.type === 'tool/result') {
+      fold.roles.toolChars += messageTextLength((event.data as { message?: unknown }).message)
+      continue
+    }
+    if (event.type === 'turn/start') {
+      const turn = (event.data as { turn?: number }).turn ?? -1
+      const state = turnState(turns, turn)
+      if (event.time < state.startedAt) state.startedAt = event.time
+      continue
+    }
+    if (event.type === 'turn/end') {
+      const turn = (event.data as { turn?: number }).turn ?? -1
+      const state = turns.get(turn)
+      if (state !== undefined) state.endedAt = event.time
+      continue
+    }
+    if (event.type === 'step/start') {
+      const turn = (event.data as { turn?: number }).turn
+      const step = (event.data as { step?: number }).step
+      if (typeof turn === 'number' && typeof step === 'number') {
+        const stepKey = `${turn}:${step}`
+        steps.set(stepKey, { startTime: event.time })
+        lastOpenStepKey = stepKey
+      }
+      continue
+    }
+    if (event.type === 'request/header') {
+      const { model, provider: rawProvider } = (event.data as { header: { config: { model: string; provider: string } } }).header.config
+      // 历史路由别名归位：改名/删除的旧路由按别名映射到当前路由后再做一切判定。
+      const provider = routeAliases[rawProvider] ?? rawProvider
+      key = resolveCatalogKey(model)
+      // 订阅套餐 provider 的调用即使撞名计费表也一律免费。
+      subscription = isSubscriptionCall(subscriptionProviders, provider)
+      // 官方直连（DeepSeek 官方）vs 第三方中转/代理；有 baseURL 的路由按 origin 判定，
+      // 订阅豁免命中的配置外通道归位 direct（issue #37）。
+      const siteRef = siteRefOf(provider, routes, { subscription })
+      official = officialChannelOf(provider, siteRef, officialProviderIds)
+      // 中转站归组：按当前路由映射到站点/直连/未知路由。
+      siteBucket = siteBucketKey(siteRef)
+      // request/header 是该 step 的 TTFT 起点；归属到最近打开的 step（无独立请求头的
+      // 工具续写步骤保持 undefined，以 step/start 起算估算）。
+      if (lastOpenStepKey !== undefined) {
+        const stepState = steps.get(lastOpenStepKey)
+        if (stepState !== undefined && stepState.requestTime === undefined) stepState.requestTime = event.time
+      }
+      continue
+    }
+    if (event.type === 'web/deepseek-search-llm-request') {
+      // 联网搜索辅助请求（issue #15）：DSH 的搜索绕过对话通道直连官方
+      // api.deepseek.com，日志只记请求、没有响应/用量事件，开放平台却照常
+      // 计费。按「每次估值」计入费用（可配，设 0 关闭），token 维度不动；
+      // 模型取请求 body 的 model（归一化到计费目录键），站点桶固定
+      // direct:deepseek（不走 llm-pi-ai 路由，天然是官方直连）。
+      const model = (event.data as { body?: { model?: unknown } }).body?.model
+      const modelKey = typeof model === 'string' && model !== '' ? resolveCatalogKey(model) : 'other'
+      const day = dayStamp(event.time)
+      const siteKey = siteBucketKey({ kind: 'direct', provider: 'deepseek' })
+      foldSearchCall(fold.total, searchCallEstimateCny)
+      foldSearchCall(usageCell(fold.byModel, modelKey), searchCallEstimateCny)
+      foldSearchCall(usageCell(fold.byDay, day), searchCallEstimateCny)
+      foldSearchCall(modelDayCell(fold.byDayModels, day, modelKey), searchCallEstimateCny)
+      foldSearchCall(modelDaySiteCell(fold.byDayModelsSite, day, modelKey, siteKey), searchCallEstimateCny)
+      foldSearchCall(usageCell(fold.bySite, siteKey), searchCallEstimateCny)
+      foldSearchCall(usageCell(fold.byTier, tierAt(event.time)), searchCallEstimateCny)
+      continue
+    }
+    if (event.type === 'assistant/chunk') {
+      const data = event.data as { turn?: unknown; step?: unknown; chunk?: { type?: string } }
+      const turn = data.turn
+      const step = data.step
+      const chunk = data.chunk
+      // 内容增量（block-start/text-delta/reasoning-delta/tool-call-delta/block-end）
+      // 才记录首/末内容时刻；usage/finish 无正文，不算内容。TTFT 以首个内容 chunk 为准。
+      if (typeof turn === 'number' && typeof step === 'number' && chunk !== undefined && chunk.type !== 'usage' && chunk.type !== 'finish') {
+        const state = steps.get(`${turn}:${step}`)
+        if (state !== undefined) {
+          if (state.firstContentTime === undefined) state.firstContentTime = event.time
+          state.lastContentTime = event.time
+        }
+      }
+      // 工具调用计数：tool-call-delta 携带工具名（每个增量重复携带），按
+      // (turn, step, index) 首见计一次；名字缺失记 unknown。
+      if (chunk?.type === 'tool-call-delta' && typeof turn === 'number' && typeof step === 'number') {
+        const index = (chunk as { index?: unknown }).index
+        const name = (chunk as { name?: unknown }).name
+        const seenKey = `${turn}:${step}:${typeof index === 'number' ? index : '-'}`
+        if (!toolSeen.has(seenKey)) {
+          toolSeen.add(seenKey)
+          const toolName = typeof name === 'string' && name !== '' ? name : 'unknown'
+          fold.byTool.set(toolName, (fold.byTool.get(toolName) ?? 0) + 1)
+        }
+      }
+      continue
+    }
+    if (event.type !== 'assistant/message') continue
+    const usage = (event.data as { usage?: TokenUsage }).usage
+    if (usage === undefined) continue
+    // 权威归属：`message.source` 是 agent-loop 从当次请求复制的 { provider, model }，
+    // 每个调用一条；`request/header` 是稀疏事件（可能数十个调用才有一条），按它归属
+    // 会把两次 header 之间的用量全部串到上一个模型（订阅模型首当其冲，issue #14）。
+    // source 缺失（极旧格式日志）才兜底到 header 维护的状态。
+    const source = (event.data as { message?: { source?: { kind?: unknown; provider?: unknown; model?: unknown } } }).message?.source
+    if (source?.kind === 'model' && typeof source.provider === 'string' && typeof source.model === 'string') {
+      // 权威归属同样先做路由别名归位，与 request/header 口径一致。
+      const provider = routeAliases[source.provider] ?? source.provider
+      key = resolveCatalogKey(source.model)
+      subscription = isSubscriptionCall(subscriptionProviders, provider)
+      // 订阅豁免命中的配置外通道归位 direct，与 header 口径一致（issue #37）。
+      const siteRef = siteRefOf(provider, routes, { subscription })
+      official = officialChannelOf(provider, siteRef, officialProviderIds)
+      siteBucket = siteBucketKey(siteRef)
+    }
+    // 归属到本条 message 的权威模型，token 按缓存分桶累加。
+    // 时段按本次调用的实际时刻（event.time）精确判定，不再按固定比例混合。
+    const modelKey = key
+    const day = dayStamp(event.time)
+    // 不可计价模型（目录外/无价，且非订阅通道）收集到 unpriced 集合，供聚合层暴露给用户提示。
+    // 未知通道（配置外 provider，issue #82）不计价：支出主体无法核实，与订阅豁免、
+    // 未收录模型同姿态——费用记 0、token 照常统计；已收录模型因通道未知而未计价时
+    // 不进 unpricedModels（模型本身可计价，是通道不可核实）。
+    const unverifiedChannel = siteBucket === 'unknown' && !estimateUnknownRoutes
+    const priced = !subscription && !unverifiedChannel && isPriced(modelKey)
+    if (!subscription && !isPriced(modelKey)) fold.unpricedModels.add(modelKey)
+    // 本条消息折叠进 7 个桶 + 每轮明细，各桶费用完全相同：一次计价全程复用
+    // （此前逐桶重算 computeCostAt/modelOf，折叠最热路径付出 9 倍计价常数）。
+    // modelOf 无条件解析（含未计价/订阅通道）：峰谷分桶需要它的档位语义判断，
+    // 与计价共用同一次查找，不额外增加热路径成本。
+    const entry = modelOf(modelKey)
+    const thisCost = priced ? computeCostAt(entry, {
+      input: (usage.cacheReadTokens ?? 0) + usage.inputTokens + (usage.cacheWriteTokens ?? 0),
+      cacheHit: usage.cacheReadTokens ?? 0,
+      cacheMiss: usage.inputTokens + (usage.cacheWriteTokens ?? 0),
+      output: usage.outputTokens,
+    }, event.time) : undefined
+    foldUsage(fold.total, usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel)
+    foldUsage(usageCell(fold.byModel, modelKey), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel)
+    foldUsage(usageCell(fold.byDay, day), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel)
+    foldUsage(modelDayCell(fold.byDayModels, day, modelKey), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel)
+    // 模型×日期×站点三维（issue #16）：供「按 origin 绑定自定义价」的显示层重估。
+    foldUsage(modelDaySiteCell(fold.byDayModelsSite, day, modelKey, siteBucket), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel)
+    foldUsage(usageCell(fold.bySite, siteBucket), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel)
+    // 峰谷分桶：与计费同口径逐调用判档（tierAt），峰谷占比因此是真实数据。
+    // 延迟档模型（tierSemantics='latency'，Gemini Standard/Flex）的计价与时刻
+    // 无关（peakShare 混合），不套北京峰谷窗分桶——否则峰谷占比条把无时间窗
+    // 语义的流量虚计入峰/谷（FOLD_VERSION 23）。
+    if (entry.tierSemantics !== 'latency') {
+      foldUsage(usageCell(fold.byTier, tierAt(event.time)), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel)
+    }
+    if (subscription) fold.planCalls.set(modelKey, (fold.planCalls.get(modelKey) ?? 0) + 1)
+    // 三维格同款计数：provider 视图的行 plan 按本格判定，键与 byDayModelsSite 对齐。
+    if (subscription) {
+      const sitePlanKey = planSiteKey(day, modelKey, siteBucket)
+      fold.planSiteCalls.set(sitePlanKey, (fold.planSiteCalls.get(sitePlanKey) ?? 0) + 1)
+    }
+    // 每轮明细：同一轮内的调用累加进该轮状态（模型取最近一次的归属）。
+    const turn = (event.data as { turn?: number }).turn ?? -1
+    const state = turnState(turns, turn)
+    state.model = modelKey
+    state.input += usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
+    state.output += usage.outputTokens
+    state.cacheHit += usage.cacheReadTokens ?? 0
+    state.cacheMiss += usage.inputTokens + (usage.cacheWriteTokens ?? 0)
+    if (thisCost !== undefined && entry !== undefined) {
+      state.cost += thisCost
+      // 角色归因：输出成本实测计价；输入成本 = 整次成本 - 输出部分，合并时
+      // 再按 user/tool 消息字符占比摊分。
+      const outputCost = computeCostAt(entry, { input: 0, cacheHit: 0, cacheMiss: 0, output: usage.outputTokens }, event.time)
+      fold.roles.outputCost += outputCost
+      fold.roles.inputCost += thisCost - outputCost
+    }
+    if (state.startedAt === Number.MAX_SAFE_INTEGER) state.startedAt = event.time
+    // 性能样本：该 step 的 TTFT / 生成速度 / 总延迟；无效样本不入集。
+    // 工具续写步骤无独立 request/header（perfState.requestTime 缺失）时以 step/start 估算。
+    const stepNum = (event.data as { step?: number }).step
+    if (typeof stepNum === 'number') {
+      const perfState = steps.get(`${turn}:${stepNum}`)
+      if (perfState !== undefined) {
+        const sample = perfSampleOf(perfState, modelKey, usage.outputTokens ?? 0, event.time)
+        if (sample !== undefined) fold.perf.push(sample)
+        steps.delete(`${turn}:${stepNum}`)
+      }
+    }
+  }
+  // 归因状态写回 machine：后续批次（分片/增量）从这里继续。
+  machine.key = key
+  machine.subscription = subscription
+  machine.official = official
+  machine.siteBucket = siteBucket
+  machine.lastOpenStepKey = lastOpenStepKey
+}
+
+/** 从轮次状态派生 fold.turns（每批次结束后重派生；半开轮次跨批次保留）。 */
+function refreshTurns(fold: SessionFold, machine: FoldMachine): void {
+  fold.turns = [...machine.turns.values()]
+    .filter(state => state.input > 0 || state.output > 0)
+    .sort((a, b) => a.turn - b.turn)
+    .map(state => ({
+      turn: state.turn,
+      model: state.model,
+      input: state.input,
+      output: state.output,
+      cacheHit: state.cacheHit,
+      cacheMiss: state.cacheMiss,
+      cost: state.cost,
+      startedAt: state.startedAt === Number.MAX_SAFE_INTEGER ? fold.lastActive : state.startedAt,
+      ...(state.endedAt === undefined ? {} : { endedAt: state.endedAt }),
+    }))
+}
+
+/**
+ * Fold one session's events into a {@link SessionFold}. 每个 LLM 调用归属到
+ * 其 `assistant/message` 自带 `message.source` 记录的模型（agent-loop 落盘时从
+ * 当次请求复制，每个调用一条，不依赖稀疏的 request/header）；source 缺失时
+ * 兜底到最近一次 request/header 的状态。同时提取最新会话标题、最后活跃时间，
+ * 并按轮次折叠每轮费用明细（turn/start → turn/end；调用按 (turn) 归组）。
+ * @param events - the session's persisted events in log order.
+ * @param subscriptionProviders - 订阅套餐匹配器（显式集合或判定函数）。
+ * @param officialProviderIds - provider ids treated as the official DeepSeek channel
+ *   (default: channel-origin based via {@link officialChannelOf}). Others count as third-party.
+ * @param routes - 当前 provider 路由视图（中转站归组）。
+ * @param searchCallEstimateCny - 联网搜索请求的单次费用估算（人民币元；0 关闭估算）。
+ * @param seedLength - 持久化的 fork 血缘边界（存储元数据 `inheritedEventCount`，缺省 0）：
+ *   fork 子会话日志里 `seq < seedLength` 的事件拷贝自父会话、已在父会话计费，
+ *   折叠时跳过以避免重复计费；resume 续写复用同一会话日志（每次续写追加一个
+ *   `session/end-seed` 标记）但继承切割保持原值，历史段照常计费。
+ * @returns the per-session fold (cached by the incremental aggregator).
+ */
+export function foldSession(
+  events: readonly { type: string; time: number; data: unknown; seq?: number }[],
+  subscriptionProviders: SubscriptionMatcher,
+  officialProviderIds?: ReadonlySet<string>,
+  routes: Readonly<Record<string, ProviderRouteView>> = {},
+  searchCallEstimateCny: number = DEFAULT_SEARCH_CALL_ESTIMATE_CNY,
+  seedLength = 0,
+  routeAliases: Readonly<Record<string, string>> = {},
+  estimateUnknownRoutes = false,
+): SessionFold {
+  const fold = freshFold()
+  const machine = freshMachine()
+  foldInto(fold, machine, events, subscriptionProviders, officialProviderIds, routes, searchCallEstimateCny, seedLength, routeAliases, estimateUnknownRoutes)
+  refreshTurns(fold, machine)
+  return fold
+}
+
+/**
+ * 生成一个 step 的性能样本；无效 / 超出 sane 上限（15 分钟）时返回 undefined，
+ * 避免单条异常记录（时区错位 / 服务端抖动）拉偏均值。
+ */
+function perfSampleOf(state: StepPerf, model: string, outputTokens: number, endTime: number): PerfSample | undefined {
+  const start = state.requestTime ?? state.startTime
+  const first = state.firstContentTime
+  const last = state.lastContentTime
+  if (start === undefined || first === undefined || first < start) return undefined
+  const ttftMs = first - start
+  if (!Number.isFinite(ttftMs) || ttftMs < 0 || ttftMs > 900000) return undefined
+  const genMs = last !== undefined && last > first ? last - first : undefined
+  const latencyMs = endTime >= start ? endTime - start : undefined
+  const tps = genMs !== undefined && genMs > 0 && outputTokens > 0 ? outputTokens / (genMs / 1000) : undefined
+  return {
+    model,
+    hour: hourStamp(endTime),
+    ttftMs,
+    ...(tps === undefined || !Number.isFinite(tps) || tps <= 0 ? {} : { tps }),
+    estimated: state.requestTime === undefined,
+    ...(latencyMs === undefined ? {} : { latencyMs }),
+  }
+}
+
+/** Accumulate one ModelUsage into another (merge step of the incremental aggregator). */
+function mergeUsageInto(acc: ModelUsage, cell: ModelUsage): void {
+  acc.calls += cell.calls
+  acc.input += cell.input
+  acc.output += cell.output
+  acc.reasoning += cell.reasoning
+  acc.cacheHit += cell.cacheHit
+  acc.cacheMiss += cell.cacheMiss
+  // 旧快照无 cacheWrite 维度：只在来源确实携带时才落字段（保持缺省语义）。
+  if (cell.cacheWrite !== undefined) acc.cacheWrite = (acc.cacheWrite ?? 0) + cell.cacheWrite
+  acc.cost += cell.cost
+  acc.officialCalls += cell.officialCalls
+  acc.officialCost += cell.officialCost
+  // 旧快照无 searchCalls 维度：只在来源确实携带时才落字段（保持缺省语义）。
+  if (cell.searchCalls !== undefined) acc.searchCalls = (acc.searchCalls ?? 0) + cell.searchCalls
+}
+
+/** 分位数（0..1）：先拷贝排序，再线性插值；空数组返回 0。 */
+function percentile(values: number[], p: number): number {
+  if (values.length === 0) return 0
+  const sorted = [...values].sort((a, b) => a - b)
+  const idx = (sorted.length - 1) * p
+  const lo = Math.floor(idx)
+  const hi = Math.ceil(idx)
+  if (lo === hi) { const value = sorted[lo]; return value === undefined ? 0 : value }
+  const a = sorted[lo]
+  const b = sorted[hi]
+  if (a === undefined || b === undefined) return 0
+  return a + (b - a) * (idx - lo)
+}
+
+/** 按模型聚合的性能累加器。 */
+interface PerfModelAccum {
+  ttfts: number[]
+  tps: number[]
+  latencies: number[]
+  estimated: number
+}
+
+/** 按小时×模型聚合的性能累加器（小时 → 模型 → 样本集）。 */
+interface PerfHourAccum {
+  ttfts: number[]
+  tps: number[]
+}
+
+/** 活样本累加器 → 模型级摘要（跨会话合并前先归一到摘要形态）。 */
+function accumToModelDigest(acc: PerfModelAccum): PerfModelDigest {
+  return {
+    samples: acc.ttfts.length,
+    ttftSum: acc.ttfts.reduce((sum, value) => sum + value, 0),
+    ttftMax: acc.ttfts.length === 0 ? 0 : Math.max(...acc.ttfts),
+    ttftSpikes: acc.ttfts.filter(ttft => ttft > PERF_SPIKE_MS).length,
+    ttftP50: percentile(acc.ttfts, 0.5),
+    ttftP90: percentile(acc.ttfts, 0.9),
+    tpsCount: acc.tps.length,
+    tpsSum: acc.tps.reduce((sum, value) => sum + value, 0),
+    latencyCount: acc.latencies.length,
+    latencySum: acc.latencies.reduce((sum, value) => sum + value, 0),
+    estimated: acc.estimated,
+  }
+}
+
+/** 活样本小时累加器 → 小时级摘要。 */
+function accumToHourDigest(acc: PerfHourAccum): PerfHourDigest {
+  return {
+    samples: acc.ttfts.length,
+    ttftSum: acc.ttfts.reduce((sum, value) => sum + value, 0),
+    tpsCount: acc.tps.length,
+    tpsSum: acc.tps.reduce((sum, value) => sum + value, 0),
+  }
+}
+
+/** 模型级摘要 → 面板行（均值由求和/计数派生）。 */
+function modelPerfOf(digest: PerfModelDigest): ModelPerf {
+  return {
+    samples: digest.samples,
+    ttftAvg: digest.samples === 0 ? 0 : digest.ttftSum / digest.samples,
+    ttftP50: digest.ttftP50,
+    ttftP90: digest.ttftP90,
+    ttftMax: digest.ttftMax,
+    ttftSpikes: digest.ttftSpikes,
+    ...(digest.tpsCount === 0 ? {} : { tpsAvg: digest.tpsSum / digest.tpsCount }),
+    latencyAvg: digest.latencyCount === 0 ? 0 : digest.latencySum / digest.latencyCount,
+    estimatedSamples: digest.estimated,
+  }
+}
+
+/** 小时级摘要 → 面板行（均值由求和/计数派生）。 */
+function hourPerfOf(digest: PerfHourDigest): HourModelPerf {
+  return {
+    samples: digest.samples,
+    ttftAvg: digest.samples === 0 ? 0 : digest.ttftSum / digest.samples,
+    ...(digest.tpsCount === 0 ? {} : { tpsAvg: digest.tpsSum / digest.tpsCount }),
+  }
+}
+
+/**
+ * 增量聚合器：按会话缓存折叠结果，用日志文件的 mtime+size 作失效键——
+ * 日志没动的会话直接复用，只有写过的会话重新折叠；整份文档另有短 TTL
+ * 合并密集轮询。带增量状态机的活跃会话由有界 LRU 承载（进程内有效）；
+ * 无状态机的账本行不占 LRU 名额，直接从 durable 账本反序列化复用，
+ * 进程重启后日志未动的会话零读取。
+ */
+export interface UsageAggregator {
+  /** Aggregate current usage, reusing cached per-session folds when their logs are untouched.
+   *  并发调用共享同一次进行中的折叠（in-flight 去重），不会多倍全量重读。 */
+  aggregate(): Promise<UsageStatsDocument>
+  /**
+   * 按会话 id 取该会话的完整累计用量。doc 的 `byTurn` 封顶（最近 200 轮），
+   * 用户回到旧会话续聊时其轮次已被挤出，从 doc 反推会低估——这里直接读该
+   * 会话的缓存/账本折叠，是该会话的精确值（含联网搜索估算，口径与 total 一致）。
+   * @param sessionId - 会话 id（String(SessionId) 形态，与账本键同口径）。
+   * @returns 会话累计；日志与账本均无该会话时 undefined（调用方自行兜底）。
+   */
+  sessionUsageOf(sessionId: string): Promise<SessionUsageSummary | undefined>
+  /**
+   * 最近一次**已完成**的聚合文档（不触发新的折叠）。
+   *
+   * 供路由的 stale-while-revalidate 兜底用：当本轮折叠超过响应预算（宿主单进程
+   * 事件循环被重活折叠占住）时，落盘快照最多落后一个节流窗口（分钟级），而这里
+   * 的内存文档只落后一个聚合周期——两者都是「上次算好的」，但内存那份更新。
+   * 从未完成过一次聚合时返回 undefined（调用方回落到磁盘快照）。
+   * @returns 最近一次完成的聚合文档；尚无完成聚合时 undefined。
+   */
+  lastDocOf(): UsageStatsDocument | undefined
+  /** 立刻落盘未保存的账本改动（无视节流），供插件卸载时调用；
+   *  进行中的聚合先等完再存，折叠失败仍保存已成功部分。 */
+  flush(): Promise<void>
+}
+
+/** 单会话累计用量（{@link UsageAggregator.sessionUsageOf} 的返回）。 */
+export interface SessionUsageSummary {
+  calls: number
+  cost: number
+  input: number
+  output: number
+}
+
+/**
+ * 聚合配置指纹：影响折叠语义的全部配置（订阅豁免、官方名单、路由别名、搜索估值）
+ * 的稳定序列化。账本行的复用判定携带该指纹——用户改配置后（如为 grok build 加
+ * 订阅豁免），历史账本行立即失效并全量重折，配置变更即时生效（issue #37）。
+ * 判定函数无法序列化，统一记为 `fn`（任何函数形态互视为同一指纹）。
+ */
+export function configFingerprint(
+  subscriptionMatcher: SubscriptionMatcher,
+  officialProviderIds: ReadonlySet<string> | undefined,
+  routeAliases: Readonly<Record<string, string>>,
+  searchEstimate: number,
+  modelKeyAliases: Readonly<Record<string, string>> = {},
+  registeredProviders: ReadonlySet<string> = new Set(),
+  routeOrigins: Readonly<Record<string, string>> = {},
+): string {
+  const subs = typeof subscriptionMatcher === 'function'
+    ? 'fn'
+    : [...subscriptionMatcher].sort().join(',')
+  const officials = officialProviderIds === undefined
+    ? ''
+    : [...officialProviderIds].sort().join(',')
+  const aliases = Object.keys(routeAliases).sort()
+    .map(key => `${key}=${routeAliases[key]}`)
+    .join(',')
+  // 模型别名影响折叠时的目录键归一：改动不进指纹会让 byModel 新旧 key 并存（issue #91 P2）。
+  const modelKeys = Object.keys(modelKeyAliases).sort()
+    .map(key => `${key}=${modelKeyAliases[key]}`)
+    .join(',')
+  // 已注册 adapter 集合决定插件注册通道的归位（issue #91 P1）：增删 provider 插件
+  // 后历史行按新通道口径重算。
+  const registered = [...registeredProviders].sort().join(',')
+  // 路由 baseURL 影响折叠输出（站点归组、官方直连判定、未知通道零计价）：改
+  // baseURL 不进指纹会让历史行沿用旧站点口径（自审计延期项）。只收录有 baseURL
+  // 的路由——直连路由无 origin 语义，合成空路由视图变化不构成重折理由。
+  const origins = Object.keys(routeOrigins).sort()
+    .map(key => `${key}=${routeOrigins[key]}`)
+    .join(',')
+  return [subs, officials, aliases, String(searchEstimate), modelKeys, registered, origins].join('|')
+}
+
+/** 会话格式拒读（宿主 SessionFormatUnsupportedError）：日志完好，仅本构建读不了。
+ * 宿主错误类显式落 error.name；经包装/重建的路径只在 message 里保留类名，两处都认。
+ * 据此把「格式不受支持」与「损坏/其他读取失败」分开计数，供面板按原因归因（issue #84）。 */
+function isFormatUnsupportedError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  return error.name === 'SessionFormatUnsupportedError' || error.message.includes('SessionFormatUnsupportedError')
+}
+
+/**
+ * Create the incremental usage aggregator.
+ * @param persistence - the session persistence service.
+ * @param options - aggregation tuning (e.g. subscription-plan providers).
+ * @returns the aggregator holding the per-session fold cache.
+ */
+export function createUsageAggregator(persistence: UsagePersistence, options: AggregateOptions = {}): UsageAggregator {
+  // 订阅判定默认用显式基线集合（含 tencent-token-plan）。不用 id 正则做默认——
+  // 正则前缀会撞名（如名为 openrouter 的中转路由被误豁免）；需要与订阅卡完全
+  // 同口径时，显式配置传 isSubscriptionProviderId 判定函数（SubscriptionMatcher）。
+  // subscriptionMatcher 为引用语义：调用方持有的 Set 原地增删即生效（MiniMax 按 key 动态判定）。
+  const subscriptionMatcher: SubscriptionMatcher = options.subscriptionMatcher
+    ?? (options.subscriptionProviders === undefined
+      ? new Set(DEFAULT_SUBSCRIPTION_PROVIDERS)
+      : new Set(options.subscriptionProviders))
+  const officialProviderIds = options.officialProviderIds === undefined
+    ? undefined
+    : new Set(options.officialProviderIds)
+  const routeAliases: Readonly<Record<string, string>> = options.routeAliases ?? {}
+  const maxCacheSessions = options.maxCacheSessions ?? DEFAULT_MAX_CACHE_SESSIONS
+  // 内存 cache 条目：fold 是 Map/Set 重表示；machine + lastSeq 是增量折叠游标
+  // （issue #30），仅本进程内有效——ledger 恢复的行不带 machine，退回全量重折。
+  const cache = new Map<string, { stamp: string | null; fold: SessionFold; machine?: FoldMachine; lastSeq?: number; fingerprint: string }>()
+  // Durable rows stay JSON-safe in memory. The LRU above still bounds the
+  // heavier Map/Set representation used for active-session incremental folds.
+  const ledger = new Map<string, UsageLedgerSession>()
+  let ledgerLoaded = false
+  let ledgerNeedsSave = false
+  let lastLedgerSaveAt = 0
+  // 不可读会话负缓存（id → 失败 stamp + 是否格式拒读）：stamp 不变不再重读——
+  // 新版宿主写出的未知事件格式会在读取中途抛错，不缓存的话每轮聚合（前端 30s
+  // 轮询）都把该日志重新解压解析一遍再失败；stamp 变化（日志被重写/追加）后自动
+  // 重试一次。format 位让负缓存命中轮次仍能按原因细分未统计计数（issue #84）。
+  const unreadable = new Map<string, { stamp: string; format: boolean }>()
+  // 读不动的会话的宿主侧标题（issue #103）：日志读不动时账本旧行的标题会停在
+  // 重命名前的值，用宿主投影缓存里的标题兜底。跨轮次保留——负缓存会让后续轮次
+  // 不再重读该会话，提示若只活一轮就没意义了；会话重新读得动时立即作废
+  // （那时以日志为准）。
+  const titleHints = new Map<string, string>()
+  // 并发聚合共享的进行中的折叠（usage-stats / balance / usage_stats 工具会同时触发）。
+  let inflight: Promise<UsageStatsDocument> | undefined
+  // 加载边界跑迁移后留下的已应用 id；save 透传，避免每次重启都把迁移重跑一遍。
+  let ledgerAppliedMigrations: string[] | undefined
+  let lastDoc: UsageStatsDocument | undefined
+  let lastAt = 0
+  // 账本行反序列化按行内容身份记忆（自审计 2026-10-14）：快路径/兜底段每轮都对
+  // 全部历史行跑 deserializeFold，行内容不变时结果相同——历史行多（上千个存档）
+  // 时把每轮 O(行数) 的重建降为 0。recordLedger 重写行时 fold 引用换代，
+  // WeakMap 旧键随旧对象回收，不留陈旧折叠。
+  const deserializedFoldOf = (() => {
+    const memo = new WeakMap<SerializedSessionFold, SessionFold>()
+    return (serialized: SerializedSessionFold): SessionFold => {
+      const hit = memo.get(serialized)
+      if (hit !== undefined) return hit
+      const fold = deserializeFold(serialized)
+      memo.set(serialized, fold)
+      return fold
+    }
+  })()
+  /** 每次聚合取最新的 provider 路由视图（中转站零配置发现）；缺省按空处理（全部未知路由）。
+   *  叠加已注册 adapter 的通道（issue #91）：宿主 llm 注册表里的 provider 合成无 baseURL
+   *  的空路由视图——siteRefOf 的路由命中分支正是「无 origin 直连」的语义，归位
+   *  `direct:<provider>` 按官方目录价计费；llm-pi-ai 已有配置的路由优先（其 origin 可还原）。 */
+  const routesOf = (registered: ReadonlySet<string>): Readonly<Record<string, ProviderRouteView>> => {
+    const routes: Record<string, ProviderRouteView> = { ...options.resolveRoutes?.() }
+    for (const provider of registered) {
+      if (routes[provider] === undefined) routes[provider] = {}
+    }
+    return routes
+  }
+  // 联网搜索请求的单次费用估算（issue #15）；0 = 关闭估算（调用仍计数，不计费）。
+  const searchEstimate = options.searchCallEstimateCny ?? DEFAULT_SEARCH_CALL_ESTIMATE_CNY
+  // 配置指纹：进账本行的复用判定（配置变化 → 历史行失效重折，issue #37）。模型别名
+  // 与已注册 adapter 集合同属折叠语义（issue #91）：改动后历史行按新口径重算。
+  // 已注册集合随 provider 插件装卸变化，按聚合轮次求值——宿主 llm/adapters-updated
+  // 之后的第一轮聚合即按新通道口径重折，无需订阅事件。路由 baseURL 同属折叠语义
+  // （站点归组/官方判定依赖 origin）：与注册表共用同一份路由视图，不重复求值。
+  const routeOriginsOf = (routes: Readonly<Record<string, ProviderRouteView>>): Readonly<Record<string, string>> => {
+    const origins: Record<string, string> = {}
+    for (const [route, view] of Object.entries(routes)) {
+      if (view.baseURL !== undefined && view.baseURL !== '') origins[route] = view.baseURL
+    }
+    return origins
+  }
+  const foldFingerprintOf = (registered: ReadonlySet<string>, routes: Readonly<Record<string, ProviderRouteView>>): string =>
+    configFingerprint(subscriptionMatcher, officialProviderIds, routeAliases, searchEstimate, options.modelKeyAliases, registered, routeOriginsOf(routes)) + (options.estimateUnknownRoutes === true ? '|fork-estimate-unknown' : '')
+  // 初值不带注册表（每轮聚合开始前刷新）：创建时刻不为指纹多读一次服务。
+  let foldFingerprint = foldFingerprintOf(new Set(), {})
+  // 全量重折的分片大小：把超长事件数组切成有限内存片（纯切片上界，不再承担
+  // 让出节拍——让出改按墙钟，见 FOLD_SLICE_MS）。
+  const FOLD_CHUNK_EVENTS = 8000
+  // 墙钟分片（issue #104/#105）：同步折叠每累计 ~8ms 让出一次事件循环（setImmediate
+  // 让到 check 阶段），宿主能在折叠间隙正常服务请求。取代此前的「每 8 个会话 /
+  // 每片事件」计数让出——计数挡不住 35MB 级单会话（一片就能连堵数秒），墙钟
+  // 上限与单个会话/分片的体积无关。
+  const FOLD_SLICE_MS = 8
+  // 冷phase闸门（issue #105）：聚合器创建后 deferFoldMs 内的 aggregate() 只出
+  // 账本轻文档。0 / 缺省 = 不设闸（旧行为：随到随折）。
+  const foldAllowedAt = Date.now() + Math.max(0, options.deferFoldMs ?? 0)
+
+  /** 惰性失效（价目表时序）：账本/缓存行若以「当时不可计价」的模型落盘，
+   *  而价目表现在能计价了，该行必须重折——否则显示层按实时价算出的
+   *  「目录价预估」与服务端 cost=0 并存，出现「明细比总额高」的双口径
+   *  （真机复现：预热折叠早于 models.dev 价目表注入，step-5-preview
+   *  折叠时刻 cost=0、渲染时刻 ≈¥38）。复用判定据此刻检查：不走配置指纹
+   *  （价目表不进指纹，否则 6h 一次的价格刷新会让全部历史行全量重折），
+   *  也不 bump FOLD_VERSION（那是归账语义版本，价目表时序不是语义变更）。
+   *  价目表变化后未受影响行（无 unpriced 模型）依旧零读取复用。 */
+  const foldNeedsReprice = (fold: SerializedSessionFold): boolean =>
+    fold.unpricedModels.some(key => isPriced(key))
+
+  /** 把一份（全量或增量）折叠结果登记进 durable ledger；内容无变化时不落盘。 */
+  const recordLedger = (id: string, cwd: string | undefined, stamp: string | null, fold: SessionFold, subOf?: string): void => {
+    if (options.ledger === undefined) return
+    const entry: UsageLedgerSession = {
+      id,
+      ...(cwd === undefined ? {} : { cwd }),
+      ...(subOf === undefined ? {} : { subOf }),
+      ...(stamp === null ? {} : { stamp }),
+      foldVersion: FOLD_VERSION,
+      fingerprint: foldFingerprint,
+      foldedAt: Date.now(),
+      fold: serializeFold(fold),
+    }
+    const row = ledger.get(id)
+    // A no-locate backend has no stable stamp, so compare the serialized row;
+    // located logs use the cheap stamp and metadata check.
+    // 例外：行内 unpricedModels 模型若已被当前价目表收录（惰性失效触发的重折），
+    // 必须重写——fold 的 cost/unpricedModels 变了，但元数据键全同，不比内容会发现不了。
+    const changed = row === undefined
+      || row.stamp !== entry.stamp
+      || row.cwd !== entry.cwd
+      || row.subOf !== entry.subOf
+      || row.foldVersion !== entry.foldVersion
+      || row.fingerprint !== entry.fingerprint
+      || (stamp === null && JSON.stringify(row.fold) !== JSON.stringify(entry.fold))
+      || (stamp !== null && foldNeedsReprice(row.fold))
+    if (changed) {
+      ledger.set(id, entry)
+      ledgerNeedsSave = true
+    }
+  }
+
+  const ensureLedgerLoaded = async (): Promise<void> => {
+    if (ledgerLoaded || options.ledger === undefined) return
+    ledgerLoaded = true
+    try {
+      const stored = await options.ledger.load()
+      if (stored !== null && typeof stored === 'object' && (stored as UsageLedgerDocument).sessions !== undefined) {
+        // 配置迁移：对原始文档执行未应用的迁移；有修改时重新落盘（下轮聚合写回）。
+        const document = stored as UsageLedgerDocument
+        if (runLedgerMigrations(document)) ledgerNeedsSave = true
+        ledgerAppliedMigrations = document.appliedMigrations
+        // 拒读负缓存回填（issue #105）：跨重启跳过已证读不动的日志——宿主要解压
+        // 解析到拒绝点才抛错，单条数百 ms，上百条拒读会话是每次启动的固定大头。
+        // 条目形状不可信（外部 JSON）逐条收窄；stamp 失效/会话消失照常清理。
+        for (const refusal of document.refused ?? []) {
+          if (typeof refusal?.id === 'string' && typeof refusal?.stamp === 'string') {
+            unreadable.set(refusal.id, { stamp: refusal.stamp, format: refusal.format === true })
+          }
+        }
+      }
+      for (const entry of ledgerSessionsOf(stored)) ledger.set(entry.id, entry)
+    } catch (error) {
+      // A damaged ledger must not take down the dashboard. The host store normally
+      // tries its .bak first; if both fail, current logs rebuild a fresh ledger.
+      console.warn('[usage-billing] failed to load durable usage ledger; rebuilding from current sessions:', error)
+    }
+  }
+
+  /** 失效键：宿主 0.1.3+ 走 adapter 暴露的 revision 令牌；0.1.2 形状退回
+   * 日志文件 mtime+size（经 locate，拿不到或抛错时返回 null 让调用方重折）。
+   * locate/stat 调用纳入 try，避免单个会话的异常把整份聚合拖垮。 */
+  const stampOf = async (meta: SessionHeader): Promise<string | null> => {
+    if (persistence.stampOf !== undefined) {
+      try {
+        return await persistence.stampOf(meta.id)
+      } catch {
+        return null
+      }
+    }
+    try {
+      const location = persistence.locate?.(meta)
+      if (location === undefined) return null
+      const info = await stat(location.path)
+      return `${String(info.mtimeMs)}:${String(info.size)}`
+    } catch {
+      return null
+    }
+  }
+
+  /** 落盘账本：force 无视节流（flush 用）；常规路径首次立即保存，之后按
+   *  LEDGER_SAVE_INTERVAL_MS 节流。失败仅告警——内存中的聚合值仍然正确。 */
+  const saveLedger = async (force: boolean): Promise<void> => {
+    if (options.ledger === undefined || !ledgerNeedsSave) return
+    if (!force && lastLedgerSaveAt !== 0 && Date.now() - lastLedgerSaveAt < LEDGER_SAVE_INTERVAL_MS) return
+    try {
+      await options.ledger.save({
+        version: 1,
+        updatedAt: Date.now(),
+        sessions: [...ledger.values()],
+        // 拒读负缓存随账本落盘（issue #105）：重启后跳过已证读不动的日志；
+        // 上限封顶防异常环境把账本撑爆。
+        ...(unreadable.size === 0 ? {} : {
+          refused: [...unreadable].slice(0, LEDGER_REFUSED_CAP).map(([id, mark]) => ({ id, stamp: mark.stamp, format: mark.format })),
+        }),
+        ...(ledgerAppliedMigrations === undefined ? {} : { appliedMigrations: ledgerAppliedMigrations }),
+      })
+      ledgerNeedsSave = false
+      lastLedgerSaveAt = Date.now()
+    } catch (error) {
+      // Keep serving the correct in-memory total; a later changed aggregation retries.
+      console.warn('[usage-billing] failed to persist durable usage ledger:', error)
+    }
+  }
+
+  /**
+   * 一轮聚合。mode='full' 走完整流程（list + 逐会话失效判定 + 折叠/复用）；
+   * mode='ledger-only' 只吃账本存档出轻文档（冷phase，issue #105）：不 list、
+   * 不读任何日志，doc 带 staleSnapshot=true 且**不进 TTL 缓存**（lastDoc 不动，
+   * 开门后的下一轮即完整折叠）——轻文档的每行折叠反序列化有 WeakMap 记忆，
+   * 重复构建只付 O(行数) 的汇总合并，冷phase里每个请求都可负担。
+   */
+  const aggregateOnce = async (mode: 'full' | 'ledger-only'): Promise<UsageStatsDocument> => {
+      const now = Date.now()
+
+      await ensureLedgerLoaded()
+      // 每轮刷新指纹与路由视图：已注册 adapter 集合变化（provider 插件装卸）或路由
+      // baseURL 变化（站点归组依赖 origin）即触发历史行重折。注册表查询每轮只跑
+      // 一次——此前 routesOf() 在每个分片折叠调用点都走一次服务调用 + 集合合并，
+      // 大会话分片会放大成调用风暴（issue #91 回退）。轻文档同样要刷新：兜底行的
+      // stale 标记（foldVersion/指纹比对）依赖当前指纹。
+      const registeredProviders = options.resolveRegisteredProviders?.() ?? new Set<string>()
+      const roundRoutes = routesOf(registeredProviders)
+      foldFingerprint = foldFingerprintOf(registeredProviders, roundRoutes)
+
+      const seen = new Set<string>()
+      const included = new Set<string>()
+      // subOf：子智能体归并标记（header origin/parentSession；账本兜底行出自
+      // 持久化的 subOf 字段）——只进 bySession 行的 parentId，不影响任何总额桶。
+      const folds: { id: string; cwd?: string; subOf?: string; fold: SessionFold; staleLedger?: true }[] = []
+      // skipped：记录本轮新失败的会话 id（stderr 明细；负缓存命中不重复打印），
+      // 聚合末尾统一告警。carriedUnreadable 计负缓存命中的历史失败会话，与本轮
+      // 新失败合成 unreadableSessions——计数跨轮次稳定，面板的「未统计」通知
+      // 不随负缓存生效而消失（issue #84）。formatUnreadable 为其中格式拒读子集，
+      // noLedgerUnreadable 为其中连账本存档都没有、完全未计入的子集。
+      const skipped: string[] = []
+      let carriedUnreadable = 0
+      let carriedFormatUnreadable = 0
+      let formatUnreadable = 0
+      let noLedgerUnreadable = 0
+      let staleLedgerSessions = 0
+      if (mode === 'full') {
+      let metas: readonly SessionHeader[]
+      try {
+        metas = await persistence.list()
+      } catch (error) {
+        if (options.ledger === undefined || ledger.size === 0) throw error
+        // The independent ledger is also the last-resort source when the session
+        // backend itself is temporarily unavailable; no live rows are pruned.
+        console.warn('[usage-billing] session list unavailable; serving durable usage ledger:', error)
+        metas = []
+      }
+      // 墙钟分片游标（FOLD_SLICE_MS）：与上一片让出点的间隔超过预算就让出。
+      let sliceAt = Date.now()
+      for (const meta of metas) {
+        // 周期性让出事件循环（issue #104/#105）：折叠主体是同步 CPU 计算，会话
+        // 之间的 await 只排微任务——不主动让出时，宿主的事件循环在整个折叠期间
+        // 不回到 poll 阶段，定时器 / RPC / 静态资源请求被连续饿死，界面卡死。
+        // 按墙钟让出：单片阻塞上限 ~8ms，与单个会话的体积无关。
+        if (Date.now() - sliceAt >= FOLD_SLICE_MS) {
+          await new Promise<void>(resolve => { setImmediate(resolve) })
+          sliceAt = Date.now()
+        }
+        const id = String(meta.id)
+        seen.add(id)
+        const stamp = await stampOf(meta)
+        // 负缓存命中：该会话上次以同一 stamp 读取失败（如未知事件格式），本轮
+        // 直接跳过，不再重读重压；stamp 变化（日志被重写/追加）后自动重试。
+        // 不进 included：其陈旧账本行仍由下方的账本兜底段合并，不丢历史用量。
+        // 命中仍计入未统计计数（issue #84）：否则首轮之后通知归零消失。
+        const mark = unreadable.get(id)
+        if (stamp !== null && mark !== undefined && mark.stamp === stamp) {
+          carriedUnreadable += 1
+          if (mark.format) carriedFormatUnreadable += 1
+          // 无存档子集：拒读会话的账本行不变（账本在循环前已加载），按轮重查即可。
+          if (!ledger.has(id)) noLedgerUnreadable += 1
+          continue
+        }
+        // 单个损坏/不可读的会话日志（如 zstd torn frame）不能拖垮整份聚合：
+        // 跳到下一个会话，避免面板整体归零。失败会话放进 skipped 末尾告警。
+        try {
+          const cwd = meta.cwd
+          const subOf = subParentOf(meta)
+          // 重启首折快路径：账本行的失效键与当前日志完全一致（同算法版本）时
+          // 零读取复用——几十个历史会话的重启不再各自全量解压一遍。
+          // 放在 cache 命中之前：惰性失效（价目表就绪）须让账本行优先拦截，否则
+          // 命中缓存的旧折叠（同 stamp 零读取）会吞掉重折。账本命中行不进 LRU，
+          // 也不写 cache（stamp 未动，每轮直接命中账本快路径）。
+          const ledgerRow = ledger.get(id)
+          if (ledgerRow !== undefined && ledgerRow.stamp !== undefined && stamp !== null
+            && ledgerRow.stamp === stamp && (ledgerRow.foldVersion ?? 1) === FOLD_VERSION
+            && ledgerRow.fingerprint === foldFingerprint
+            && !foldNeedsReprice(ledgerRow.fold)) {
+            const fold = deserializedFoldOf(ledgerRow.fold)
+            folds.push({ id, ...(cwd === undefined ? {} : { cwd }), ...(subOf === undefined ? {} : { subOf }), fold })
+            included.add(id)
+            continue
+          }
+          const hit = cache.get(id)
+          // 惰性失效同样作用于 cache 命中路径：预热折叠（价目表未就绪）会同时写入
+          // cache 行与账本行——账本门触发落穿后，若无这道门就会零读取复用旧折叠，
+          // 空闲会话 stamp 永不变 → 整个进程生命周期 cost=0，只有重启才自愈。
+          // cache 里是内存版 fold（unpricedModels 是 Set，没有 .some）。
+          // 配置指纹同门（issue #91）：已注册 adapter 集合/模型别名变化后，缓存的
+          // 旧口径折叠不能继续复用——落穿到下方按指纹失效全量重折。
+          if (hit !== undefined && stamp !== null && hit.stamp === stamp
+            && hit.fingerprint === foldFingerprint
+            && ![...hit.fold.unpricedModels].some(key => isPriced(key))) {
+            // LRU touch：复用命中的会话移到缓存末尾，供上方上限清理优先淘汰最久未用。
+            cache.delete(id)
+            cache.set(id, hit)
+            folds.push({ id, ...(meta.cwd === undefined ? {} : { cwd: meta.cwd }), ...(subOf === undefined ? {} : { subOf }), fold: hit.fold })
+            included.add(id)
+            continue
+          }
+          const previous = cache.get(id)
+          // 惰性失效同样作用于增量游标：价目表就绪后，此前因模型未收录而
+          // cost=0 的缓存行不能继续增量追加（旧事件永远补不出 cost）；
+          // 配置指纹过期（注册表/别名变化）同理——旧段永远折不出新口径，
+          // 两种失效都直接跳过增量退回全量重折，整条日志按当前口径计价。
+          if (previous?.machine !== undefined && previous.lastSeq !== undefined
+            && previous.fingerprint === foldFingerprint
+            && ![...previous.fold.unpricedModels].some(key => isPriced(key))) {
+            // seq 增量折叠（issue #30）：活跃会话持续追加使 mtime+size 键每轮失效，
+            // 全量重读会让宿主事件循环连续阻塞十几秒、session/list 全部挂起。
+            // 只读取上次折叠之后的新增段，折进既有 fold（状态机跨批次延续）。
+            const from = previous.lastSeq + 1
+            const { events, inheritedEventCount } = await persistence.readFrom(meta.id, sessionLogOffsetOf(from))
+            const after = await stampOf(meta)
+            if (stamp !== null && after !== stamp) {
+              // 竞态：本批增量可能折进了半截内容，且 fold 已被原地修改——
+              // 只能整条丢弃（含被污染的 fold），下一轮全量重折。
+              cache.delete(id)
+              continue
+            }
+            const first = events[0]?.seq
+            if (events.length === 0 || first !== from) {
+              // 起始 seq 之后无事件 / seq 不连续：日志被截断或重写，增量前提
+              // 失效——丢弃缓存退回全量。
+              cache.delete(id)
+              continue
+            }
+            foldInto(previous.fold, previous.machine, events, subscriptionMatcher, officialProviderIds, roundRoutes, searchEstimate, inheritedEventCount, routeAliases, options.estimateUnknownRoutes === true)
+            refreshTurns(previous.fold, previous.machine)
+            const last = events[events.length - 1]
+            previous.lastSeq = last?.seq ?? previous.lastSeq
+            previous.stamp = stamp
+            // LRU touch：增量命中的会话移到缓存末尾，避免被上限清理误淘汰后退化全量。
+            cache.delete(id)
+            cache.set(id, previous)
+            folds.push({ id, ...(cwd === undefined ? {} : { cwd }), ...(subOf === undefined ? {} : { subOf }), fold: previous.fold })
+            included.add(id)
+            recordLedger(id, cwd, stamp, previous.fold, subOf)
+            continue
+          }
+          // 全量重折（首次 / 缓存淘汰 / 日志重写）：分片折叠并周期性让出事件循环，
+          // 超大会话不再把宿主 RPC 连续挂死十几秒。
+          const { events, inheritedEventCount } = await persistence.readFrom(meta.id, sessionLogOffsetOf(0))
+          // P0-4 竞态加固：读取期间日志被写入（mtime+size 变化），本轮的折叠可能基于
+          // 半截内容，丢弃待下一轮重读，避免把不完整事件当作真实用量输出。
+          const after = await stampOf(meta)
+          if (stamp !== null && after !== stamp) continue
+          // durable 边界：日志事件是外部 JSON，foldInto 内做运行时收窄。
+          // fork 血缘边界取存储元数据的 inheritedEventCount（resume 保持原 fork
+          // 切割，不会误杀历史段）。
+          const fold = freshFold()
+          const machine = freshMachine()
+          for (let start = 0; start < events.length; start += FOLD_CHUNK_EVENTS) {
+            foldInto(fold, machine, events.slice(start, start + FOLD_CHUNK_EVENTS), subscriptionMatcher, officialProviderIds, roundRoutes, searchEstimate, inheritedEventCount, routeAliases, options.estimateUnknownRoutes === true)
+            // 墙钟让出（FOLD_SLICE_MS）：FOLD_CHUNK_EVENTS 只负责把超长事件数组
+            // 切成有限内存片，让出节拍由片间累计耗时决定——单片再小、连折多片
+            // 累计超预算同样要让，宿主 RPC 不被连续饿死（issue #104/#105）。
+            if (start + FOLD_CHUNK_EVENTS < events.length && Date.now() - sliceAt >= FOLD_SLICE_MS) {
+              await new Promise<void>(resolve => { setImmediate(resolve) })
+              sliceAt = Date.now()
+            }
+          }
+          refreshTurns(fold, machine)
+          const last = events[events.length - 1] as { seq?: number } | undefined
+          cache.set(id, { stamp, fold, machine, ...(last !== undefined && typeof last.seq === 'number' ? { lastSeq: last.seq } : {}), fingerprint: foldFingerprint })
+          folds.push({ id, ...(cwd === undefined ? {} : { cwd }), ...(subOf === undefined ? {} : { subOf }), fold })
+          included.add(id)
+          recordLedger(id, cwd, stamp, fold, subOf)
+        } catch (error) {
+          skipped.push(id)
+          const format = isFormatUnsupportedError(error)
+          if (format) formatUnreadable += 1
+          // 有账本旧行的拒读会话历史仍按存档计入（下方兜底段），只缺新增部分；
+          // 无账本行的才是完全未计入——分开计数，通知措辞才准确（issue #84）。
+          if (!ledger.has(id)) noLedgerUnreadable += 1
+          // 记负缓存：stamp 不变期间不再重读该会话（下轮聚合直接跳过）。
+          // 新记录/换 stamp 都标记落盘（refused 随账本持久化，issue #105）——
+          // 否则写放大守卫（ledgerNeedsSave）看不到这次变化，重启后还会重读。
+          if (stamp !== null) {
+            unreadable.set(id, { stamp, format })
+            ledgerNeedsSave = true
+          }
+          // 标题兜底（issue #103）：日志读不动时，账本旧行的标题会永远停在
+          // 重命名前的值；宿主侧的会话标题（投影缓存）可能仍是新值，记下来给
+          // 兜底段用。宿主没有该能力时静默跳过，行为不变。
+          if (options.resolveSessionTitle !== undefined) {
+            const hint = options.resolveSessionTitle(meta)
+            if (hint !== undefined) titleHints.set(id, hint)
+          }
+          console.warn('[usage-billing] skip unreadable session', id, error)
+        }
+        // 本轮真读到日志的会话：标题以日志为准，作废宿主侧提示。
+        if (included.has(id)) titleHints.delete(id)
+      }
+      } // end of full-mode session loop（ledger-only 跳过 list 与全部日志读取）
+      // 已删除会话的缓存/负缓存一并清除，避免内存随历史膨胀（仅 full 模式——
+      // ledger-only 的 seen 为空，跑这里会把负缓存整表误清，下轮全量又重读一遍）。
+      if (mode === 'full') {
+        for (const key of [...cache.keys()]) {
+          if (!seen.has(key)) cache.delete(key)
+        }
+        for (const key of [...unreadable.keys()]) {
+          // 负缓存条目随会话消失一并清除，且标记落盘（refused 与账本同文件）。
+          if (!seen.has(key)) {
+            unreadable.delete(key)
+            ledgerNeedsSave = true
+          }
+        }
+        // P1-6 峰值内存治理：缓存会话数超过上限时，从最久未用的开始淘汰。
+        while (cache.size > maxCacheSessions) {
+          const oldest = cache.keys().next()
+          if (oldest.done === true) break
+          cache.delete(oldest.value)
+        }
+      }
+      // The durable ledger is deliberately not pruned by `seen`: missing rows are
+      // history, not cache garbage. Unreadable live sessions also fall back to their
+      // last successfully folded ledger row. ledger-only 模式整份文档都出自这里
+      // （included 为空 → 全部行入档），同样按墙钟让出（issue #105）。
+      if (options.ledger !== undefined) {
+        let fallbackSliceAt = Date.now()
+        for (const entry of ledger.values()) {
+          if (Date.now() - fallbackSliceAt >= FOLD_SLICE_MS) {
+            await new Promise<void>(resolve => { setImmediate(resolve) })
+            fallbackSliceAt = Date.now()
+          }
+          if (included.has(entry.id)) continue
+          try {
+            // 缺失 foldVersion（迁移前的异常路径）按 v1 处理：保守标注旧算法。
+            // 配置指纹不一致的行同样标 stale：其归属按旧配置算，与当前口径有偏差。
+            const stale = (entry.foldVersion ?? 1) < FOLD_VERSION || entry.fingerprint !== foldFingerprint
+            const fold = deserializedFoldOf(entry.fold)
+            // 标题兜底（issue #103）：该会话的日志读不动（宿主拒绝该格式/代际），
+            // 账本旧行的标题会停在重命名前的值；宿主侧的标题（投影缓存）优先。
+            // 读得动的会话不走这里（included 命中即 continue），标题以日志为准。
+            const hint = titleHints.get(entry.id)
+            folds.push({
+              id: entry.id,
+              ...(entry.cwd === undefined ? {} : { cwd: entry.cwd }),
+              ...(entry.subOf === undefined ? {} : { subOf: entry.subOf }),
+              ...(stale ? { staleLedger: true as const } : {}),
+              // 复制一份再改标题：deserializedFoldOf 的结果被 WeakMap 记忆并共享。
+              fold: hint === undefined ? fold : { ...fold, title: hint },
+            })
+            included.add(entry.id)
+            if (stale) staleLedgerSessions += 1
+          } catch (error) {
+            console.warn('[usage-billing] skip invalid durable ledger session', entry.id, error)
+          }
+        }
+        // 写放大治理：全量序列化是 O(会话数)，按 LEDGER_SAVE_INTERVAL_MS 节流；
+        // 窗口内的改动由插件卸载时的 flush 兜底。
+        await saveLedger(false)
+      }
+      // 只读路径无坏会话时无需区分：stampOf 命中或新会话，失败均已在上面跳过。
+      if (skipped.length > 0) {
+        console.warn(`[usage-billing] aggregated ${folds.length} sessions, skipped ${skipped.length} unreadable:`, skipped)
+      }
+
+      const total = emptyUsage()
+      const byModel = new Map<string, ModelUsage>()
+      const byDay = new Map<string, ModelUsage>()
+      const byDayModels = new Map<string, Map<string, ModelUsage>>()
+      const byDayModelsSite = new Map<string, Map<string, Map<string, ModelUsage>>>()
+      const byTier = new Map<string, ModelUsage>()
+      const byTool = new Map<string, number>()
+      const bySite = new Map<string, ModelUsage>()
+      const unpricedModels = new Set<string>()
+      const planCalls = new Map<string, number>()
+      const planSiteCalls = new Map<string, number>()
+      const sessionRows: SessionUsageRow[] = []
+      const turnRows: TurnUsageRow[] = []
+      const workspaceMap = new Map<string, WorkspaceUsageRow>()
+      // 角色归因跨会话累加：字符占比与输入/输出成本分别求和后再摊分。
+      const roles: RoleFold = { userChars: 0, toolChars: 0, inputCost: 0, outputCost: 0 }
+      // 性能：活样本进数组累加器（doc 生成精确插值）；账本恢复行的摘要进
+      // digest 累加器（计数/求和/极值精确，分位数按样本数加权）。
+      const perfModel = new Map<string, PerfModelAccum>()
+      const perfHourModel = new Map<string, Map<string, PerfHourAccum>>()
+      const perfModelDigest = new Map<string, PerfModelDigest>()
+      const perfHourDigest = new Map<string, Map<string, PerfHourDigest>>()
+      for (const { id: sessionId, cwd, subOf, fold, staleLedger } of folds) {
+        mergeUsageInto(total, fold.total)
+        roles.userChars += fold.roles.userChars
+        roles.toolChars += fold.roles.toolChars
+        roles.inputCost += fold.roles.inputCost
+        roles.outputCost += fold.roles.outputCost
+        for (const [modelKey, cell] of fold.byModel) mergeUsageInto(usageCell(byModel, modelKey), cell)
+        for (const [day, cell] of fold.byDay) mergeUsageInto(usageCell(byDay, day), cell)
+        for (const [day, models] of fold.byDayModels) {
+          for (const [modelKey, cell] of models) mergeUsageInto(modelDayCell(byDayModels, day, modelKey), cell)
+        }
+        for (const [day, models] of fold.byDayModelsSite) {
+          for (const [modelKey, sites] of models) {
+            for (const [siteKey, cell] of sites) mergeUsageInto(modelDaySiteCell(byDayModelsSite, day, modelKey, siteKey), cell)
+          }
+        }
+        for (const [siteKey, cell] of fold.bySite) mergeUsageInto(usageCell(bySite, siteKey), cell)
+        for (const [tierKey, cell] of fold.byTier) mergeUsageInto(usageCell(byTier, tierKey), cell)
+        for (const [toolName, count] of fold.byTool) byTool.set(toolName, (byTool.get(toolName) ?? 0) + count)
+        for (const id of fold.unpricedModels) unpricedModels.add(id)
+        for (const [modelKey, count] of fold.planCalls) {
+          planCalls.set(modelKey, (planCalls.get(modelKey) ?? 0) + count)
+        }
+        for (const [key, count] of fold.planSiteCalls) {
+          planSiteCalls.set(key, (planSiteCalls.get(key) ?? 0) + count)
+        }
+        // 性能样本入桶：按模型、按小时×模型各聚合一份；小时×模型供性能曲线按模型对比。
+        for (const sample of fold.perf) {
+          let modelAccum = perfModel.get(sample.model)
+          if (modelAccum === undefined) {
+            modelAccum = { ttfts: [], tps: [], latencies: [], estimated: 0 }
+            perfModel.set(sample.model, modelAccum)
+          }
+          modelAccum.ttfts.push(sample.ttftMs)
+          if (sample.tps !== undefined) modelAccum.tps.push(sample.tps)
+          if (sample.latencyMs !== undefined) modelAccum.latencies.push(sample.latencyMs)
+          if (sample.estimated) modelAccum.estimated += 1
+          let hourModels = perfHourModel.get(sample.hour)
+          if (hourModels === undefined) {
+            hourModels = new Map()
+            perfHourModel.set(sample.hour, hourModels)
+          }
+          let hourAccum = hourModels.get(sample.model)
+          if (hourAccum === undefined) {
+            hourAccum = { ttfts: [], tps: [] }
+            hourModels.set(sample.model, hourAccum)
+          }
+          hourAccum.ttfts.push(sample.ttftMs)
+          if (sample.tps !== undefined) hourAccum.tps.push(sample.tps)
+        }
+        // 账本恢复行：摘要直并入全局摘要累加器（无样本可展开）。
+        for (const [model, digest] of fold.perfDigest) {
+          perfModelDigest.set(model, mergeModelDigest(perfModelDigest.get(model) ?? EMPTY_MODEL_DIGEST, digest))
+        }
+        for (const [hour, models] of fold.perfHourDigest) {
+          let hourModels = perfHourDigest.get(hour)
+          if (hourModels === undefined) {
+            hourModels = new Map()
+            perfHourDigest.set(hour, hourModels)
+          }
+          for (const [model, digest] of models) {
+            hourModels.set(model, mergeHourDigest(hourModels.get(model) ?? EMPTY_HOUR_DIGEST, digest))
+          }
+        }
+        // 每轮明细：跨会话的轮次统一按起始时间倒序（展示最近 N 轮）。
+        for (const row of fold.turns) turnRows.push({ sessionId, ...row })
+        // 工作区聚合：按 cwd 归并（优先用宿主工作区标题，未注入/未命中回退到末级目录名）。
+        const wsName = (options.resolveWorkspaceTitle !== undefined && cwd !== undefined)
+          ? (options.resolveWorkspaceTitle(cwd) ?? workspaceNameOf(cwd))
+          : workspaceNameOf(cwd)
+        const ws = workspaceMap.get(wsName) ?? { name: wsName, calls: 0, cost: 0, input: 0, output: 0, lastActive: 0 }
+        ws.calls += fold.total.calls
+        ws.cost += fold.total.cost
+        ws.input += fold.total.input
+        ws.output += fold.total.output
+        ws.lastActive = Math.max(ws.lastActive, fold.lastActive)
+        workspaceMap.set(wsName, ws)
+        if (fold.total.calls > 0) {
+          sessionRows.push({
+            id: sessionId,
+            // exactOptionalPropertyTypes：缺失的可选字段不带 key。
+            ...(fold.title !== undefined ? { title: fold.title } : {}),
+            ...(cwd !== undefined ? { cwd } : {}),
+            ...(subOf !== undefined ? { parentId: subOf } : {}),
+            ...(staleLedger === true ? { stale: true } : {}),
+            calls: fold.total.calls,
+            cost: fold.total.cost,
+            lastActive: fold.lastActive,
+          })
+        }
+      }
+      // 子智能体归并（纯展示层）：行级 parentId + 后代合计，先于排序计算。
+      foldSubagentFamilies(sessionRows)
+      sessionRows.sort((a, b) => b.cost - a.cost || b.lastActive - a.lastActive)
+      turnRows.sort((a, b) => b.startedAt - a.startedAt)
+      const workspaces = [...workspaceMap.values()].sort((a, b) => b.cost - a.cost || b.lastActive - a.lastActive)
+
+      const toRecord = (map: Map<string, ModelUsage>): Record<string, ModelUsage> => {
+        // exactOptionalPropertyTypes：只有全部调用都走订阅通道时才带 plan 字段。
+        const record: Record<string, ModelUsage> = {}
+        for (const [key, cell] of map) {
+          if (planCalls.get(key) === cell.calls && cell.calls > 0) record[key] = { ...cell, plan: true }
+          else record[key] = cell
+        }
+        return record
+      }
+      const toModelDayRecord = (map: Map<string, Map<string, ModelUsage>>): Record<string, Record<string, ModelUsage>> =>
+        Object.fromEntries([...map].map(([day, models]) => [day, Object.fromEntries(models)]))
+      const toModelDaySiteRecord = (map: Map<string, Map<string, Map<string, ModelUsage>>>): Record<string, Record<string, Record<string, ModelUsage>>> =>
+        Object.fromEntries([...map].map(([day, models]) =>
+          [day, Object.fromEntries([...models].map(([model, sites]) =>
+            [model, Object.fromEntries([...sites].map(([site, cell]): [string, ModelUsage] => {
+              // 格级 plan：该格全部调用都走订阅通道才置位（provider 行徽标按通道判，
+              // 不再借模型全局口径）。旧账本行无 planSiteCalls 计数 → 保守不置位，
+              // 客户端回退模型全局 plan（byModel.plan）。
+              const count = planSiteCalls.get(planSiteKey(day, model, site)) ?? 0
+              return [site, count === cell.calls && cell.calls > 0 ? { ...cell, plan: true } : cell]
+            }))]))]))
+
+      // 性能指标：按模型（含 P90）、按小时×模型聚合；无任何可测样本时整个 perf 字段缺失。
+      // 活样本先归一为摘要再与账本恢复行合并——纯活数据下加权合并退化为精确插值
+      // （恒等元权重 0），混合数据下分位数按样本数加权（展示级近似）。
+      const modelKeys = new Set([...perfModel.keys(), ...perfModelDigest.keys()])
+      const hourKeys = new Set([...perfHourModel.keys(), ...perfHourDigest.keys()])
+      const perf: PerfStats | undefined = modelKeys.size === 0 && hourKeys.size === 0
+        ? undefined
+        : {
+          byModel: Object.fromEntries([...modelKeys].map((model) => {
+            const live = perfModel.get(model)
+            const restored = perfModelDigest.get(model)
+            const digest = live === undefined
+              ? restored
+              : mergeModelDigest(accumToModelDigest(live), restored ?? EMPTY_MODEL_DIGEST)
+            return digest === undefined ? null : [model, modelPerfOf(digest)]
+          }).filter((entry): entry is [string, ModelPerf] => entry !== null)),
+          byHourModel: Object.fromEntries([...hourKeys].sort().map((hour) => {
+            const liveModels = perfHourModel.get(hour)
+            const digestModels = perfHourDigest.get(hour)
+            const modelKeysInHour = new Set([...liveModels?.keys() ?? [], ...digestModels?.keys() ?? []])
+            return [hour, Object.fromEntries([...modelKeysInHour].map((model) => {
+              const live = liveModels?.get(model)
+              const restored = digestModels?.get(model)
+              const digest = live === undefined
+                ? restored
+                : mergeHourDigest(accumToHourDigest(live), restored ?? EMPTY_HOUR_DIGEST)
+              return digest === undefined ? null : [model, hourPerfOf(digest)]
+            }).filter((entry): entry is [string, HourModelPerf] => entry !== null))]
+          })),
+        }
+      // 未统计计数合成（issue #84）：本轮新失败 + 负缓存命中，跨轮次稳定——
+      // 否则首轮之后负缓存生效，面板的「未统计」通知归零消失。
+      const unreadableTotal = skipped.length + carriedUnreadable
+      const formatUnreadableTotal = formatUnreadable + carriedFormatUnreadable
+      const document: UsageStatsDocument = {
+        version: 4,
+        updatedAt: now,
+        source: 'session-logs',
+        timezone: hostTimeZone(),
+        total,
+        byModel: toRecord(byModel),
+        byDay: toRecord(byDay),
+        byDayModels: toModelDayRecord(byDayModels),
+        ...(byDayModelsSite.size === 0 ? {} : { byDayModelsSite: toModelDaySiteRecord(byDayModelsSite) }),
+        bySession: sessionRows.slice(0, SESSION_ROW_LIMIT),
+        byTurn: turnRows.slice(0, TURN_ROW_LIMIT),
+        byWorkspace: workspaces.slice(0, SESSION_ROW_LIMIT),
+        ...(byTier.size === 0 ? {} : { byTier: { peak: byTier.get('peak') ?? emptyUsage(), offPeak: byTier.get('offPeak') ?? emptyUsage() } }),
+        ...(byTool.size === 0 ? {} : { byTool: Object.fromEntries([...byTool].sort((a, b) => b[1] - a[1])) }),
+        ...(bySite.size === 0 ? {} : { bySite: toRecord(bySite) }),
+        ...(unpricedModels.size === 0 ? {} : { unpricedModels: [...unpricedModels].sort() }),
+        ...(searchEstimate > 0 ? { searchCallEstimateCny: searchEstimate } : {}),
+        ...(perf === undefined ? {} : { perf }),
+        ...(staleLedgerSessions > 0 ? { staleLedgerSessions } : {}),
+        // 未统计的会话数：费用缺失的可诊断性信号（插件 issue #71/#84）——
+        // 数据未丢，按原因恢复后自动计入，面板据此明示「未统计」而非今日费用静默为空。
+        ...(unreadableTotal > 0 ? { unreadableSessions: unreadableTotal } : {}),
+        // 其中格式拒读（SessionFormatUnsupportedError）子集：过新格式升级宿主、
+        // 过旧格式需先迁移，与损坏/其他读取失败分开归因（issue #84）。
+        ...(formatUnreadableTotal > 0 ? { unreadableFormatSessions: formatUnreadableTotal } : {}),
+        // 其中无任何账本存档、完全未计入的子集：区别于「按存档计入最近可用点、
+        // 只缺新增部分」的会话，面板据此把「完全缺失」与「部分缺失」分开表述。
+        ...(noLedgerUnreadable > 0 ? { unreadableNoLedgerSessions: noLedgerUnreadable } : {}),
+        // 角色归因：输出成本为实测；输入成本按 user/tool 消息字符占比摊分
+        //（无任何消息内容的日志按五五均分兜底，整体属估算口径）。
+        byRole: (() => {
+          const chars = roles.userChars + roles.toolChars
+          const userShare = chars > 0 ? roles.userChars / chars : 0.5
+          return {
+            user: roles.inputCost * userShare,
+            assistant: roles.outputCost,
+            tool: roles.inputCost * (1 - userShare),
+          }
+        })(),
+        // 冷phase轻文档标记（issue #105）：「本档出自账本存档、未读任何日志」。
+        // 客户端复用 #103 的 staleSnapshot「数据滞后」横幅呈现，零新增客户端体积。
+        ...(mode === 'ledger-only' ? { staleSnapshot: true } : {}),
+      }
+      // 轻文档不进 TTL 缓存（lastDoc 仍是上一份完整折叠或空）：缓存它会让开门后
+      // 的首个请求继续命中轻文档、多等一个 TTL。轻文档的行反序列化有 WeakMap
+      // 记忆兜底，每请求重build只付 O(行数) 汇总合并，可负担。
+      if (mode === 'full') {
+        lastDoc = document
+        lastAt = now
+      }
+      return document
+  }
+
+  return {
+    aggregate(): Promise<UsageStatsDocument> {
+      const now = Date.now()
+      if (lastDoc !== undefined && now - lastAt < AGGREGATE_TTL_MS) return Promise.resolve(lastDoc)
+      // 冷phase（issue #105）：闸门内的请求只吃账本轻文档，不触发任何日志读取
+      // ——UI 一加载的轮询不再把全量折叠拉进启动关键路径。完整折叠已在飞（闸门
+      // 刚开）时等它，而不是再折一遍。
+      if (now < foldAllowedAt) return inflight ?? aggregateOnce('ledger-only')
+      // 并发去重：多个调用方（usage-stats / balance / usage_stats 工具）同时
+      // 触发聚合时共享同一次进行中的折叠，避免多倍全量重读压垮事件循环。
+      inflight ??= aggregateOnce('full').finally(() => { inflight = undefined })
+      return inflight
+    },
+    async sessionUsageOf(sessionId: string): Promise<SessionUsageSummary | undefined> {
+      // 先等一次聚合（TTL/并发共享与 aggregate() 同口径）：确保 cache 与
+      // ledger 至少反映最近一次折叠，而非空态。
+      await this.aggregate()
+      const hit = cache.get(sessionId)
+      if (hit !== undefined) {
+        return { calls: hit.fold.total.calls, cost: hit.fold.total.cost, input: hit.fold.total.input, output: hit.fold.total.output }
+      }
+      const row = ledger.get(sessionId)
+      if (row === undefined) return undefined
+      try {
+        const fold = deserializedFoldOf(row.fold)
+        return { calls: fold.total.calls, cost: fold.total.cost, input: fold.total.input, output: fold.total.output }
+      } catch {
+        // 账本行损坏（deserialize 抛错）：视为无数据，调用方走 doc 兜底。
+        return undefined
+      }
+    },
+    async flush(): Promise<void> {
+      // 等进行中的聚合落定（折叠失败也继续保存已成功部分），无视节流落盘。
+      if (inflight !== undefined) await inflight.catch(() => {})
+      await saveLedger(true)
+    },
+    lastDocOf(): UsageStatsDocument | undefined {
+      // 只读已完成的文档：不触发折叠、不改 TTL 游标。
+      return lastDoc
+    },
+  }
+}
+
+/**
+ * Aggregate real usage from every persisted session log (one-shot, no cache).
+ * @param persistence - the session persistence service.
+ * @param options - aggregation tuning (e.g. subscription-plan providers).
+ * @returns the usage-stats document (same shape the dashboard expects).
+ */
+export async function aggregateUsage(persistence: UsagePersistence, options: AggregateOptions = {}): Promise<UsageStatsDocument> {
+  return createUsageAggregator(persistence, options).aggregate()
+}

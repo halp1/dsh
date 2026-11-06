@@ -1,0 +1,1045 @@
+/**
+ * Subscription-plan quota polling (node half): how much of each coding/token
+ * plan is left. The billing dashboard already exempts subscription providers
+ * from per-token cost; this module surfaces the REMAINING quota so the user
+ * sees plan headroom instead of a blank row.
+ *
+ * The panel shows only the plans the user actually configured: adapters with
+ * a known quota API (Kimi, Z.ai, OpenCode Go) query the remaining amount;
+ * other subscription providers the harness recognizes (volcengine / baidu /
+ * qwen / xiaomi token plans, agent plans…) are identified and listed with a
+ * "no quota API" marker rather than hidden. API keys come from the `llm-pi-ai`
+ * settings namespace resolved through the credentials seam: the classic
+ * `apiKeyEnv` refs, or — on hosts whose settings UI stores route keys as
+ * credentials refs named after the route (`<ROUTE>_API_KEY`, catalog ambient
+ * names as fallback) — the conventional refs, matched against the same
+ * subscription-class route ids.
+ */
+
+import type { SubscriptionPlanConfig, SubscriptionQuota, SubscriptionStatus, SubscriptionWindow } from './pricing-shared.ts'
+import { firstResolvedRef, routeKeyRefCandidates } from './route-keys.ts'
+import { createCooldownGate, withRetry } from './resilience.ts'
+import { callTokenHub, firstEnabledTeamId, parseTencentCredential, pickRemainingQuota, pickTotalQuota } from './tc3.ts'
+import { swallowed } from './silent.ts'
+
+/** 每平台熔断门：某个订阅适配器连续可重试失败（网络 / 5xx / 429）达阈值后
+ *  短路由不可用，避免 30 秒轮询对已故障的上游反复打满超时。鉴权失败（unauthorized）
+ *  是配置问题，不计入熔断。 */
+const subscriptionGate = createCooldownGate({ failures: 3, cooldownMs: 60_000 })
+
+/** 订阅适配器需要的凭据（来自 llm-pi-ai 设置命名空间）。 */
+export interface SubscriptionKeys {
+  /** Kimi For Coding API key。 */
+  kimiApiKey: string
+  /** Z.ai Coding Plan API key（国际域 api.z.ai）。 */
+  zaiApiKey: string
+  /** Z.ai（智谱国内域）Coding Plan API key——国内 / 国际是两个平台，key 不通用（不同于 MiniMax 的同 key 双域）。 */
+  zaiCnApiKey: string
+  /** OpenCode Go API key。 */
+  opencodeApiKey: string
+  /** MiniMax Token Plan API key。 */
+  minmaxApiKey: string
+  /** OpenRouter API key（credits 已用%）。 */
+  openrouterApiKey: string
+  /** Anthropic Claude Pro/Max OAuth access token。 */
+  anthropicApiKey: string
+  /** CommandCode API key（user_* 前缀）。 */
+  commandcodeApiKey: string
+  /** 腾讯云云 API 密钥对（`<SecretId>:<SecretKey>`，管控面用，非 TokenHub 推理 key）。 */
+  tencentCloudApi: string
+  /** Z.ai 区域（global / bigmodel-cn）。 */
+  zaiRegion: 'global' | 'bigmodel-cn'
+}
+
+/**
+ * 解析 OpenCode 客户端凭据文档（~/.local/share/opencode/auth.json）里的
+ * OpenCode Go token。两种形态都收：
+ * - 平铺：`{"token": "..."}` / `{"key": "..."}` / `{"apiKey": "..."}` / 裸字符串；
+ * - 按 provider 分桶（实测形态）：`{"opencode-go": {"type": "api", "key": "..."}}`，
+ *   桶序 opencode-go → opencode → zen 即优先序。
+ * 识别不出返回空串，绝不抛错——这只是一次便利回退。
+ */
+export function parseOpenCodeAuthDocument(document: unknown): string {
+  if (typeof document === 'string' && document.trim() !== '') return document.trim()
+  if (document === null || typeof document !== 'object') return ''
+  const record = document as Record<string, unknown>
+  const topToken = record['token'] ?? record['key'] ?? record['apiKey']
+  if (typeof topToken === 'string' && topToken !== '') return topToken
+  for (const bucket of ['opencode-go', 'opencode', 'zen']) {
+    const entry = record[bucket]
+    if (entry === null || typeof entry !== 'object') continue
+    const entryRecord = entry as Record<string, unknown>
+    const bucketToken = entryRecord['key'] ?? entryRecord['token'] ?? entryRecord['apiKey']
+    if (typeof bucketToken === 'string' && bucketToken !== '') return bucketToken
+  }
+  return ''
+}
+
+/** 空凭据：全部未配置时的初始值。 */
+export const EMPTY_SUBSCRIPTION_KEYS: SubscriptionKeys = {
+  kimiApiKey: '',
+  zaiApiKey: '',
+  zaiCnApiKey: '',
+  opencodeApiKey: '',
+  minmaxApiKey: '',
+  openrouterApiKey: '',
+  anthropicApiKey: '',
+  commandcodeApiKey: '',
+  tencentCloudApi: '',
+  zaiRegion: 'global',
+}
+
+/** 订阅 provider id（llm-pi-ai 设置键）→ SubscriptionKeys 字段的映射。 */
+const SUBSCRIPTION_KEY_SOURCES: ReadonlyArray<{ provider: string; key: Exclude<keyof SubscriptionKeys, 'zaiRegion'> }> = [
+  { provider: 'kimi-coding', key: 'kimiApiKey' },
+  { provider: 'zai-coding-cn', key: 'zaiCnApiKey' },
+  { provider: 'zai-coding', key: 'zaiApiKey' },
+  { provider: 'opencode', key: 'opencodeApiKey' },
+  { provider: 'opencode-go', key: 'opencodeApiKey' },
+  { provider: 'minimax', key: 'minmaxApiKey' },
+  { provider: 'minimax-token-plan', key: 'minmaxApiKey' },
+  { provider: 'minimax-token-plan-cn', key: 'minmaxApiKey' },
+  { provider: 'minimax-cn', key: 'minmaxApiKey' },
+  { provider: 'openrouter', key: 'openrouterApiKey' },
+  { provider: 'commandcode', key: 'commandcodeApiKey' },
+  { provider: 'tencent-token-plan', key: 'tencentCloudApi' },
+  // 注意：anthropic 有意不在此表——llm-pi-ai 的 anthropic 路由多为按量 sk-ant key
+  //（误当 OAuth token 查订阅会 401），Claude 订阅行只走 Claude Code 登录态自动发现。
+]
+
+/**
+ * key 解析的可测核心（无文件 I/O）：先显式 `apiKeyEnv`（旧口径，优先），key 仍缺
+ * 时按约定 ref 名解析（新版宿主的存放形态，见 route-keys.ts）。`keyConfigured`
+ * 回报每条路由的 key 是否解析成功，供识别层作为第三配置信号（refResolved）。
+ * @param providers - llm-pi-ai 的 providers 视图。
+ * @param resolveRef - 凭据 seam：ref 名 → 非空 key 值；未配置/失败返回 undefined。
+ */
+export async function resolveSubscriptionAccess(
+  providers: Readonly<Record<string, SubscriptionRouteConfigView | undefined>>,
+  resolveRef: (name: string) => Promise<string | undefined>,
+): Promise<{ keys: SubscriptionKeys; keyConfigured: ReadonlySet<string> }> {
+  const keys: SubscriptionKeys = { ...EMPTY_SUBSCRIPTION_KEYS }
+  const keyConfigured = new Set<string>()
+  for (const { provider, key } of SUBSCRIPTION_KEY_SOURCES) {
+    // 1) 显式 apiKeyEnv 引用（经典形态，优先）。
+    const env = providers[provider]?.apiKeyEnv
+    if (typeof env === 'string' && env !== '') {
+      const value = await resolveRef(env)
+      if (value !== undefined) {
+        keys[key] = value
+        keyConfigured.add(provider)
+        continue
+      }
+    }
+    // 2) 新版宿主：key 存凭据 refs，按路由约定名（+目录 ambient 名）找回。
+    const hit = await firstResolvedRef(routeKeyRefCandidates(provider), resolveRef)
+    if (hit !== undefined) {
+      keys[key] = hit.value
+      keyConfigured.add(provider)
+    }
+  }
+  return { keys, keyConfigured }
+}
+
+/** 已识别的一个订阅套餐（用户在 llm-pi-ai 里配置了 key 的订阅类 provider）。 */
+export interface IdentifiedSubscriptionPlan {
+  /** llm-pi-ai 的 provider id（如 kimi-coding、xiaomi-token-plan-cn）。 */
+  provider: string
+  /** 显示名（映射表命中则用映射，否则用 id）。 */
+  displayName: string
+  /** 是否有额度查询适配器。 */
+  adapter: boolean
+  /** 适配器区域覆盖：两个 Z.ai 路由各自固定区域，互不跟随 keys.zaiRegion。 */
+  region?: 'global' | 'bigmodel-cn'
+}
+
+/**
+ * 一条 llm-pi-ai 路由的订阅识别视图：三个「已配置」信号任一为真即识别。
+ * 新版宿主（内置目录 + ambient 发现）把路由 key 存进凭据 refs，providers 配置里
+ * 只剩 models 列表——`apiKeyEnv` 不再是唯一的配置信号。
+ */
+export interface SubscriptionRouteConfigView {
+  /** 显式凭据引用（旧口径）。 */
+  apiKeyEnv?: string
+  /** 路由声明了非空 models 列表（新版设置页保存的配置形态）。 */
+  hasModels?: boolean
+  /** 路由约定 ref（`<ROUTE>_API_KEY` / 目录 ambient 名）解析出了非空 key。 */
+  refResolved?: boolean
+}
+
+/** 订阅类 provider 的显示名（未命中的回退为 id 本身）。 */
+const SUBSCRIPTION_DISPLAY_NAMES: Readonly<Record<string, string>> = {
+  'kimi-coding': 'Kimi For Coding',
+  'zai-coding-cn': 'Z.ai Coding Plan（国内）',
+  'zai-coding': 'Z.ai Coding Plan',
+  'opencode': 'OpenCode Plan',
+  'opencode-go': 'OpenCode Go',
+  'qwen-token-plan': '通义 Token Plan',
+  'qwen-token-plan-cn': '通义 Token Plan（国内）',
+  'xiaomi-token-plan-ams': '小米 Token Plan（海外）',
+  'xiaomi-token-plan-cn': '小米 Token Plan（国内）',
+  'xiaomi-token-plan-sgp': '小米 Token Plan（新加坡）',
+  'volcengine-token-plan': '火山引擎 Token Plan',
+  'ark-token-plan': '火山方舟 Token Plan',
+  'doubao-token-plan': '豆包 Token Plan',
+  'ernie': '百度文心 Plan',
+  'baidu': '百度文心 Plan',
+  'wenxin': '百度文心 Plan',
+  'minimax': 'MiniMax Coding Plan',
+  'minimax-token-plan': 'MiniMax Token Plan',
+  'minimax-token-plan-cn': 'MiniMax Token Plan（国内）',
+  // DSH pi-ai catalog ships `minimax-cn` as the official domestic route id
+  // (https://api.minimaxi.com), so the subscription card treats it the same
+  // way it treats `minimax-token-plan-cn`. The two ids are aliases of the
+  // same plan; users see the official id in the Models page.
+  'minimax-cn': 'MiniMax Token Plan（国内）',
+  'openrouter': 'OpenRouter',
+  // 注意：anthropic 有意不在本表也不在 SUBSCRIPTION_ID_RE——isSubscriptionProviderId
+  //（正则 + 本表兜底）同时是聚合层按 token 计费的豁免判定，llm-pi-ai 的 anthropic
+  // 路由多是按量 sk-ant key，纳入识别会把这部分调用的费用错误豁免。Claude 订阅行
+  // 只经 resolveSubscriptionKeys 的 Claude Code 登录态自动发现补入（自带 displayName）。
+  'commandcode': 'CommandCode',
+  'tencent-token-plan': '腾讯云 Token Plan',
+  // 订阅管理类插件（dsh-plugin-subscrip）注册的订阅直连通道：不经 llm-pi-ai
+  // 路由表，provider id 即官方订阅名（issue #37，Grok = X Premium 订阅）。
+  'grok': 'Grok（X Premium）',
+}
+
+/** 订阅类 provider id 判定：带 coding / agent-plan / token-plan 后缀，或已知订阅通道。 */
+const SUBSCRIPTION_ID_RE = new RegExp(
+  '(?:^|-)(?:coding|agent[-_]?plan|token[-_]?plan)(?:$|-|_)|' +
+    '^(?:opencode|opencode-go|kimi-coding|zai-coding|minimax|minimax-cn|minimax-token-plan|minimax-token-plan-cn|openrouter|grok|commandcode)',
+  'i',
+)
+
+/** 是否是订阅类 provider id（如 kimi-coding、xiaomi-token-plan-cn）。 */
+export function isSubscriptionProviderId(providerId: string): boolean {
+  if (SUBSCRIPTION_ID_RE.test(providerId)) return true
+  return SUBSCRIPTION_DISPLAY_NAMES[providerId] !== undefined
+}
+
+/** 适配器注册表：provider id → 收集器（displayName 同步映射）。 */
+const SUBSCRIPTION_ADAPTERS: Readonly<Record<string, {
+  collect: (keys: SubscriptionKeys, config: SubscriptionPlanConfig, timeoutMs: number) => Promise<SubscriptionQuota>
+}>> = {
+  'kimi-coding': { collect: collectKimi },
+  'zai-coding-cn': { collect: collectZai },
+  'zai-coding': { collect: collectZai },
+  'opencode': { collect: collectOpenCodeGo },
+  'opencode-go': { collect: collectOpenCodeGo },
+  'minimax': { collect: collectMiniMax },
+  'minimax-cn': { collect: collectMiniMax },
+  'minimax-token-plan': { collect: collectMiniMax },
+  'minimax-token-plan-cn': { collect: collectMiniMax },
+  'openrouter': { collect: collectOpenRouter },
+  'anthropic': { collect: collectAnthropic },
+  'commandcode': { collect: collectCommandCode },
+  'tencent-token-plan': { collect: collectTencentTokenPlan },
+}
+
+/** 有额度适配器的 provider id 集合（识别用）。 */
+const ADAPTER_PROVIDER_IDS: ReadonlySet<string> = new Set(Object.keys(SUBSCRIPTION_ADAPTERS))
+
+/**
+ * 从 llm-pi-ai 设置里识别订阅套餐：带订阅类 id 且任一配置信号成立的 provider
+ * （显式 apiKeyEnv / models 已配置 / 约定 ref 解析出了 key）。
+ * @param providers - the `providers` map of the llm-pi-ai settings namespace.
+ * @returns identified plans in configuration order.
+ */
+export function identifySubscriptionPlans(
+  providers: Record<string, SubscriptionRouteConfigView | undefined> | undefined,
+): IdentifiedSubscriptionPlan[] {
+  const out: IdentifiedSubscriptionPlan[] = []
+  for (const [id, config] of Object.entries(providers ?? {})) {
+    const configured = (typeof config?.apiKeyEnv === 'string' && config.apiKeyEnv !== '')
+      || config?.hasModels === true
+      || config?.refResolved === true
+    if (!configured) continue
+    if (!isSubscriptionProviderId(id)) continue
+    out.push({
+      provider: id,
+      displayName: SUBSCRIPTION_DISPLAY_NAMES[id] ?? id,
+      adapter: ADAPTER_PROVIDER_IDS.has(id),
+      ...(id === 'zai-coding-cn' ? { region: 'bigmodel-cn' as const } : {}),
+      ...(id === 'zai-coding' ? { region: 'global' as const } : {}),
+    })
+  }
+  return out
+}
+
+const DEFAULT_TIMEOUT_MS = 15_000
+
+/** Number, or null when the value is not a finite number (nor numeric string). */
+function numberOrNull(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return null
+}
+
+/** Clamp a percentage to 0–100. */
+function clampPercent(value: number | null): number | null {
+  return value === null ? null : Math.max(0, Math.min(100, value))
+}
+
+/** Round to one decimal. */
+function round1(value: number): number {
+  return Math.round(value * 10) / 10
+}
+
+/** Number → ISO string. Real epoch-seconds are far below 1e11 (~year 5138), while
+ *  epoch-ms for any 1973+ instant is >= 1e11 — so treat < 1e11 as seconds. */
+function toIso(value: unknown): string | null {
+  if (value === null || value === undefined || value === '') return null
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const date = new Date(value < 1e11 ? value * 1000 : value)
+    return Number.isNaN(date.getTime()) ? null : date.toISOString()
+  }
+  const date = new Date(String(value))
+  return Number.isNaN(date.getTime()) ? null : date.toISOString()
+}
+
+/** Map a fetch error to a stable status. */
+function statusOf(error: unknown): SubscriptionStatus {
+  if (error instanceof Error) {
+    if (error.name === 'TimeoutError' || error.name === 'AbortError') return 'unavailable'
+    const status = (error as { httpStatus?: number }).httpStatus
+    if (status === 401 || status === 403) return 'unauthorized'
+    if (status === 429) return 'rate-limited'
+    if (status === 404) return 'unavailable'
+  }
+  return 'unavailable'
+}
+
+/** One JSON fetch with a timeout, mapping HTTP failures to typed errors.
+ *  可重试错误（网络 / 5xx / 429）用指数退避重试一次；401/403/404 不重试。 */
+async function requestJson(url: string, init: RequestInit, timeoutMs: number): Promise<unknown> {
+  const doFetch = async (): Promise<unknown> => {
+    const response = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) })
+    if (!response.ok) {
+      const error = new Error(`HTTP ${String(response.status)}`)
+      ;(error as { httpStatus?: number }).httpStatus = response.status
+      throw error
+    }
+    return await response.json()
+  }
+  return await withRetry(doFetch, { retries: 1, baseDelayMs: 250, maxDelayMs: 2000 })
+}
+
+/**
+ * 订阅端点挂在服务 origin 下（/coding、/zen、/api、/alpha 前缀），而用户在
+ * chat 路由上配置的 baseUrl 通常带路径前缀（如 CommandCode 网关的
+ * `https://api.commandcode.ai/provider/v1`，issue #75）——整段拼接会把 chat
+ * 前缀带进订阅端点导致 404。只取 origin；未配置回退官方默认，非法值同样
+ * 回退（订阅查询走「未读出」兜底而非抛错）。
+ */
+function subscriptionOrigin(configBaseUrl: string | undefined, fallback: string): string {
+  if (configBaseUrl === undefined || configBaseUrl.trim() === '') return fallback
+  try {
+    return new URL(configBaseUrl).origin
+  } catch {
+    return fallback
+  }
+}
+
+// ── Kimi For Coding ──────────────────────────────────────────────────────────
+
+/** Parse one Kimi limit window entry. */
+function kimiWindow(value: unknown, kind: 'session' | 'weekly'): SubscriptionWindow | null {
+  if (value === null || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  const limit = numberOrNull(record.limit ?? record.total)
+  const remaining = numberOrNull(record.remaining)
+  // 用尽（remaining=0）时 `limit` 可能为非正数；同时 Kimi 可能在用尽后把
+  // `remaining` 置为 null/缺省。此时只要有 resetTime 或 limit 就仍保留窗口，
+  // 并回退用 percentage / used 字段推断已用比例，避免「本次」行消失。
+  if (remaining === null && limit === null && numberOrNull(record.percentage ?? record.usedPercent ?? record.used_percent) === null) {
+    return null
+  }
+  const hasLimit = limit !== null && limit > 0
+  let usedPercent: number
+  if (hasLimit) {
+    usedPercent = round1(clampPercent(((limit - (remaining ?? 0)) / limit) * 100) ?? 0)
+  } else {
+    // limit 不可用：remaining 缺失视为用尽（0），或直接用 percentage 字段。
+    const percent = numberOrNull(record.percentage ?? record.usedPercent ?? record.used_percent)
+    usedPercent = percent !== null ? round1(clampPercent(percent) ?? 0) : remaining === null || remaining <= 0 ? 100 : 0
+  }
+  const resetsAt = toIso(record.resetTime ?? record.reset_time ?? record.resetsAt)
+  return {
+    kind,
+    usedPercent,
+    remainingPercent: round1(100 - usedPercent),
+    ...(remaining !== null ? { remaining } : {}),
+    ...(resetsAt === null ? {} : { resetsAt }),
+  }
+}
+
+/** Parse a Kimi `/coding/v1/usages` body. */
+function parseKimi(body: unknown): { plan?: string; windows: SubscriptionWindow[] } {
+  const data = (body as { data?: unknown } | null)?.data ?? body
+  const record = (data ?? {}) as Record<string, unknown>
+  const limits = Array.isArray(record.limits) ? (record.limits as unknown[]) : []
+  const session = limits.map(entry => kimiWindow((entry as Record<string, unknown>)?.detail ?? entry, 'session')).find(hit => hit !== null) ?? null
+  const weekly = kimiWindow(record.usage, 'weekly')
+  const plan = typeof record.plan === 'string' ? record.plan : typeof record.planName === 'string' ? record.planName : undefined
+  return {
+    ...(plan !== undefined && plan !== '' ? { plan } : {}),
+    windows: [session, weekly].filter((hit): hit is SubscriptionWindow => hit !== null),
+  }
+}
+
+/** Collect the Kimi For Coding quota. */
+async function collectKimi(keys: SubscriptionKeys, config: SubscriptionPlanConfig, timeoutMs: number): Promise<SubscriptionQuota> {
+  const apiKey = keys.kimiApiKey.trim()
+  const base = subscriptionOrigin(config.baseUrl, 'https://api.kimi.com')
+  if (apiKey === '') {
+    return { provider: config.provider, displayName: 'Kimi For Coding', status: 'not-configured', windows: [] }
+  }
+  try {
+    const body = await requestJson(`${base}/coding/v1/usages`, { headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json' } }, timeoutMs)
+    const parsed = parseKimi(body)
+    return {
+      provider: config.provider,
+      displayName: 'Kimi For Coding',
+      ...(parsed.plan !== undefined ? { plan: parsed.plan } : {}),
+      status: parsed.windows.length > 0 ? 'ok' : 'invalid-response',
+      windows: parsed.windows,
+    }
+  } catch (error) {
+    return { provider: config.provider, displayName: 'Kimi For Coding', status: statusOf(error), windows: [] }
+  }
+}
+
+// ── Z.ai Coding Plan ─────────────────────────────────────────────────────────
+
+/** Window length in minutes for a Z.ai limit row; null when unknown. */
+function zaiWindowMinutes(limit: Record<string, unknown>): number | null {
+  const unit = numberOrNull(limit.unit)
+  const number = numberOrNull(limit.number)
+  if (unit === null || number === null || number <= 0) return null
+  if (unit === 5) return number
+  if (unit === 3) return number * 60
+  if (unit === 1) return number * 24 * 60
+  if (unit === 6) return number * 7 * 24 * 60
+  return null
+}
+
+/** Used percent for a Z.ai limit row. */
+function zaiUsedPercent(limit: Record<string, unknown>): number | null {
+  const total = numberOrNull(limit.usage)
+  const remaining = numberOrNull(limit.remaining)
+  const current = numberOrNull(limit.currentValue ?? limit.current_value)
+  if (total !== null && total > 0) {
+    const used = remaining === null ? current : current === null ? total - remaining : Math.max(total - remaining, current)
+    if (used !== null) return clampPercent((Math.max(0, Math.min(total, used)) / total) * 100)
+  }
+  return clampPercent(numberOrNull(limit.percentage ?? limit.usedPercent ?? limit.used_percent))
+}
+
+/** One Z.ai quota window row. */
+function zaiWindow(limit: Record<string, unknown>, kind: 'session' | 'weekly' | 'billing', fallbackReset: string | null = null): SubscriptionWindow | null {
+  const usedPercent = zaiUsedPercent(limit)
+  if (usedPercent === null) return null
+  const resetsAt = toIso(limit.nextResetTime ?? limit.next_reset_time) ?? fallbackReset
+  return {
+    kind,
+    usedPercent: round1(usedPercent),
+    remainingPercent: round1(100 - usedPercent),
+    ...(resetsAt === null ? {} : { resetsAt }),
+  }
+}
+
+/** Parse Z.ai quota + subscription bodies into windows. */
+function parseZai(quotaBody: unknown, subscriptionBody: unknown): { plan: string; windows: SubscriptionWindow[] } {
+  const quota = (quotaBody ?? {}) as Record<string, unknown>
+  const limits = Array.isArray((quota.data as Record<string, unknown> | undefined)?.limits)
+    ? ((quota.data as Record<string, unknown>).limits as unknown[])
+    : []
+  const tokenLimits = limits
+    .filter((entry) => {
+      const record = entry as Record<string, unknown>
+      const type = String(record.type ?? record.limit_type ?? '').toUpperCase()
+      return (type === 'TOKENS_LIMIT' || type === 'CREDIT_LIMIT') && zaiUsedPercent(record) !== null
+    })
+    .sort((a, b) =>
+      (zaiWindowMinutes(a as Record<string, unknown>) ?? Number.MAX_SAFE_INTEGER) -
+      (zaiWindowMinutes(b as Record<string, unknown>) ?? Number.MAX_SAFE_INTEGER))
+  const timeLimit = limits.find((entry) => {
+    const record = entry as Record<string, unknown>
+    return String(record.type ?? record.limit_type ?? '').toUpperCase() === 'TIME_LIMIT' && zaiUsedPercent(record) !== null
+  }) as Record<string, unknown> | undefined
+
+  const first = tokenLimits[0] as Record<string, unknown> | undefined
+  const session = tokenLimits.length >= 2 ? first
+    : first !== undefined && zaiWindowMinutes(first) !== null && (zaiWindowMinutes(first) ?? 0) <= 360 ? first
+      : undefined
+  const weekly = tokenLimits.length >= 2
+    ? tokenLimits[tokenLimits.length - 1] as Record<string, unknown>
+    : session === undefined ? first : undefined
+  const subscriptionRow = (subscriptionBody as { data?: unknown } | null)?.data
+  const renewAt = toIso(Array.isArray(subscriptionRow)
+    ? (subscriptionRow[0] as Record<string, unknown>)?.next_renew_time
+      ?? (subscriptionRow[0] as Record<string, unknown>)?.nextRenewTime
+    : undefined)
+  const row = Array.isArray(subscriptionRow) ? subscriptionRow[0] as Record<string, unknown> : undefined
+  let plan = 'GLM Coding Plan'
+  for (const source of [row, quota.data]) {
+    if (source === null || typeof source !== 'object') continue
+    const record = source as Record<string, unknown>
+    for (const key of ['product_name', 'productName', 'plan_name', 'planName', 'package_name', 'packageName', 'level']) {
+      const value = record[key]
+      if (typeof value === 'string' && value.trim() !== '') { plan = value.trim(); break }
+    }
+    if (plan !== 'GLM Coding Plan') break
+  }
+  return {
+    plan,
+    windows: [
+      session === undefined ? null : zaiWindow(session, 'session'),
+      weekly === undefined ? null : zaiWindow(weekly, 'weekly'),
+      timeLimit === undefined ? null : zaiWindow(timeLimit, 'billing', renewAt),
+    ].filter((hit): hit is SubscriptionWindow => hit !== null),
+  }
+}
+
+/**
+ * Z.ai 用 HTTP 200 包裹业务错误（实测假 key 回 `{"code":401,"msg":...,"success":false}`），
+ * 只看 HTTP 层会把鉴权失败误报成 invalid-response。这里识别信封错误并归类；
+ * 非 success=false 的信封（含缺字段的旧形态）交回常规解析。
+ */
+function zaiEnvelopeStatus(body: unknown): SubscriptionStatus | undefined {
+  if (body === null || typeof body !== 'object') return undefined
+  const record = body as Record<string, unknown>
+  if (record['success'] !== false) return undefined
+  const code = numberOrNull(record['code'])
+  if (code === 401 || code === 403) return 'unauthorized'
+  if (code === 429) return 'rate-limited'
+  return undefined
+}
+
+/** Collect the Z.ai Coding Plan quota. */
+async function collectZai(keys: SubscriptionKeys, config: SubscriptionPlanConfig, timeoutMs: number): Promise<SubscriptionQuota> {
+  const region = config.region ?? keys.zaiRegion ?? 'global'
+  // 不同于 MiniMax 的同 key 双域：Z.ai 国内（bigmodel）与国际（z.ai）是两个
+  // 平台的独立账号，各取各的 key——单字段会被后解析的一条覆盖，另一域就会
+  // 拿错账号的 key。
+  const apiKey = (region === 'bigmodel-cn' ? keys.zaiCnApiKey : keys.zaiApiKey).trim()
+  const host = region === 'bigmodel-cn' ? 'https://open.bigmodel.cn' : 'https://api.z.ai'
+  const displayName = region === 'bigmodel-cn' ? 'Z.ai Coding Plan（国内）' : 'Z.ai Coding Plan'
+  if (apiKey === '') {
+    return { provider: config.provider, displayName, status: 'not-configured', windows: [] }
+  }
+  try {
+    // The Coding Plan endpoints expect the RAW API key as the authorization header.
+    const init = { headers: { authorization: apiKey, accept: 'application/json' } }
+    const quota = await requestJson(`${host}/api/monitor/usage/quota/limit`, init, timeoutMs)
+    // 200 包裹的业务错误优先归类，不让鉴权失败伪装成"响应异常"。
+    const envelope = zaiEnvelopeStatus(quota)
+    if (envelope !== undefined) {
+      return { provider: config.provider, displayName, status: envelope, windows: [] }
+    }
+    let subscription: unknown = null
+    try {
+      subscription = await requestJson(`${host}/api/biz/subscription/list`, init, timeoutMs)
+      // 订阅端点同样可能回 200 信封错误；plan 标签是可选增强，信封错当作无数据（与下方 catch 同语义）。
+      if (zaiEnvelopeStatus(subscription) !== undefined) subscription = null
+    } catch {
+      // Plan label/reset metadata is optional when quota succeeded.
+      swallowed('zai-plan-metadata-missing')
+    }
+    const parsed = parseZai(quota, subscription)
+    return {
+      provider: config.provider,
+      displayName,
+      plan: parsed.plan,
+      status: parsed.windows.length > 0 ? 'ok' : 'invalid-response',
+      windows: parsed.windows,
+    }
+  } catch (error) {
+    return { provider: config.provider, displayName, status: statusOf(error), windows: [] }
+  }
+}
+
+// ── OpenCode Go ──────────────────────────────────────────────────────────────
+
+/** Parse one OpenCode Go window object. */
+function goWindow(value: unknown, kind: 'session' | 'weekly' | 'monthly'): SubscriptionWindow | null {
+  if (value === null || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  // 口径区分：dashboard 字段（usagePercent / usedPercent / percentUsed / percentage）
+  // 是 0..1 比例；Bearer 端点的 `percent` 字段已是 0..100 百分比。直接用「取到的是
+  // 哪个字段」判定口径，而不是用 `record.percent === undefined` 反推——后者在
+  // usagePercent 与 percent 同时存在时会误判（比例字段的值不会被 ×100）。
+  const ratioSource = record.usagePercent ?? record.usedPercent ?? record.percentUsed ?? record.percentage
+  const fromRatioField = ratioSource !== undefined && ratioSource !== null
+  let usedPercent = clampPercent(numberOrNull(fromRatioField ? ratioSource : record.percent))
+  if (usedPercent === null) {
+    const used = numberOrNull(record.used ?? record.consumed)
+    const limit = numberOrNull(record.limit ?? record.total ?? record.quota)
+    if (used !== null && limit !== null && limit > 0) usedPercent = clampPercent((used / limit) * 100)
+  }
+  if (usedPercent === null) return null
+  // 仅当值明确来自 0..1 比例字段且落在 [0,1] 时才 ×100；`percent` 字段（0..100）永不缩放。
+  if (fromRatioField && usedPercent <= 1 && usedPercent >= 0) usedPercent *= 100
+  const resetSeconds = numberOrNull(record.resetInSec ?? record.resetInSeconds ?? record.resetSeconds)
+  const resetsAt = resetSeconds === null
+    ? toIso(record.resetAt ?? record.resetsAt ?? record.nextReset)
+    : new Date(Date.now() + Math.max(0, resetSeconds) * 1000).toISOString()
+  return {
+    kind,
+    usedPercent: round1(clampPercent(usedPercent) ?? 0),
+    remainingPercent: round1(100 - (clampPercent(usedPercent) ?? 0)),
+    ...(resetsAt === null ? {} : { resetsAt }),
+  }
+}
+
+/** Parse the OpenCode Go Bearer endpoint body. */
+function parseOpenCodeGoApi(body: unknown): SubscriptionWindow[] {
+  const usage = (body as { usage?: unknown } | null)?.usage ?? body
+  if (usage === null || typeof usage !== 'object') return []
+  const record = usage as Record<string, unknown>
+  return [
+    goWindow(record.rolling, 'session'),
+    goWindow(record.weekly, 'weekly'),
+    goWindow(record.monthly, 'monthly'),
+  ].filter((hit): hit is SubscriptionWindow => hit !== null)
+}
+
+/** Collect the OpenCode Go quota. */
+async function collectOpenCodeGo(keys: SubscriptionKeys, config: SubscriptionPlanConfig, timeoutMs: number): Promise<SubscriptionQuota> {
+  const apiKey = keys.opencodeApiKey.trim()
+  const base = subscriptionOrigin(config.baseUrl, 'https://opencode.ai')
+  if (apiKey === '') {
+    return { provider: config.provider, displayName: 'OpenCode Go', status: 'not-configured', windows: [], hint: '未配置 key；可在 llm-pi-ai 里给 opencode(opencode-go) 配 apiKeyEnv，或让本机 OpenCode 凭据（~/.local/share/opencode/auth.json）可用' }
+  }
+  try {
+    const body = await requestJson(`${base}/zen/go/v1/usage`, { headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json' } }, timeoutMs)
+    const windows = parseOpenCodeGoApi(body)
+    return { provider: config.provider, displayName: 'OpenCode Go', status: windows.length > 0 ? 'ok' : 'invalid-response', windows }
+  } catch (error) {
+    return { provider: config.provider, displayName: 'OpenCode Go', status: statusOf(error), windows: [] }
+  }
+}
+
+// ── MiniMax Token Plan ───────────────────────────────────────────────────────
+
+/**
+ * 单条 MiniMax 记录抽一个窗口。`remaining_percent` 是剩余%;已用% = 100 - 剩余。
+ * `status === 3` 表示不限量档,跳过该窗。导出供测试:纯函数。
+ * @param record - 一条 model_remains 记录。
+ * @param kind - 窗口类型(session=5h 滚动 / weekly=7d)。
+ * @param remainPctKey - 剩余百分比字段。
+ * @param statusKey - 限量状态字段(3=不限量)。
+ * @param resetKey - 重置时刻字段(epoch 秒/毫秒/ISO)。
+ */
+function minmaxWindow(
+  record: Record<string, unknown> | undefined,
+  kind: 'session' | 'weekly',
+  remainPctKey: string,
+  statusKey: string,
+  resetKey: string,
+): SubscriptionWindow | null {
+  if (record === undefined) return null
+  if (Number(record[statusKey]) === 3) return null
+  const remain = numberOrNull(record[remainPctKey])
+  if (remain === null) return null
+  const usedPercent = round1(clampPercent(100 - (remain <= 1 ? remain * 100 : remain)) ?? 0)
+  const resetsAt = toIso(record[resetKey])
+  return {
+    kind,
+    usedPercent,
+    remainingPercent: round1(100 - usedPercent),
+    ...(resetsAt === null ? {} : { resetsAt }),
+  }
+}
+
+/**
+ * 解析 MiniMax Token Plan `/v1/token_plan/remains` 响应。取 general(或 MiniMax-M*)
+ * 一行抽出 5h/7d 窗口(total_count 常为 0,以 remaining_percent 为准),不按模型拆条。
+ * 导出供测试:纯函数。
+ * @param body - 接口响应 JSON。
+ * @returns 窗口列表;无可用窗口时为空数组。
+ */
+export function parseMiniMaxRemains(body: unknown): SubscriptionWindow[] {
+  const doc = (body ?? {}) as Record<string, unknown>
+  const payload = (doc.data ?? doc) as Record<string, unknown>
+  const rows = Array.isArray(payload.model_remains)
+    ? (payload.model_remains as unknown[])
+    : Array.isArray(doc.model_remains)
+      ? (doc.model_remains as unknown[])
+      : []
+  if (rows.length === 0) return []
+  const pick = rows.find((row) => {
+    const name = String((row as Record<string, unknown>).model_name ?? '').toLowerCase()
+    return name === 'general' || /^minimax-m/i.test(name)
+  }) ?? rows[0]
+  const record = (pick ?? undefined) as Record<string, unknown> | undefined
+  const session = minmaxWindow(record, 'session', 'current_interval_remaining_percent', 'current_interval_status', 'end_time')
+  const weekly = minmaxWindow(record, 'weekly', 'current_weekly_remaining_percent', 'current_weekly_status', 'weekly_end_time')
+  return [session, weekly].filter((hit): hit is SubscriptionWindow => hit !== null)
+}
+
+/**
+ * Resolve the MiniMax API host based on the configured provider id.
+ *
+ * 国内开发者走 MiniMax（`api.minimaxi.com`），海外走 MiniMax（`minimaxi.com`）。
+ * User-explicit `config.baseUrl` wins by origin when set, so deployments in
+ * either region can still override the auto-pick (e.g. proxies / staging);
+ * chat path prefixes (e.g. `/v1`) are dropped — `miniMaxEndpoint` re-adds the
+ * version segment itself.
+ */
+function resolveMiniMaxBaseUrl(config: SubscriptionPlanConfig): string {
+  const fallback = config.provider === 'minimax-cn' || config.provider === 'minimax-token-plan-cn'
+    ? 'https://api.minimaxi.com'
+    : 'https://www.minimaxi.com'
+  // Both `minimax-cn` (DSH pi-ai official domestic id) and
+  // `minimax-token-plan-cn` (this plugin's earlier chosen name) are CN
+  // routes against api.minimaxi.com. Everything else (international) keeps
+  // the www.minimaxi.com default.
+  return subscriptionOrigin(config.baseUrl, fallback)
+}
+
+/** Display name for a MiniMax quota row, aligned with the display-name map. */
+function minmaxDisplayName(provider: string): string {
+  return SUBSCRIPTION_DISPLAY_NAMES[provider] ?? 'MiniMax Coding Plan'
+}
+
+/** MiniMax Token Plan / Coding Plan 的 key 判别：普通按量 API key 以 `sk-` 开头，
+ *  Token Plan（订阅套餐）key 以 `sk-cp-` 开头。据此区分一个 key 是订阅还是按量，
+ *  供查询失败时给出「key 类型 / region」定向提示，避免把按量 key 误当 token-plan
+ *  查询后只剩一句笼统的「响应异常」；也是聚合层订阅豁免的判定依据（同一路由 id
+ *  按量/套餐两用，豁免只能按 key）。 */
+export function isMiniMaxTokenPlanKey(apiKey: string): boolean {
+  return apiKey.startsWith('sk-cp-')
+}
+
+/** MiniMax 系路由 id（官方目录 minimax / minimax-cn 与本插件早期命名 minimax-token-plan[-cn]）。 */
+export function isMiniMaxProviderId(providerId: string): boolean {
+  return /^minimax(?:-cn|-token-plan|-token-plan-cn)?$/i.test(providerId)
+}
+
+/**
+ * 逐路由判定 MiniMax 系路由是否 Coding Plan：按该路由自己的 key（显式 apiKeyEnv
+ * 优先，缺省按路由约定 ref）解析后看 `sk-cp-` 前缀。同一路由 id（如官方目录的
+ * minimax-cn）按量用户与套餐用户两用，订阅豁免不能按路由 id 一刀切——此前聚合
+ * 层默认集合干脆不含 minimax，套餐用户的用量被无条件按量计费。解析不出 key
+ * 的路由判为 false（保守：不豁免）。导出供测试：无文件 I/O。
+ * @param providers - llm-pi-ai providers 视图。
+ * @param resolveRef - 凭据 seam：ref 名 → 非空 key 值。
+ * @returns MiniMax 系路由 id → 是否 Coding Plan。
+ */
+export async function classifyMiniMaxPlanRoutes(
+  providers: Readonly<Record<string, SubscriptionRouteConfigView | undefined>>,
+  resolveRef: (name: string) => Promise<string | undefined>,
+): Promise<ReadonlyMap<string, boolean>> {
+  const out = new Map<string, boolean>()
+  for (const [route, view] of Object.entries(providers)) {
+    if (!isMiniMaxProviderId(route)) continue
+    const explicit = typeof view?.apiKeyEnv === 'string' && view.apiKeyEnv !== '' ? [view.apiKeyEnv] : []
+    const hit = await firstResolvedRef([...explicit, ...routeKeyRefCandidates(route)], resolveRef)
+    out.set(route, hit !== undefined && isMiniMaxTokenPlanKey(hit.value))
+  }
+  return out
+}
+
+/** 构造 MiniMax Token Plan 查询端点：避免 base 已含 `/v1` 时拼出 `/v1/v1/...`。 */
+function miniMaxEndpoint(base: string): string {
+  const trimmed = base.replace(/\/+$/, '')
+  return trimmed.endsWith('/v1') ? `${trimmed}/token_plan/remains` : `${trimmed}/v1/token_plan/remains`
+}
+
+/** Collect the MiniMax Token Plan quota (CN + INTL). */
+async function collectMiniMax(keys: SubscriptionKeys, config: SubscriptionPlanConfig, timeoutMs: number): Promise<SubscriptionQuota> {
+  const apiKey = keys.minmaxApiKey.trim()
+  const base = resolveMiniMaxBaseUrl(config)
+  const displayName = minmaxDisplayName(config.provider)
+  if (apiKey === '') {
+    return { provider: config.provider, displayName, status: 'not-configured', windows: [] }
+  }
+  // 按 key 前缀预判是否 token-plan（sk-cp- = Token Plan；普通 sk- = 按量），用于在失败时给出
+  // 定向提示，让用户能分辨「到底配的是 API 还是 Token Plan」。仍始终尝试查询（兜底 token-plan
+  // key 恰好未以 sk-cp- 开头的情况——以接口实际返回为准）。
+  const tokenPlanKey = isMiniMaxTokenPlanKey(apiKey)
+  try {
+    const body = await requestJson(miniMaxEndpoint(base), { headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json' } }, timeoutMs)
+    const windows = parseMiniMaxRemains(body)
+    if (windows.length > 0) {
+      return {
+        provider: config.provider,
+        displayName,
+        status: 'ok',
+        windows,
+        ...(tokenPlanKey ? {} : { hint: '此 key 未以 sk-cp- 开头（可能为按量 API）；但 Token Plan 接口返回了额度，故按 Token Plan 展示' }),
+      }
+    }
+    return {
+      provider: config.provider,
+      displayName,
+      status: 'invalid-response',
+      windows,
+      hint: tokenPlanKey
+        ? 'Token Plan key 未返回额度：可能是 region 不匹配，请在 provider 的 baseURL 指向国内 api.minimaxi.com 或国际 api.minimax.io'
+        : '此 key 未以 sk-cp- 开头，可能为按量 API 而非 Token Plan；如需订阅额度请用 sk-cp- 开头的 Token Plan key',
+    }
+  } catch (error) {
+    return { provider: config.provider, displayName, status: statusOf(error), windows: [] }
+  }
+}
+
+// ── OpenRouter (预付 credits 已用%) ─────────────────────────────────────────
+
+/**
+ * 解析 OpenRouter `/api/v1/credits` 响应:已用% = total_usage / total_credits。
+ * 导出供测试:纯函数。
+ * @param body - 接口响应 JSON。
+ * @returns 窗口列表;无有效额度时为 []。
+ */
+export function parseOpenRouterCredits(body: unknown): SubscriptionWindow[] {
+  const doc = (body ?? {}) as Record<string, unknown>
+  const data = (doc.data ?? doc) as Record<string, unknown>
+  const total = numberOrNull(data.total_credits ?? data.credits)
+  const used = numberOrNull(data.total_usage ?? data.usage)
+  if (total === null || total <= 0 || used === null) return []
+  const usedPercent = round1(clampPercent((used / total) * 100) ?? 0)
+  const resetsAt = toIso(data.resets_at ?? data.next_reset_time)
+  return [{
+    kind: 'billing',
+    usedPercent,
+    remainingPercent: round1(100 - usedPercent),
+    ...(resetsAt === null ? {} : { resetsAt }),
+  }]
+}
+
+/** Collect the OpenRouter prepaid credits usage. */
+async function collectOpenRouter(keys: SubscriptionKeys, config: SubscriptionPlanConfig, timeoutMs: number): Promise<SubscriptionQuota> {
+  const apiKey = keys.openrouterApiKey.trim()
+  const base = subscriptionOrigin(config.baseUrl, 'https://openrouter.ai')
+  if (apiKey === '') {
+    return { provider: config.provider, displayName: 'OpenRouter', status: 'not-configured', windows: [], hint: '未配置 key；OpenRouter 的额度接口只认 Management Key，用推理 key 会 401' }
+  }
+  try {
+    const body = await requestJson(`${base}/api/v1/credits`, { headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json' } }, timeoutMs)
+    const windows = parseOpenRouterCredits(body)
+    return { provider: config.provider, displayName: 'OpenRouter', status: windows.length > 0 ? 'ok' : 'invalid-response', windows }
+  } catch (error) {
+    const status = statusOf(error)
+    // Management Key 提示：额度接口只认管理密钥，用推理 key 会 401，别让用户去查一把本来没问题的 key。
+    return {
+      provider: config.provider,
+      displayName: 'OpenRouter',
+      status,
+      windows: [],
+      ...(status === 'unauthorized' ? { hint: 'OpenRouter 额度接口只认 Management Key；你配的 key 返回了 401，请换成管理密钥（在 openrouter.ai/settings/keys 创建）' } : {}),
+    }
+  }
+}
+
+// ── Anthropic（Claude Pro/Max 订阅用量）─────────────────────────────────────
+
+/** Parse one Anthropic usage window (`utilization` is already 0–100). */
+function anthropicWindow(value: unknown, kind: 'session' | 'weekly'): SubscriptionWindow | null {
+  if (value === null || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  const utilization = numberOrNull(record.utilization ?? record.used_percentage)
+  if (utilization === null) return null
+  const usedPercent = round1(clampPercent(utilization) ?? 0)
+  const resetsAt = toIso(record.resets_at ?? record.reset_at)
+  return {
+    kind,
+    usedPercent,
+    remainingPercent: round1(100 - usedPercent),
+    ...(resetsAt === null ? {} : { resetsAt }),
+  }
+}
+
+/**
+ * 解析 Anthropic OAuth 用量响应（GET https://api.anthropic.com/api/oauth/usage）。
+ * 形如 `{ five_hour: { utilization, resets_at }, seven_day: {...}, seven_day_sonnet: {...} }`：
+ * `utilization` 为 0–100 百分数，`resets_at` 为 unix 秒。子配额窗口
+ * （`seven_day_sonnet` / `five_hour_opus` 等单模型系列限额）只描述一个模型分支，
+ * 与主窗口量纲相同但口径更窄，整体丢弃，避免面板百分比被分支配额覆盖。
+ * 导出供测试：纯函数。
+ * @param body - 接口响应 JSON。
+ * @returns 窗口列表（5 小时 → session、7 天 → weekly）；无可用窗口时为 []。
+ */
+export function parseAnthropicUsage(body: unknown): SubscriptionWindow[] {
+  const doc = (body ?? {}) as Record<string, unknown>
+  return [
+    anthropicWindow(doc.five_hour, 'session'),
+    anthropicWindow(doc.seven_day, 'weekly'),
+  ].filter((hit): hit is SubscriptionWindow => hit !== null)
+}
+
+/** Collect the Claude Pro/Max subscription usage via the OAuth usage endpoint. */
+async function collectAnthropic(keys: SubscriptionKeys, config: SubscriptionPlanConfig, timeoutMs: number): Promise<SubscriptionQuota> {
+  const token = keys.anthropicApiKey.trim()
+  const base = subscriptionOrigin(config.baseUrl, 'https://api.anthropic.com')
+  const displayName = 'Claude (Anthropic)'
+  if (token === '') {
+    return {
+      provider: config.provider,
+      displayName,
+      status: 'not-configured',
+      windows: [],
+      hint: '需 Claude Code 登录态（~/.claude/.credentials.json 自动读取）或 OAuth token；普通 sk-ant- 按量 API key 查不了订阅用量',
+    }
+  }
+  try {
+    const body = await requestJson(
+      `${base}/api/oauth/usage`,
+      { headers: { authorization: `Bearer ${token}`, accept: 'application/json' } },
+      timeoutMs,
+    )
+    const windows = parseAnthropicUsage(body)
+    return { provider: config.provider, displayName, status: windows.length > 0 ? 'ok' : 'invalid-response', windows }
+  } catch (error) {
+    return { provider: config.provider, displayName, status: statusOf(error), windows: [] }
+  }
+}
+
+// ── CommandCode（5h/周窗口 + 月度 Credits）──────────────────────────────────
+
+/** Parse one CommandCode window row (`used/cap`, `resetAt` is epoch ms). */
+function commandcodeWindow(value: unknown, kind: 'session' | 'weekly'): SubscriptionWindow | null {
+  if (value === null || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  const used = numberOrNull(record.used)
+  const cap = numberOrNull(record.cap ?? record.limit ?? record.total)
+  if (used === null || cap === null || cap <= 0 || used < 0) return null
+  const usedPercent = round1(clampPercent((used / cap) * 100) ?? 0)
+  const resetsAt = toIso(record.resetAt ?? record.reset_at ?? record.resetsAt)
+  return {
+    kind,
+    usedPercent,
+    remainingPercent: round1(100 - usedPercent),
+    ...(resetsAt === null ? {} : { resetsAt }),
+  }
+}
+
+/**
+ * 解析 CommandCode（commandcode.ai）额度响应
+ * （GET https://api.commandcode.ai/alpha/billing/credits）。形如
+ * `{ windowLimits: { fiveHour: { used, cap, resetAt }, weekly: {...} }, credits: { monthlyCredits } }`：
+ * 窗口按 used/cap 算已用%（resetAt 为 epoch 毫秒）；monthlyCredits 是月度
+ * Credits 余额池（1 credit ≈ $1 用量），无总量字段、算不出百分比，不产出窗口。
+ * 导出供测试：纯函数。
+ * @param body - 接口响应 JSON。
+ * @returns 窗口列表（5 小时 → session、周 → weekly）；无可用窗口时为 []。
+ */
+export function parseCommandCodeCredits(body: unknown): SubscriptionWindow[] {
+  const doc = (body ?? {}) as Record<string, unknown>
+  const limits = doc.windowLimits
+  if (limits === null || typeof limits !== 'object' || Array.isArray(limits)) return []
+  const record = limits as Record<string, unknown>
+  return [
+    commandcodeWindow(record.fiveHour ?? record.five_hour, 'session'),
+    commandcodeWindow(record.weekly ?? record.week, 'weekly'),
+  ].filter((hit): hit is SubscriptionWindow => hit !== null)
+}
+
+/** Collect the CommandCode quota (5h/weekly windows + monthly credits). */
+async function collectCommandCode(keys: SubscriptionKeys, config: SubscriptionPlanConfig, timeoutMs: number): Promise<SubscriptionQuota> {
+  const apiKey = keys.commandcodeApiKey.trim()
+  const base = subscriptionOrigin(config.baseUrl, 'https://api.commandcode.ai')
+  const displayName = SUBSCRIPTION_DISPLAY_NAMES['commandcode'] ?? 'CommandCode'
+  if (apiKey === '') {
+    return {
+      provider: config.provider,
+      displayName,
+      status: 'not-configured',
+      windows: [],
+      hint: '需 commandcode.ai 的 API key（user_ 前缀）；可在 llm-pi-ai 给 commandcode 路由配 apiKeyEnv',
+    }
+  }
+  try {
+    const body = await requestJson(
+      `${base}/alpha/billing/credits`,
+      { headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json' } },
+      timeoutMs,
+    )
+    const windows = parseCommandCodeCredits(body)
+    return { provider: config.provider, displayName, status: windows.length > 0 ? 'ok' : 'invalid-response', windows }
+  } catch (error) {
+    return { provider: config.provider, displayName, status: statusOf(error), windows: [] }
+  }
+}
+
+
+/**
+ * 腾讯云 Token Plan（TokenHub 管控面）订阅额度。凭据是云 API 密钥对
+ * `<SecretId>:<SecretKey>`（与余额面板同源、同格式），链路与 balance.ts 的
+ * TokenHub 查询一致：DescribeTokenPlanList 取 TeamId → DescribeTokenPlan 读
+ * 主额度包。管控面字段名未完全稳定：剩余与总额度都能取到才产出百分比窗口，
+ * 只有剩余值时窗口留空（绝不猜总额度），plan 名照常展示。
+ */
+async function collectTencentTokenPlan(keys: SubscriptionKeys, _config: SubscriptionPlanConfig, _timeoutMs: number): Promise<SubscriptionQuota> {
+  const provider = 'tencent-token-plan'
+  const displayName = SUBSCRIPTION_DISPLAY_NAMES[provider] ?? provider
+  // 配置提示：凭据格式是最常见的踩坑点（推理 key ≠ 云 API 密钥对）。
+  const hint = '凭据需为腾讯云云 API 密钥对（SecretId:SecretKey，控制台访问管理获取），非 TokenHub 推理 key'
+  const quota = (partial: Partial<SubscriptionQuota> & { status: SubscriptionQuota['status'] }): SubscriptionQuota => ({
+    provider,
+    displayName,
+    windows: [],
+    hint,
+    ...partial,
+  })
+  if (keys.tencentCloudApi === '') return quota({ status: 'not-configured' })
+  const credential = parseTencentCredential(keys.tencentCloudApi)
+  if (credential === undefined) return quota({ status: 'unauthorized' })
+  try {
+    const list = await callTokenHub(credential.secretId, credential.secretKey, 'DescribeTokenPlanList', {})
+    const teamId = firstEnabledTeamId(list)
+    if (teamId === undefined) return quota({ status: 'invalid-response' })
+    const detail = await callTokenHub(credential.secretId, credential.secretKey, 'DescribeTokenPlan', { TeamId: teamId })
+    const remaining = pickRemainingQuota(detail.PackageInfo) ?? pickRemainingQuota(detail)
+    const total = pickTotalQuota(detail.PackageInfo) ?? pickTotalQuota(detail)
+    const plan = typeof detail.Name === 'string' ? detail.Name : undefined
+    const windows: SubscriptionWindow[] = remaining !== undefined && total !== undefined && total > 0
+      ? [{
+          kind: 'monthly',
+          usedPercent: round1(clampPercent((1 - remaining / total) * 100) ?? 0),
+          remainingPercent: round1(clampPercent((remaining / total) * 100) ?? 0),
+          remaining,
+        }]
+      : []
+    return quota({ status: 'ok', windows, ...(plan !== undefined ? { plan } : {}) })
+  } catch (error) {
+    return quota({ status: statusOf(error) })
+  }
+}
+
+/**
+ * Collect quota for the given plans concurrently (adapter-backed plans only;
+ * identified plans without an adapter are surfaced by the caller as "no
+ * quota API" rows).
+ * @param keys - the API keys from the llm-pi-ai settings namespace.
+ * @param plans - adapter-backed plans to poll; empty by default.
+ * @param timeoutMs - per-request timeout; defaults to 15s.
+ * @returns the quotas in plan order (unknown providers degrade to `unavailable`).
+ */
+export async function collectSubscriptions(
+  keys: SubscriptionKeys,
+  plans: readonly SubscriptionPlanConfig[] = [],
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<readonly SubscriptionQuota[]> {
+  return await Promise.all(plans.map(async (plan): Promise<SubscriptionQuota> => {
+    const adapter = SUBSCRIPTION_ADAPTERS[plan.provider]
+    if (adapter === undefined) {
+      return { provider: plan.provider, displayName: plan.provider, status: 'unavailable', windows: [] }
+    }
+    // 熔断：该适配器连续失败正处于冷却期时，直接短路为不可用，不再打上游。
+    if (!subscriptionGate.check(plan.provider)) {
+      return { provider: plan.provider, displayName: plan.provider, status: 'unavailable', windows: [] }
+    }
+    const quota = await adapter.collect(keys, plan, timeoutMs)
+    // 可重试失败（网络 / 5xx / 429）才累计熔断；鉴权 / 响应异常属配置问题或上游改版，不算暂时故障。
+    const retryable = quota.status === 'unavailable' || quota.status === 'rate-limited'
+    if (retryable) subscriptionGate.fail(plan.provider)
+    else subscriptionGate.success(plan.provider)
+    return quota
+  }))
+}

@@ -1,0 +1,159 @@
+/**
+ * Relay-site quota unit tests: the Sub2API / New API response parsers and the
+ * single-route probe that recognizes which program a station runs (or answers
+ * an honest unavailable when neither endpoint yields a quota).
+ */
+
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { isOfficialBaseUrl, parseNewApiStatus, parseSub2ApiUsage, queryRelayQuota } from '../src/relay.ts'
+
+/** A minimal context whose credentials seam resolves each env ref to a fixed value. */
+function fakeContext(envValue: string | undefined) {
+  return {
+    credentials: {
+      resolve: vi.fn(async (ref: unknown) => {
+        return ref === 'STUB_KEY' && envValue !== undefined ? { value: envValue } : undefined
+      }),
+    },
+  } as never
+}
+
+afterEach(() => { vi.unstubAllGlobals() })
+
+describe('parseSub2ApiUsage', () => {
+  it('reads a wallet balance when the body carries a balance field', () => {
+    expect(parseSub2ApiUsage({ balance: 10.5, used_quota: 3 })).toEqual({ balance: 10.5 })
+  })
+
+  it('reads a quota window from total/used when no balance is present', () => {
+    const result = parseSub2ApiUsage({ quota: 100, used_quota: 30 })
+    expect(result?.windows).toHaveLength(1)
+    expect(result?.windows?.[0]).toMatchObject({ kind: 'weekly', usedPercent: 30, remainingPercent: 70 })
+  })
+
+  it('returns null when neither balance nor quota is present (not this program / drift)', () => {
+    expect(parseSub2ApiUsage({ foo: 1 })).toBeNull()
+  })
+})
+
+describe('parseNewApiStatus', () => {
+  it('reads a billing window from the recorded ratio', () => {
+    const result = parseNewApiStatus({ data: { ratio: 0.9 } })
+    expect(result?.windows?.[0]).toMatchObject({ kind: 'billing', usedPercent: 90, remainingPercent: 10 })
+  })
+
+  it('falls back to used/total when ratio is absent', () => {
+    const result = parseNewApiStatus({ data: { used_quota: 30, total_quota: 100 } })
+    expect(result?.windows?.[0]).toMatchObject({ usedPercent: 30 })
+  })
+
+  it('returns null when no usable percentage is present', () => {
+    expect(parseNewApiStatus({ data: {} })).toBeNull()
+  })
+})
+
+describe('isOfficialBaseUrl', () => {
+  it('returns true for known official hosts with a valid origin', () => {
+    expect(isOfficialBaseUrl('https://api.deepseek.com')).toBe(true)
+    expect(isOfficialBaseUrl('https://api.openai.com/v1')).toBe(true)
+    expect(isOfficialBaseUrl('http://api.moonshot.cn')).toBe(true)
+  })
+
+  it('returns false for third-party relay stations', () => {
+    expect(isOfficialBaseUrl('https://relay.example.com')).toBe(false)
+    expect(isOfficialBaseUrl('https://my-own-gateway.com/api/v1')).toBe(false)
+  })
+
+  it('returns false when the value has no parseable origin (not a URL)', () => {
+    expect(isOfficialBaseUrl('not-a-url')).toBe(false)
+  })
+})
+
+describe('queryRelayQuota', () => {
+  it('recognizes a Sub2API station and returns its balance and windows', async () => {
+    const ctx = fakeContext('k')
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true, status: 200, json: async () => ({ balance: 10.5, quota: 100, used_quota: 30 }),
+    })))
+    const row = await queryRelayQuota(ctx, { route: 'r', baseURL: 'https://relay.example.com', apiKeyRefs: ['STUB_KEY'] })
+    expect(row).toMatchObject({ route: 'r', origin: 'https://relay.example.com', kind: 'sub2api', status: 'ok', balance: 10.5 })
+    expect(row.windows?.[0]).toMatchObject({ usedPercent: 30 })
+  })
+
+  it('recognizes a New API station via /api/status after /v1/usage 404', async () => {
+    const ctx = fakeContext('k')
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      return url.includes('/v1/usage')
+        ? { ok: false, status: 404 }
+        : { ok: true, status: 200, json: async () => ({ data: { ratio: 0.5 } }) }
+    }))
+    // 用不同 origin 隔离缓存：同 origin 的指纹识别会命中缓存，影响后续用例。
+    const row = await queryRelayQuota(ctx, { route: 'r2', baseURL: 'https://relay2.example.com', apiKeyRefs: ['STUB_KEY'] })
+    expect(row).toMatchObject({ kind: 'new-api', status: 'ok', origin: 'https://relay2.example.com' })
+    expect(row.windows?.[0]).toMatchObject({ usedPercent: 50 })
+  })
+
+  it('reports not-configured when the secret is missing (no network call)', async () => {
+    const ctx = fakeContext(undefined)
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    const row = await queryRelayQuota(ctx, { route: 'r', baseURL: 'https://relay.example.com', apiKeyRefs: ['STUB_KEY'] })
+    expect(row).toMatchObject({ status: 'not-configured' })
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('reports unauthorized when the endpoint rejects the key', async () => {
+    const ctx = fakeContext('k')
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 401 })))
+    // 用不同 origin 隔离缓存。
+    const row = await queryRelayQuota(ctx, { route: 'r3', baseURL: 'https://relay3.example.com', apiKeyRefs: ['STUB_KEY'] })
+    expect(row).toMatchObject({ status: 'unauthorized' })
+  })
+
+  it('answers unavailable when neither program is recognized', async () => {
+    const ctx = fakeContext('k')
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404 })))
+    // 用不同 origin 隔离缓存。
+    const row = await queryRelayQuota(ctx, { route: 'r4', baseURL: 'https://relay4.example.com', apiKeyRefs: ['STUB_KEY'] })
+    expect(row).toMatchObject({ kind: 'unknown', status: 'unavailable' })
+  })
+
+  it('resolves the key from a conventional ref when no explicit apiKeyEnv exists (new-host shape)', async () => {
+    // 新版宿主把路由 key 存成凭据 refs（<ROUTE>_API_KEY 约定名），路由配置里没有
+    // apiKeyEnv——探测应按约定 ref 找回 key 并正常读出额度。
+    const ctx = {
+      credentials: {
+        resolve: vi.fn(async (ref: unknown) => {
+          return ref === 'MYRELAY_API_KEY' ? { value: 'sk-relay' } : undefined
+        }),
+      },
+    } as never
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true, status: 200, json: async () => ({ balance: 7.5 }),
+    })))
+    const row = await queryRelayQuota(ctx, { route: 'myrelay', baseURL: 'https://relay5.example.com', apiKeyRefs: ['MYRELAY_API_KEY'] })
+    expect(row).toMatchObject({ kind: 'sub2api', status: 'ok', balance: 7.5 })
+  })
+
+  it('falls through an unresolvable explicit ref to the conventional ref', async () => {
+    const ctx = {
+      credentials: {
+        resolve: vi.fn(async (ref: unknown) => {
+          return ref === 'R6_API_KEY' ? { value: 'sk-convention' } : undefined
+        }),
+      },
+    } as never
+    const fetchSpy = vi.fn(async () => ({
+      ok: true, status: 200, json: async () => ({ balance: 1 }),
+    }))
+    vi.stubGlobal('fetch', fetchSpy)
+    const row = await queryRelayQuota(ctx, { route: 'r6', baseURL: 'https://relay6.example.com', apiKeyRefs: ['GONE_REF', 'R6_API_KEY'] })
+    expect(row).toMatchObject({ status: 'ok', balance: 1 })
+    // 发出的请求带的是约定 ref 解析出的 key。
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'https://relay6.example.com/v1/usage',
+      expect.objectContaining({ headers: expect.objectContaining({ authorization: 'Bearer sk-convention' }) }),
+    )
+  })
+})
