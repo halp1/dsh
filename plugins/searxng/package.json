@@ -1,0 +1,50 @@
+{
+  "name": "dsh-plugin-searxng",
+  "version": "0.1.0",
+  "description": "SearXNG-backed search provider for DeepSeek Harness: registers a free, keyless web_search backend with the ctx.web capability seam",
+  "license": "MIT",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "searxng",
+    "web-search"
+  ],
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "compatibility": {
+      "dsh": ">=0.2.0-rc.2 <0.3.0",
+      "profiles": [
+        "web",
+        "headless"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=22.19"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@deepseek-ai/dsh-web": ">=0.2.0-rc.2"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "~4.0.4",
+    "@deepseek-ai/dsh-web": "0.2.0-rc.2"
+  }
+}
