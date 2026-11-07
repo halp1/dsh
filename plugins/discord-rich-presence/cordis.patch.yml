@@ -1,0 +1,12 @@
+# Bundle self-activation patch: mounts the plugin when the package is
+# installed into a profile via
+#   dsh plugin --profile web add file:/Users/halp/code/dsh/plugins/discord-rich-presence
+- insert:
+    - id: discord-rich-presence
+      name: dsh-plugin-discord-rich-presence
+      config:
+        clientId: '1540732930127691807'
+        details: 'DeepSeek Harness'
+        largeImage: ''
+        largeText: 'DeepSeek Harness'
+        showFile: true

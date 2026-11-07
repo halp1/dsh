@@ -1,0 +1,41 @@
+{
+  "name": "dsh-plugin-discord-rich-presence",
+  "version": "0.1.0",
+  "description": "Discord Rich Presence for DeepSeek Harness: reports active sessions and workspace activity",
+  "license": "MIT",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "discord",
+    "rich-presence"
+  ],
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=22.19"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "catalog:"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  }
+}

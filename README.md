@@ -7,6 +7,7 @@ Plugins for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness),
 | [auto-limit](plugins/auto-limit) | none |
 | [background](plugins/background) | tsdown |
 | [badge](plugins/badge) | tsdown |
+| [discord-rich-presence](plugins/discord-rich-presence) | none |
 | [jev-reviewer](plugins/jev-reviewer) | none |
 | [latex](plugins/latex) | none |
 | [mcp-discovery](plugins/mcp-discovery) | none |
