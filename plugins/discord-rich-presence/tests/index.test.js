@@ -5,7 +5,7 @@ import { resolveConfig, formatActivity, apply } from '../src/index.js';
 test('resolveConfig applies defaults and validates types', () => {
   const defaults = resolveConfig({});
   assert.equal(defaults.enabled, true);
-  assert.equal(defaults.clientId, '1540732930127691807');
+  assert.equal(defaults.clientId, '1568482142072086657');
   assert.equal(defaults.details, 'DeepSeek Harness');
   assert.equal(defaults.showFile, true);
   assert.equal(defaults.minIntervalMs, 3000);

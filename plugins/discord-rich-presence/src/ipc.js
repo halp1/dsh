@@ -54,7 +54,7 @@ export function encodeFrame(opcode, payload) {
 
 export class DiscordRpcClient {
   constructor(options = {}) {
-    this.clientId = options.clientId || '1540732930127691807';
+    this.clientId = options.clientId || '1568482142072086657';
     this.connectTimeoutMs = options.connectTimeoutMs || 3000;
     this.socket = null;
     this.buffer = Buffer.alloc(0);

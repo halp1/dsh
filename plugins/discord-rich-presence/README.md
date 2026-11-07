@@ -27,7 +27,7 @@ Override configuration in your profile patch file:
 ```yaml
 - id: discord-rich-presence
   config:
-    clientId: '1540732930127691807'
+    clientId: '1568482142072086657'
     details: 'DeepSeek Harness'
     largeImage: ''
     largeText: 'DeepSeek Harness'

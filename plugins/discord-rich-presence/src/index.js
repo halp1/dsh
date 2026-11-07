@@ -32,7 +32,7 @@ export function resolveConfig(raw = {}) {
 
   return Object.freeze({
     enabled: raw.enabled ?? true,
-    clientId: optionalString('clientId', '1540732930127691807'),
+    clientId: optionalString('clientId', '1568482142072086657'),
     details: optionalString('details', 'DeepSeek Harness'),
     largeImage: optionalString('largeImage', ''),
     largeText: optionalString('largeText', 'DeepSeek Harness'),
