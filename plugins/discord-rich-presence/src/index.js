@@ -91,7 +91,7 @@ export function apply(ctx, rawConfig = {}) {
   let lastPayloadKey = '';
   let pushTimer = null;
   let reconnectTimer = null;
-  let sessionStartTime = Math.floor(Date.now() / 1000);
+  let sessionStartTime = Date.now();
   let isDisposed = false;
 
   const cursors = {
@@ -207,7 +207,7 @@ export function apply(ctx, rawConfig = {}) {
   }, { global: true });
 
   ctx.on('session/created', () => {
-    sessionStartTime = Math.floor(Date.now() / 1000);
+    sessionStartTime = Date.now();
     currentPhase = 'agentWorking';
     schedulePush();
   }, { global: true });
