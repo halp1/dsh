@@ -7,6 +7,8 @@ test('resolveConfig applies defaults and validates types', () => {
   assert.equal(defaults.enabled, true);
   assert.equal(defaults.clientId, '1568482142072086657');
   assert.equal(defaults.details, 'DeepSeek Harness');
+  assert.equal(defaults.largeImage, 'https://raw.githubusercontent.com/halp1/dsh/main/plugins/discord-rich-presence/assets/dsh.png');
+  assert.equal(defaults.largeText, 'DeepSeek Harness');
   assert.equal(defaults.showFile, true);
   assert.equal(defaults.minIntervalMs, 3000);
   assert.equal(defaults.reconnectMs, 15000);

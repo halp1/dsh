@@ -29,9 +29,13 @@ Override configuration in your profile patch file:
   config:
     clientId: '1568482142072086657'
     details: 'DeepSeek Harness'
-    largeImage: ''
+    largeImage: 'https://raw.githubusercontent.com/halp1/dsh/main/plugins/discord-rich-presence/assets/dsh.png'
     largeText: 'DeepSeek Harness'
     showFile: true
     minIntervalMs: 3000
     reconnectMs: 15000
 ```
+
+## Icon and Assets
+
+The DSH icon is provided in `assets/dsh.png` and `assets/dsh.svg`. By default, the plugin loads `assets/dsh.png` via GitHub raw URL as the large rich presence image. You can also upload `assets/dsh.png` directly in the Discord Developer Portal under General Information as your App Icon.

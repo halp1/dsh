@@ -34,7 +34,7 @@ export function resolveConfig(raw = {}) {
     enabled: raw.enabled ?? true,
     clientId: optionalString('clientId', '1568482142072086657'),
     details: optionalString('details', 'DeepSeek Harness'),
-    largeImage: optionalString('largeImage', ''),
+    largeImage: optionalString('largeImage', 'https://raw.githubusercontent.com/halp1/dsh/main/plugins/discord-rich-presence/assets/dsh.png'),
     largeText: optionalString('largeText', 'DeepSeek Harness'),
     showFile: raw.showFile ?? true,
     minIntervalMs: optionalNumber('minIntervalMs', 3000),

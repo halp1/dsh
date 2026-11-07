@@ -7,6 +7,6 @@
       config:
         clientId: '1568482142072086657'
         details: 'DeepSeek Harness'
-        largeImage: ''
+        largeImage: 'https://raw.githubusercontent.com/halp1/dsh/main/plugins/discord-rich-presence/assets/dsh.png'
         largeText: 'DeepSeek Harness'
         showFile: true
