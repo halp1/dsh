@@ -26,6 +26,7 @@ export const exaAdapter: SearchAdapter = {
     { key: 'baseURL', label: 'API endpoint', placeholder: 'https://api.exa.ai' },
   ],
   defaultConfig: { apiKey: '', baseURL: 'https://api.exa.ai' },
+  hasApiKey(config) { return Boolean(exaApiKey(config)); },
   available(config) {
     try { endpoint(config.baseURL ?? this.defaultConfig.baseURL); return Boolean(exaApiKey(config)); } catch { return false; }
   },

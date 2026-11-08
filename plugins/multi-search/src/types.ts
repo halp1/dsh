@@ -16,6 +16,8 @@ export interface SearchAdapter {
   readonly fields: readonly ProviderFieldDefinition[];
   readonly defaultConfig: Record<string, string>;
   available(config: Record<string, string>): boolean;
+  /** Report configured credentials without exposing their values to Settings. */
+  hasApiKey?(config: Record<string, string>): boolean;
   search(
     request: WebSearchRequest,
     signal?: AbortSignal,

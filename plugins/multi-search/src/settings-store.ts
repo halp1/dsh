@@ -4,7 +4,6 @@ import { readFileSync, mkdirSync, openSync, writeFileSync, fsyncSync, closeSync,
 import { randomUUID } from 'node:crypto';
 import type { MultiSearchSettings, ProviderSettingItem, PublicMultiSearchSettings } from './types.ts';
 import { BUILTIN_ADAPTERS } from './adapters/index.ts';
-import { exaApiKey } from './adapters/exa.ts';
 import { endpoint, record } from './adapters/common.ts';
 
 export const SETTINGS_API_PATH = '/api/dsh-multi-search.settings';
@@ -68,12 +67,15 @@ export function publicSettings(settings: MultiSearchSettings): PublicMultiSearch
   return {
     providers: settings.providers.map(provider => {
       const config = { ...provider.config };
-      const fields = BUILTIN_ADAPTERS.find(adapter => adapter.id === provider.id)?.fields ?? [];
+      const adapter = BUILTIN_ADAPTERS.find(adapter => adapter.id === provider.id);
+      const fields = adapter?.fields ?? [];
       for (const field of fields) if (field.type === 'password') delete config[field.key];
       return {
         ...provider,
         config,
-        ...(provider.id === 'exa' ? { hasApiKey: Boolean(exaApiKey(provider.config)) } : {}),
+        ...(fields.some(field => field.type === 'password')
+          ? { hasApiKey: adapter?.hasApiKey?.(provider.config) ?? fields.some(field => field.type === 'password' && Boolean(provider.config[field.key])) }
+          : {}),
       };
     }),
   };

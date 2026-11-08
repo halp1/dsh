@@ -1,19 +1,21 @@
 # dsh-plugin-multi-search
 
-Ordered search adapters for DeepSeek Harness. Replaces `dsh-plugin-searxng` with SearXNG and Exa Search adapters and a **Settings > Multi-Search** section.
+Ordered search adapters for DeepSeek Harness. Replaces `dsh-plugin-searxng` with SearXNG, Exa Search, and Tavily adapters and a **Settings > Multi-Search** section.
 
 ## Settings
 
-- Edit the SearXNG instance URL or Exa API endpoint.
-- Replace or clear the saved Exa API key. Saved keys are never returned to the browser.
+- Edit the SearXNG instance URL, Exa API endpoint, or Tavily API endpoint.
+- Replace or clear the saved Exa and Tavily API keys. Saved keys are never returned to the browser.
 - Enable providers and use **Move up** / **Move down** to choose primary and fallback order.
 - **Save settings** persists changes on the host. New searches use the saved order immediately.
 
 Providers are tried sequentially on HTTP, network, timeout, malformed response, or engine failures. Valid empty results are not failures. Caller cancellation stops the chain. If all providers fail, the tool reports their failures.
 
-Settings persist in `$DSH_HOME/plugins/multi-search/settings.json` (default `~/.dsh/plugins/multi-search/settings.json`), with atomic private writes. The host may also supply `EXA_API_KEY`. API keys must not be embedded in plugin sources or browser storage.
+Settings persist in `$DSH_HOME/plugins/multi-search/settings.json` (default `~/.dsh/plugins/multi-search/settings.json`), with atomic private writes. The host may also supply `EXA_API_KEY` or `TAVILY_API_KEY`. API keys must not be embedded in plugin sources or browser storage.
 
 SearXNG must enable JSON under `search.formats`.
+
+[Tavily Search](https://docs.tavily.com/documentation/api-reference/endpoint/search) uses Bearer authentication with the default endpoint `https://api.tavily.com`. The adapter requests basic search with generated answers, images, and raw content disabled, and maps source snippets and publication dates into the common result format.
 
 ## Install and develop
 

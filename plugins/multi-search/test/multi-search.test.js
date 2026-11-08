@@ -7,6 +7,7 @@ import { MultiSearchProvider, apply, settingsHandler } from '../src/index.ts';
 import { SettingsStore, normalizeSettings, publicSettings } from '../src/settings-store.ts';
 import { searxngAdapter, mapSearxngResponse } from '../src/adapters/searxng.ts';
 import { exaAdapter, mapExaResponse } from '../src/adapters/exa.ts';
+import { tavilyAdapter, mapTavilyResponse } from '../src/adapters/tavily.ts';
 import { withTimeout } from '../src/adapters/common.ts';
 
 function fixture(t, initial) {
@@ -99,7 +100,7 @@ test('authenticated settings handler redacts credentials and supports omission, 
 });
 
 test('boundary parsers reject error-shaped, malformed and unsafe rows but retain valid deduplicated citations and empty successes', () => {
-  for (const map of [mapExaResponse, mapSearxngResponse]) {
+  for (const map of [mapExaResponse, mapSearxngResponse, mapTavilyResponse]) {
     for (const body of [null, [], {}, { error: 'failure', results: [] }, { results: 'wrong' }, { results: [null, { url: 'javascript:evil()' }] }]) assert.throws(() => map(body));
     assert.deepEqual(map({ results: [] }), { sources: [], truncated: false });
     const result = map({ results: [null, { url: 'https://a.test/page', title: '  A  ', text: 'extracted', content: 'snippet' }, { url: 'https://a.test/page' }, { url: 'https://b.test/page' }] }, 1);
@@ -157,7 +158,7 @@ test('caller cancellation and plugin disposal abort hanging or late transports w
     await assert.rejects(pending, error => error.code === 'WEB_ABORTED' && !error.message.includes('private caller reason'));
     assert.equal(calls, phase === 'pre' ? 0 : 1);
   }
-  for (const adapter of [exaAdapter, searxngAdapter]) {
+  for (const adapter of [exaAdapter, searxngAdapter, tavilyAdapter]) {
     await assert.rejects(adapter.search({ query: 'q' }, AbortSignal.abort(), {}, async () => { throw new Error('must not fetch'); }), error => error.code === 'WEB_ABORTED');
   }
   await assert.rejects(withTimeout(undefined, async () => new Promise(() => {}), 5), error => error.code === 'WEB_PROVIDER_ERROR');
