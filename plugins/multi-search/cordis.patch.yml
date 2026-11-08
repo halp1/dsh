@@ -1,0 +1,7 @@
+- id: web
+  config:
+    searchProvider: multi-search
+
+- insert:
+    - id: multi-search
+      name: dsh-plugin-multi-search
