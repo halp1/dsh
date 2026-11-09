@@ -10,6 +10,7 @@ Plugins for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness),
 | [discord-rich-presence](plugins/discord-rich-presence) | none |
 | [jev-reviewer](plugins/jev-reviewer) | none |
 | [latex](plugins/latex) | none |
+| [lid-pause](plugins/lid-pause) | swiftc |
 | [mcp-discovery](plugins/mcp-discovery) | none |
 | [mini-window](plugins/mini-window) | tsdown |
 | [open-in-editor](plugins/open-in-editor) | none |
