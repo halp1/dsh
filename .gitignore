@@ -8,3 +8,4 @@ lib/
 .pnpm-store/
 coverage/
 test-results/
+.build/
