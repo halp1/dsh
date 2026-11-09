@@ -1,0 +1,52 @@
+{
+  "name": "dsh-plugin-lid-pause",
+  "version": "0.1.0",
+  "description": "Hold DeepSeek Harness agents, subagents included, while the MacBook lid is closed or the Mac sleeps, and continue the same turns once the lid is open and the network is back",
+  "license": "MIT",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "macos",
+    "sleep",
+    "lid"
+  ],
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "native",
+    "lib/lidwatch",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-llm": ">=0.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "catalog:",
+    "@deepseek-ai/dsh-llm": "catalog:dsh"
+  },
+  "scripts": {
+    "build": "mkdir -p lib .build && swiftc -O -module-cache-path .build/module-cache native/lidwatch.swift -o lib/lidwatch",
+    "test": "node --test test/*.test.js"
+  }
+}

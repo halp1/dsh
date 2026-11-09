@@ -1,0 +1,14 @@
+# Bundle self-activation patch: mounts this plugin's node half when the package
+# is installed into a profile.
+#
+# Override from the profile's own cordis.patch.yml, for example
+#
+#   - id: lid-pause
+#     config:
+#       pauseOnNetworkLoss: true
+#       probe:
+#         host: api.anthropic.com
+#
+- insert:
+    - id: lid-pause
+      name: dsh-plugin-lid-pause
