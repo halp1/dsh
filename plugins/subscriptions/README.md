@@ -178,6 +178,20 @@ Not logged in? The provider stays out of the picker, and requests fail with `MIS
 
 Every provider accepts several accounts: once one is connected, the card grows an **Add account** button (Claude offers **Browser authorization** and **Import Claude Code** separately). Accounts are keyed by their identity (email / login) — re-logging the same account updates it in place, a different account appends. Browser authorization signs in whichever account the browser currently uses, so switch accounts there first (or use an incognito window with the manual code) to add a different one. The ★ default account serves the direct provider routes; pool routes use every account. A Claude account imported from Claude Code stays synced with the CLI's credential store; OAuth-added Claude accounts refresh standalone so several accounts never fight over the Keychain entry.
 
+#### Several Claude Code logins
+
+Claude Code keeps one login per config directory, so two subscriptions can both stay logged in to the CLI:
+
+```sh
+claude                                        # first account, default ~/.claude
+CLAUDE_CONFIG_DIR=~/.claude-work claude       # second account, then /login inside it
+alias claude-work='CLAUDE_CONFIG_DIR=~/.claude-work claude'
+```
+
+The plugin imports every Claude Code login it finds, at startup and every five minutes: each Keychain item Claude Code writes (`Claude Code-credentials` and `Claude Code-credentials-<hash>` for each `CLAUDE_CONFIG_DIR`), plus `.credentials.json` in the default directory, in `CLAUDE_CONFIG_DIR`, and in any `claudeConfigDirs` you list. Each login becomes its own account keyed by its email, bound to the store it came from, so a token rotated by `claude` flows into DSH and a refresh done by DSH flows back. **Import Claude Code** runs the same pass on demand. A `/login` to a different account in a bound directory detaches the old account (it keeps refreshing on its own) and imports the new one. Logging an imported account out keeps it out until a different login appears in that store or you click **Import Claude Code** again. Imports from older versions keyed by a token hash move to their email key, and the old key keeps resolving.
+
+Prompt caches are scoped per organization, so a conversation's cache never crosses accounts. The pool keeps each session on one account for that reason, and a failover pays one full prompt write on the new account.
+
 ### Edit visible models, context windows, and tools
 
 Open **Settings → Subscriptions → provider → Edit model list**, search and select models, then **Save changes**. All discovered models are shown automatically by default. Selecting individual models, selecting all, or clearing the selection saves an explicit list; newly discovered models then stay hidden until selected. Enable automatic display again to restore discovery-driven visibility. Hidden models remain usable by existing sessions, and the editor retains the full catalog so they can be restored. Refreshing discovery preserves preferences. The dialog has one **Save changes** / **Cancel** pair: Save submits the model list together with the account settings above it, and Cancel discards both and closes the dialog.
@@ -207,6 +221,7 @@ Existing defaults continue to load from and save to `~/.dsh/plugins/subscription
     providers: [codex, claude]        # subset; default all five
     streamIdleTimeoutMs: 300000
     claudePromptCacheTtl: 5m           # Claude prompt-cache lifetime: 5m (default) or 1h
+    claudeConfigDirs: []               # extra Claude Code config dirs whose .credentials.json to import
     rateLimit:
       wait: true                       # wait out a closed rate-limit window (default)
       maxWaitMs: 21600000              # ceiling on one wait; 6 h, covers a 5-hour session window
