@@ -190,7 +190,7 @@ alias claude-work='CLAUDE_CONFIG_DIR=~/.claude-work claude'
 
 The plugin imports every Claude Code login it finds, at startup and every five minutes: each Keychain item Claude Code writes (`Claude Code-credentials` and `Claude Code-credentials-<hash>` for each `CLAUDE_CONFIG_DIR`), plus `.credentials.json` in the default directory, in `CLAUDE_CONFIG_DIR`, and in any `claudeConfigDirs` you list. Each login becomes its own account keyed by its email, bound to the store it came from, so a token rotated by `claude` flows into DSH and a refresh done by DSH flows back. **Import Claude Code** runs the same pass on demand. A `/login` to a different account in a bound directory detaches the old account (it keeps refreshing on its own) and imports the new one. Logging an imported account out keeps it out until a different login appears in that store or you click **Import Claude Code** again. Imports from older versions keyed by a token hash move to their email key, and the old key keeps resolving.
 
-Prompt caches are scoped per organization, so a conversation's cache never crosses accounts. The pool keeps each session on one account for that reason, and a failover pays one full prompt write on the new account.
+Prompt caches are scoped per organization. Accounts in the same organization (seats on one Team plan) share a conversation's cache, so a failover between them keeps reading it. A failover to an account in another organization pays one full prompt write there. Rate limits stay per account either way.
 
 ### Edit visible models, context windows, and tools
 
