@@ -9,7 +9,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import './keep-alive.js'
 import { MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { Message } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
 import {
   CodexAdapter,
   codexRequestBody,
@@ -769,7 +769,8 @@ test('claudeRequestBody keeps auxiliary calls (compaction, session titles) on fi
   for (const purpose of ['compaction', 'session-title'] as const) {
     const history = claudeHistory(16)
     const body = claudeRequestBody(
-      { provider: 'claude', model: 'claude-opus-5', messages: history, system: 'explicit', purpose },
+      // Purpose keys are declared by host augmentations this test does not load.
+      { provider: 'claude', model: 'claude-opus-5', messages: history, system: 'explicit', purpose } as GenerateOptions<string> as GenerateOptions,
       history, 32_000, undefined, undefined, '1h',
     )
     assert.deepEqual(cacheMarkers(body), Array(4).fill({ type: 'ephemeral' }), purpose)
