@@ -56,7 +56,17 @@ export interface ClaudeSession {
    * store (Keychain/file): only bound accounts sync refreshes back to it.
    */
   keychainBound?: boolean
+  /**
+   * The exact Claude Code store this account was imported from. Absent on
+   * imports that predate it, which came from the default store.
+   */
+  claudeCodeSource?: ClaudeCodeSource
 }
+
+/** One Claude Code credential store: a Keychain item or a credentials file. */
+export type ClaudeCodeSource =
+  | { kind: 'keychain', service: string, account: string }
+  | { kind: 'file', path: string }
 
 /** Stored Grok (X Premium / xAI) subscription session. */
 export interface GrokSession {
@@ -579,6 +589,79 @@ export async function deleteAccountSession(
       }
     }
     await writeStore(store, path)
+  })
+}
+
+/**
+ * Read-modify-write one account inside the store's write chain, so a token
+ * refresh landing meanwhile is seen rather than overwritten.
+ * @param provider - the provider route.
+ * @param account - the account key (or an alias of it).
+ * @param update - maps the current session (undefined when absent) to the
+ *   one to store, or undefined to leave the store untouched.
+ * @param path - store file path; defaults to {@link authFilePath}.
+ * @returns whether a session was written.
+ */
+export async function updateAccountSession<K extends ProviderId>(
+  provider: K,
+  account: string,
+  update: (current: SessionOf<K> | undefined) => SessionOf<K> | undefined,
+  path = authFilePath(),
+): Promise<boolean> {
+  return serialize(path, async () => {
+    const store = await loadStore(path)
+    const entry = store[provider] as ProviderAccounts<SessionOf<K>> | undefined
+    const key = entry === undefined ? account : resolveAccount(entry as ProviderAccounts<StoredSession>, account)
+    const next = update(entry?.accounts[key])
+    if (next === undefined) return false
+    assertSessionShape(provider, key, next)
+    ;(store as Record<string, unknown>)[provider] = {
+      ...entry,
+      default: entry?.default ?? key,
+      accounts: { ...entry?.accounts, [key]: next },
+    } satisfies ProviderAccounts<SessionOf<K>>
+    await writeStore(store, path)
+    return true
+  })
+}
+
+/**
+ * Move one account to a new key, leaving the old key as an alias so pool
+ * pins and preferences that name it keep resolving. When the new key already
+ * holds an account, that session wins and the old entry is dropped.
+ * @param provider - the provider route.
+ * @param from - the current key (or an alias of it).
+ * @param to - the new key.
+ * @param path - store file path; defaults to {@link authFilePath}.
+ * @returns whether anything moved.
+ */
+export async function renameAccount(
+  provider: ProviderId,
+  from: string,
+  to: string,
+  path = authFilePath(),
+): Promise<boolean> {
+  return serialize(path, async () => {
+    const store = await loadStore(path)
+    const entry = store[provider]
+    if (entry === undefined) return false
+    const key = resolveAccount(entry, from)
+    if (key === to || !Object.hasOwn(entry.accounts, key)) return false
+    const accounts: Record<string, StoredSession> = { ...entry.accounts }
+    if (!Object.hasOwn(accounts, to)) accounts[to] = accounts[key]
+    delete accounts[key]
+    const aliases = { ...entry.aliases, [key]: to }
+    for (const [alias, target] of Object.entries(aliases)) {
+      if (target === key) aliases[alias] = to
+    }
+    ;(store as Record<string, unknown>)[provider] = {
+      ...entry,
+      default: entry.default === key ? to : entry.default,
+      accounts,
+      aliases,
+    }
+    await writeStore(store, path)
+    return true
   })
 }
 

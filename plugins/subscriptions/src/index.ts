@@ -27,7 +27,9 @@ import { OAuthFlowManager, type OAuthAttempt } from './auth/oauth-flow.js'
 import { DeviceFlowManager, type DeviceAttempt } from './auth/device-flow.js'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { readClaudeCodeCredentials, refreshClaudeSynced } from './auth/claude-code-creds.js'
+import { ClaudeCodeCredentialStore, readClaudeCodeCredentials, refreshClaudeSynced } from './auth/claude-code-creds.js'
+import { ClaudeCodeSync, fileDismissals } from './auth/claude-code-sync.js'
+import type { ClaudeCodeSyncResult } from './auth/claude-code-sync.js'
 import { ResetRedemption } from './providers/reset-redemption.js'
 import { BadRequest, registerAuthRpc } from './auth/rpc.js'
 import type {
@@ -50,7 +52,10 @@ import {
 import {
   accountKeyOf,
   deleteAccountSession,
+  getAccountSession,
   listAccounts,
+  renameAccount,
+  updateAccountSession,
   saveAccountSession,
   setDefaultAccount,
   PROVIDER_IDS,
@@ -106,6 +111,7 @@ import {
   exchangeClaudeCode,
   fetchClaudeUsage,
   isClaudePermanentRefreshError,
+  identifyClaude,
   refreshClaude,
 } from './providers/claude.js'
 import {
@@ -174,6 +180,12 @@ export interface Config {
    * compaction and session-title requests always stay on five minutes.
    */
   claudePromptCacheTtl?: PromptCacheTtl
+  /**
+   * Claude Code config directories to import from, besides the default and
+   * `CLAUDE_CONFIG_DIR`. Keychain logins are found without listing them, so
+   * this matters only where Claude Code stores `.credentials.json` files.
+   */
+  claudeConfigDirs?: string[]
   /** Whether and how long a route waits out a closed rate-limit window. */
   rateLimit?: RateLimitConfig
   /** Advisory model catalogs overriding the built-in defaults, per provider. */
@@ -231,6 +243,7 @@ export const Config: z<Config> = z.object({
   codexClientVersion: z.string(),
   streamIdleTimeoutMs: z.number().min(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   claudePromptCacheTtl: z.union(['5m', '1h']).default(DEFAULT_PROMPT_CACHE_TTL),
+  claudeConfigDirs: z.array(z.string()).default([]),
   rateLimit: z.object({
     wait: z.boolean().default(true),
     maxWaitMs: z.number().min(1).default(DEFAULT_RATE_LIMIT_MAX_WAIT_MS),
@@ -340,6 +353,15 @@ function planOf(provider: ProviderId, session: StoredSession): string | undefine
   }
 }
 
+/** Announce every Claude account a Claude Code sync pass touched. */
+function announceClaudeSync(
+  result: ClaudeCodeSyncResult,
+  onAuthChanged: (provider: ProviderId, account?: string) => void,
+): void {
+  const keys = new Set([...result.imported, ...result.updated, ...result.renamed.flatMap(({ from, to }) => [from, to])])
+  for (const key of keys) onAuthChanged('claude', key)
+}
+
 /** Per-provider per-account usage lookup; providers without a usage endpoint are absent. */
 type UsageFetchers = Partial<Record<ProviderId, (account: string, signal: AbortSignal) => Promise<ProviderUsage>>>
 
@@ -428,6 +450,11 @@ export class SubscriptionsAuthController implements AuthController {
      * failure must not outlive an explicit re-check (issue #139).
      */
     private readonly onUsageForced?: (provider: ProviderId, account: string) => void,
+    /**
+     * Imports every Claude Code login on this machine. When absent, the
+     * Import button reads only the default store through `readClaudeCreds`.
+     */
+    private readonly claudeCodeSync?: Pick<ClaudeCodeSync, 'sync' | 'dismiss'>,
   ) {}
 
   prepareReset(account: string, signal: AbortSignal) {
@@ -491,6 +518,22 @@ export class SubscriptionsAuthController implements AuthController {
   }
 
   async login(provider: ProviderId, method?: LoginMethod): Promise<{ authorizeUrl: string; userCode?: string }> {
+    if (provider === 'claude' && method !== 'oauth' && this.claudeCodeSync !== undefined) {
+      const result = await this.claudeCodeSync.sync(true)
+      if (result.seen > 0) {
+        this.claim('claude')
+        this.flows.pending('claude')?.cancel()
+        this.lastError.delete('claude')
+        announceClaudeSync(result, this.onAuthChanged)
+        return { authorizeUrl: '' }
+      }
+      if (method === 'keychain') {
+        throw new Error('no Claude Code credentials found; run `claude` and log in first, or choose the browser flow')
+      }
+      const attempt = await this.flows.start('claude', claudeFlow)
+      this.completions.set('claude', this.complete('claude', attempt, this.claim('claude')))
+      return { authorizeUrl: attempt.authorizeUrl }
+    }
     if (provider === 'claude' && method !== 'oauth') {
       const imported = this.readClaudeCreds()
       if (imported !== undefined) {
@@ -672,6 +715,10 @@ export class SubscriptionsAuthController implements AuthController {
     this.claim(provider)
     this.flows.pending(provider)?.cancel()
     this.deviceFlows.pending(provider)?.cancel()
+    if (provider === 'claude' && this.claudeCodeSync !== undefined) {
+      const session = await getAccountSession('claude', account)
+      if (session !== undefined) await this.claudeCodeSync.dismiss(session)
+    }
     await deleteAccountSession(provider, account)
     this.lastError.delete(provider)
     this.onAuthChanged(provider, account)
@@ -740,6 +787,7 @@ export function apply(ctx: Context, config: Config): void {
   )
   const flows = new OAuthFlowManager()
   const deviceFlows = new DeviceFlowManager()
+  const claudeCodeStore = new ClaudeCodeCredentialStore({ configDirs: config.claudeConfigDirs ?? [] })
   const onWarn = (message: string): void => {
     ctx.logger.warn(`dsh-plugin-subscriptions: ${message}`)
   }
@@ -793,6 +841,7 @@ export function apply(ctx: Context, config: Config): void {
   // captured beside the registrations for the inject block below.
   let codexTokens: AccountTokenManager<CodexSession> | undefined
   let claudeTokens: AccountTokenManager<ClaudeSession> | undefined
+  let claudeCodeSync: ClaudeCodeSync | undefined
   let grokTokens: AccountTokenManager<GrokSession> | undefined
   // Usage lookups resolve the session through the refresh-aware path, so an
   // expired access token renews instead of failing the lookup.
@@ -893,13 +942,23 @@ export function apply(ctx: Context, config: Config): void {
             // Only keychain-imported accounts sync with Claude Code's own
             // credential store; OAuth accounts refresh standalone so several
             // accounts never fight over the Keychain entry.
-            refresh: session =>
-              session.keychainBound === true ? refreshClaudeSynced(session, refreshClaude) : refreshClaude(session),
+            refresh: session => refreshClaudeSynced(session, refreshClaude, claudeCodeStore, identifyClaude),
             isPermanent: isClaudePermanentRefreshError,
           }),
           onAccountRemoved: account => { authChanged('claude', account) },
         })
         claudeTokens = tokens
+        claudeCodeSync = new ClaudeCodeSync({
+          store: claudeCodeStore,
+          identify: identifyClaude,
+          refresh: refreshClaude,
+          dismissals: fileDismissals(),
+          accounts: {
+            list: () => listAccounts('claude'),
+            update: (account, update) => updateAccountSession('claude', account, update),
+            rename: (from, to) => renameAccount('claude', from, to),
+          },
+        })
         accountTokens.set('claude', tokens as AccountTokenManager<StoredSession>)
         usageFetchers.claude = async (account, signal) =>
           fetchClaudeUsage(await tokens.session(account), proxiedFetch, signal, () => claudeVersion.resolve())
@@ -1274,6 +1333,7 @@ export function apply(ctx: Context, config: Config): void {
     },
     resetRedemption,
     (provider, account) => poolHealth?.clear(provider, account),
+    claudeCodeSync,
   ), speed, {
     get: () => proxyGetConfig(),
     set: input => proxySetConfig(input),
@@ -1358,24 +1418,28 @@ export function apply(ctx: Context, config: Config): void {
   }, () => onWarn('background model catalog refresh failed; next automatic attempt is in one hour')),
   'dsh-plugin-subscriptions: hourly model catalog refresh')
 
-  // Proactively keep keychain-bound Claude accounts synced with Claude Code's
-  // own store (Keychain/file) every 5 minutes, so a session left idle between
-  // requests does not go stale from a token rotation that happened outside
-  // this plugin (the `claude` CLI refreshing on its own, or another
-  // consumer). OAuth-only accounts refresh on demand and are not touched.
-  if (claudeTokens !== undefined) {
+  // Import every Claude Code login on this machine at startup and every five
+  // minutes, then keep each bound account in step with its own store, so a
+  // token the `claude` CLI rotated (or a new `CLAUDE_CONFIG_DIR` login) shows
+  // up here without a click. OAuth-only accounts refresh on demand.
+  if (claudeCodeSync !== undefined && claudeTokens !== undefined) {
+    const sync = claudeCodeSync
     const tokens = claudeTokens
-    const syncTimer = setInterval(() => {
-      void tokens.list().then((accounts) => {
-        for (const { key, session } of accounts) {
-          if (session.keychainBound !== true) continue
-          tokens.session(key).catch(() => {
-            // Best-effort: TokenManager already surfaces failures via onRemoved.
-          })
-        }
-      }, () => undefined)
-    }, 5 * 60_000)
-    ctx.effect(() => () => { clearInterval(syncTimer) }, 'dsh-plugin-subscriptions: claude background sync timer')
+    const tick = async (): Promise<void> => {
+      try {
+        announceClaudeSync(await sync.sync(), authChanged)
+      } catch (error) {
+        onWarn(`Claude Code credential sync failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      for (const { key, session } of await tokens.list().catch(() => [])) {
+        if (session.keychainBound !== true) continue
+        // Best-effort: TokenManager already surfaces failures via onRemoved.
+        tokens.session(key).catch(() => undefined)
+      }
+    }
+    void tick()
+    const syncTimer = setInterval(() => { void tick() }, 5 * 60_000)
+    ctx.effect(() => () => { clearInterval(syncTimer) }, 'dsh-plugin-subscriptions: claude code sync timer')
   }
 
   // `web` is optional on headless/minimal compositions. Register Codex behind

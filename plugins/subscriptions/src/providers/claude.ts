@@ -233,6 +233,15 @@ async function fetchClaudeProfile(accessToken: string): Promise<Pick<ClaudeSessi
   }
 }
 
+/**
+ * The email a Claude access token belongs to, for keying imported accounts.
+ * @param accessToken - a live access token.
+ * @returns the account email, or undefined when the profile lookup fails.
+ */
+export async function identifyClaude(accessToken: string): Promise<string | undefined> {
+  return (await fetchClaudeProfile(accessToken)).emailAddress
+}
+
 /** Build a session from a token response. */
 async function claudeSession(
   tokens: ClaudeTokenResponse,
