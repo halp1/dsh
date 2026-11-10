@@ -4,6 +4,7 @@ Plugins for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness),
 
 | Plugin | Build step |
 | --- | --- |
+| [ask](plugins/ask) | none |
 | [auto-limit](plugins/auto-limit) | none |
 | [background](plugins/background) | tsdown |
 | [badge](plugins/badge) | tsdown |
