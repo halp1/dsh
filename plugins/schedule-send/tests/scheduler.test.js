@@ -117,15 +117,58 @@ test('a corrupt queue file is moved aside and the queue starts empty', async () 
   assert.ok(names.some((n) => n.startsWith('queue.json.bad-')))
 })
 
-test('deliverVia uses the item id as requestId and classifies a missing session as permanent', async () => {
+test('delivery puts text first, inlines images, uploads files for receipts, and classifies permanent errors', async () => {
   const calls = []
-  await deliverVia({ prompt: async (req) => { calls.push(req) } }, item('x', 0, { clientTimeZone: 'America/Chicago' }))
+  const uploads = []
+  const blobs = { 'x:0': Buffer.from('IMG'), 'x:1': Buffer.from('DOC') }
+  const deps = {
+    controller: {
+      prompt: async (req) => { calls.push(req) },
+      resolveAgent: async (id) => ({ agent: { id } }),
+    },
+    uploads: { upload: async (agent, req) => { uploads.push([agent.id, req]); return { receiptId: 'r1' } } },
+    readBlob: async (id, i) => { const b = blobs[`${id}:${i}`]; if (!b) throw new Error('ENOENT'); return b },
+  }
+  await deliverVia(deps, item('x', 0, {
+    clientTimeZone: 'America/Chicago',
+    attachments: [
+      { kind: 'image', name: 'a.png', mediaType: 'image/png', size: 3 },
+      { kind: 'file', name: 'b.txt', mediaType: 'text/plain', size: 3 },
+    ],
+  }))
   assert.equal(calls[0].requestId, 'x')
   assert.equal(calls[0].mode, 'queue')
   assert.equal(calls[0].clientTimeZone, 'America/Chicago')
-  assert.deepEqual(calls[0].content, [{ type: 'text', text: 'msg x' }])
+  assert.deepEqual(calls[0].content, [
+    { type: 'text', text: 'msg x' },
+    { type: 'image', mediaType: 'image/png', data: Buffer.from('IMG').toString('base64'), name: 'a.png' },
+    { type: 'file', receiptId: 'r1' },
+  ])
+  assert.deepEqual(uploads, [['s1', { data: Buffer.from('DOC').toString('base64'), name: 'b.txt' }]])
+
+  // Attachments only: no empty text part.
+  await deliverVia(deps, item('x', 0, { text: '', attachments: [{ kind: 'image', name: '', mediaType: 'image/png', size: 3 }] }))
+  assert.equal(calls[1].content.length, 1)
+  assert.equal(calls[1].content[0].type, 'image')
 
   const notFound = Object.assign(new Error('session "s1" not found'), { code: 'session/not-found' })
-  await assert.rejects(deliverVia({ prompt: async () => { throw notFound } }, item('y', 0)), PermanentDeliveryError)
-  await assert.rejects(deliverVia({ prompt: async () => { throw new Error('busy') } }, item('z', 0)), (e) => !(e instanceof PermanentDeliveryError))
+  await assert.rejects(deliverVia({ ...deps, controller: { ...deps.controller, prompt: async () => { throw notFound } } }, item('y', 0)), PermanentDeliveryError)
+  await assert.rejects(deliverVia(deps, item('gone', 0, { attachments: [{ kind: 'file', name: 'z', mediaType: '', size: 1 }] })), PermanentDeliveryError)
+  await assert.rejects(deliverVia({ ...deps, controller: { ...deps.controller, prompt: async () => { throw new Error('busy') } } }, item('z', 0)), (e) => !(e instanceof PermanentDeliveryError))
+})
+
+test('a delivered item triggers cleanup; a failed one does not', async () => {
+  const cleaned = []
+  const store = new QueueStore(join(dir, 'queue.json'))
+  await store.load()
+  await store.update(() => [item('ok', -1), item('bad', -1)])
+  const scheduler = new Scheduler({
+    store,
+    clock: fakeClock(T0),
+    deliver: async (i) => { if (i.id === 'bad') throw new PermanentDeliveryError('no') },
+    delivered: async (i) => { cleaned.push(i.id) },
+  })
+  await scheduler.drain()
+  assert.deepEqual(cleaned, ['ok'])
+  assert.equal(store.current[0].status, 'failed')
 })

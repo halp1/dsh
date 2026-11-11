@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { QueueStore } from '../src/node/store.ts'
+import { AttachmentStore, QueueStore } from '../src/node/store.ts'
 import { handleCancel, handleCreate, handleList, handleSendNow } from '../src/node/routes.ts'
 
 const NOW = Date.parse('2026-11-11T19:00:00Z')
@@ -15,7 +15,7 @@ beforeEach(async () => {
   const store = new QueueStore(join(dir, 'queue.json'))
   await store.load()
   events = []
-  deps = { store, now: () => NOW, changed: () => events.push('changed'), drain: () => events.push('drain') }
+  deps = { store, blobs: new AttachmentStore(store.file), now: () => NOW, changed: () => events.push('changed'), drain: () => events.push('drain') }
 })
 afterEach(async () => { await rm(dir, { recursive: true, force: true }) })
 
@@ -56,4 +56,35 @@ test('list filters by session, cancel returns the item, send-now makes it due an
   assert.equal((await cancelled.json()).item.text, 'hi')
   assert.equal((await handleCancel(post({ id }), deps)).status, 404)
   assert.equal(deps.store.current.length, 1)
+})
+
+const png = Buffer.from('89504e470d0a1a0a', 'hex').toString('base64')
+
+test('attachments-only messages are accepted, stored on disk, and returned by cancel', async () => {
+  const attachments = [
+    { kind: 'image', name: 'shot.png', mediaType: 'image/png', data: png },
+    { kind: 'file', name: 'notes.txt', mediaType: 'text/plain', data: Buffer.from('hello').toString('base64') },
+  ]
+  const res = await handleCreate(post({ ...valid, text: '', attachments }), deps)
+  assert.equal(res.status, 200, await res.clone().text())
+  const { item } = await res.json()
+  assert.equal(item.text, '')
+  assert.deepEqual(item.attachments.map((a) => [a.kind, a.name, a.size]), [['image', 'shot.png', 8], ['file', 'notes.txt', 5]])
+  assert.equal((await deps.blobs.read(item.id, 1)).toString(), 'hello')
+
+  const cancelled = await (await handleCancel(post({ id: item.id }), deps)).json()
+  assert.deepEqual(cancelled.attachments.map((a) => a.data), [png, Buffer.from('hello').toString('base64')])
+  await assert.rejects(deps.blobs.read(item.id, 0), 'bytes are deleted with the item')
+})
+
+test('bad attachments are rejected before anything is stored', async () => {
+  const cases = [
+    { ...valid, text: '', attachments: [] },
+    { ...valid, attachments: [{ kind: 'image', name: 'a.svg', mediaType: 'image/svg+xml', data: png }] },
+    { ...valid, attachments: [{ kind: 'file', name: 'x', mediaType: '', data: 'not base64!' }] },
+    { ...valid, attachments: [{ kind: 'video', name: 'x', mediaType: '', data: png }] },
+    { ...valid, attachments: 'nope' },
+  ]
+  for (const input of cases) assert.equal((await handleCreate(post(input), deps)).status, 400, JSON.stringify(input))
+  assert.equal(deps.store.current.length, 0)
 })
