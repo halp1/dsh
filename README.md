@@ -15,6 +15,7 @@ Plugins for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness),
 | [mcp-discovery](plugins/mcp-discovery) | none |
 | [mini-window](plugins/mini-window) | tsdown |
 | [open-in-editor](plugins/open-in-editor) | none |
+| [push](plugins/push) | tsdown |
 | [quickswitcher](plugins/quickswitcher) | tsdown |
 | [schedule-send](plugins/schedule-send) | tsdown |
 | [multi-search](plugins/multi-search) | tsdown |
