@@ -1,0 +1,15 @@
+# Bundle self-activation patch: mounts this plugin's node half when the package
+# is installed into a profile via
+#   dsh plugin --profile web add file:~/code/dsh/plugins/schedule-send
+#
+# The node half owns the pending queue (queue.json), the delivery timer, and
+# the authenticated /api/dsh-schedule-send.* routes. The browser half (Send
+# button hook, popover, pending dock row) is discovered through package.json's
+# `dsh.client` declaration.
+#
+# Optional config: `queueFile` moves the queue off the default
+# <$DSH_HOME or ~/.dsh>/plugins/schedule-send/queue.json.
+#
+- insert:
+    - id: schedule-send
+      name: dsh-plugin-schedule-send
