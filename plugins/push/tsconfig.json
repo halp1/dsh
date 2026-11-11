@@ -1,0 +1,12 @@
+{
+  // Host half: node types. Declarations are not shipped, so this is a typecheck only.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2024"],
+    "types": ["node"],
+    "outDir": "lib/types",
+    "rootDir": "src"
+  },
+  "include": ["src/index.ts", "src/git.ts"],
+  "references": [{ "path": "./tsconfig.client.json" }]
+}

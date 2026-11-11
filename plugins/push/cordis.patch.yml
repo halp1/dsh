@@ -1,0 +1,10 @@
+# Bundle self-activation patch: mounts the node half (the two git routes) when
+# the package is installed into a profile via
+#   dsh plugin --profile web add file:/Users/halp/code/dsh/plugins/push
+#
+# The row also makes the client-modules scanner serve the browser half, which
+# adds the push button to every workspace row in the sidebar.
+#
+- insert:
+    - id: push
+      name: dsh-plugin-push
