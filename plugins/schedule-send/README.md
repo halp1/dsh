@@ -10,7 +10,8 @@ pick a time:
 
 The popover shows the resolved time ("Tomorrow, 9:00 AM" and "in 19 hr")
 before you commit. Scheduled messages sit in a row above the composer with
-**Send now** and **Cancel**. Cancel puts the text back in the draft.
+**Send now** and **Cancel**. Cancel puts the text and attachments back in the
+draft.
 
 At the chosen time the message arrives as an ordinary user message, exactly as
 if you had pressed Send, queued behind a running turn if there is one. The
@@ -28,8 +29,9 @@ pnpm installs `file:` dependencies as a copy.
 
 ## Limits
 
-- Text only. Drafts with attachments or a leading `/` command cannot be
-  scheduled.
+- Images and files go with the message, including attachments-only drafts.
+  Their bytes are kept on the host until delivery. Drafts that start with a `/`
+  command cannot be scheduled.
 - Times are in the browser's time zone, which is stored with the message.
 - Up to a year ahead. One-shot only. Use the built-in schedule tasks for
   recurring prompts.
@@ -44,14 +46,18 @@ pnpm installs `file:` dependencies as a copy.
 `queueFile` config) and arms one timer for the next due item. Delivery calls
 the Session Controller's `prompt` with `mode: 'queue'` and the item id as the
 `requestId`. The host deduplicates that id, so a crash between delivery and
-removal cannot send twice. Items that came due while the host was down are
+removal cannot send twice. Attachment bytes live in `attachments/<id>/` beside
+the queue file. At delivery, images are inlined into the prompt and other
+files are uploaded through the host's file upload service for a receipt, the
+same way the composer sends them. The folder is deleted once the message is
+delivered or cancelled. Items that came due while the host was down are
 sent on startup.
 
 Routes on the authenticated `/api` channel:
 
 - `GET  /api/dsh-schedule-send.list?sessionId=`
-- `POST /api/dsh-schedule-send.create` `{ sessionId, text, sendAt, clientTimeZone? }`
-- `POST /api/dsh-schedule-send.cancel` `{ id }`
+- `POST /api/dsh-schedule-send.create` `{ sessionId, text, attachments?, sendAt, clientTimeZone? }`
+- `POST /api/dsh-schedule-send.cancel` `{ id }`, returning the item and its attachment bytes
 - `POST /api/dsh-schedule-send.send-now` `{ id }`
 - `POST /api/dsh-schedule-send.retry` `{ id }`
 
