@@ -34,6 +34,8 @@ export const systemClock: Clock = {
 export interface SchedulerOptions {
   store: QueueStore
   deliver: (item: PendingSend) => Promise<void>
+  /** Cleanup after an item is delivered and removed from the queue. */
+  delivered?: (item: PendingSend) => Promise<void>
   clock?: Clock
   log?: (message: string) => void
 }
@@ -43,6 +45,7 @@ const errorText = (error: unknown): string => error instanceof Error ? error.mes
 export class Scheduler {
   private readonly store: QueueStore
   private readonly deliver: (item: PendingSend) => Promise<void>
+  private readonly delivered: (item: PendingSend) => Promise<void>
   private readonly clock: Clock
   private readonly log: (message: string) => void
   private timer: unknown
@@ -53,6 +56,7 @@ export class Scheduler {
   constructor(options: SchedulerOptions) {
     this.store = options.store
     this.deliver = options.deliver
+    this.delivered = options.delivered ?? (async () => {})
     this.clock = options.clock ?? systemClock
     this.log = options.log ?? (() => {})
   }
@@ -106,6 +110,7 @@ export class Scheduler {
       try {
         await this.deliver(item)
         await this.store.update((items) => items.filter((c) => c.id !== item.id))
+        await this.delivered(item).catch((error) => this.log(`schedule-send: cleanup of ${item.id} failed: ${errorText(error)}`))
       } catch (error) {
         const attempts = item.attempts + 1
         const permanent = error instanceof PermanentDeliveryError || attempts >= MAX_ATTEMPTS

@@ -17,7 +17,7 @@ import { resolve } from 'node:path'
 import { API, type PendingSend } from './shared/types.ts'
 import { handleCancel, handleCreate, handleList, handleSendNow, type RouteDeps } from './node/routes.ts'
 import { PermanentDeliveryError, Scheduler } from './node/scheduler.ts'
-import { QueueStore, defaultQueueFile } from './node/store.ts'
+import { AttachmentStore, QueueStore, defaultQueueFile } from './node/store.ts'
 
 export const name = 'schedule-send'
 
@@ -26,39 +26,94 @@ export interface Config {
   queueFile?: string
 }
 
+type PromptPart =
+  | { type: 'text'; text: string }
+  | { type: 'image'; mediaType: string; data: string; name?: string }
+  | { type: 'file'; receiptId: string }
+
 /** The slice of the Session Controller this plugin calls. */
-interface PromptService {
+export interface PromptService {
   prompt(request: {
     requestId: string
     sessionId: string
     mode: 'queue' | 'steer'
-    content: readonly { type: 'text'; text: string }[]
+    content: readonly PromptPart[]
     clientTimeZone?: string
   }, signal: AbortSignal): Promise<unknown>
+  resolveAgent(sessionId: string): Promise<{ agent: unknown } | { error: unknown }>
 }
 
-const PERMANENT_CODES = new Set(['session/not-found', 'session/migration-required'])
+/** The slice of the host file upload service this plugin calls. */
+export interface UploadService {
+  upload(agent: unknown, request: { data: string; name?: string }, signal: AbortSignal): Promise<{ receiptId: string }>
+}
+
+export interface DeliveryDeps {
+  controller: PromptService
+  /** Absent in compositions without file uploads; items with files then fail. */
+  uploads: UploadService | undefined
+  readBlob(id: string, index: number): Promise<Uint8Array>
+}
+
+/** Errors no retry can fix: the session is gone, or the host refuses the content. */
+const PERMANENT_CODES = new Set(['session/not-found', 'session/migration-required', 'session/attachment-invalid', 'subagent/attachment-invalid', 'gateway/bad-request'])
+
+const permanentIfKnown = (error: unknown): unknown => {
+  const code = (error as { code?: unknown } | null)?.code
+  return typeof code === 'string' && PERMANENT_CODES.has(code)
+    ? new PermanentDeliveryError(error instanceof Error ? error.message : code)
+    : error
+}
+
+/**
+ * Build the prompt content for one item: images inline as base64, other files
+ * as receipts minted on the host for the target session.
+ */
+export async function buildContent(deps: DeliveryDeps, item: PendingSend, signal: AbortSignal): Promise<PromptPart[]> {
+  const content: PromptPart[] = item.text === '' ? [] : [{ type: 'text', text: item.text }]
+  const metas = item.attachments ?? []
+  let agent: unknown
+  for (const [index, meta] of metas.entries()) {
+    let bytes: Uint8Array
+    try {
+      bytes = await deps.readBlob(item.id, index)
+    } catch {
+      throw new PermanentDeliveryError(`attachment ${meta.name || index + 1} is missing from disk`)
+    }
+    const data = Buffer.from(bytes).toString('base64')
+    const name = meta.name === '' ? {} : { name: meta.name }
+    if (meta.kind === 'image') {
+      content.push({ type: 'image', mediaType: meta.mediaType, data, ...name })
+      continue
+    }
+    if (deps.uploads === undefined) throw new PermanentDeliveryError('this host cannot accept file attachments')
+    if (agent === undefined) {
+      const resolved = await deps.controller.resolveAgent(item.sessionId)
+      if ('error' in resolved) throw resolved.error
+      agent = resolved.agent
+    }
+    const { receiptId } = await deps.uploads.upload(agent, { data, ...name }, signal)
+    content.push({ type: 'file', receiptId })
+  }
+  return content
+}
 
 /**
  * Deliver one item through the controller, classifying errors retrying cannot fix.
- * @param controller - the Session Controller.
- * @param item - the due message.
  */
-export async function deliverVia(controller: PromptService, item: PendingSend): Promise<void> {
+export async function deliverVia(deps: DeliveryDeps, item: PendingSend): Promise<void> {
+  const signal = AbortSignal.timeout(120_000)
   try {
-    await controller.prompt({
+    const content = await buildContent(deps, item, signal)
+    await deps.controller.prompt({
       requestId: item.id,
       sessionId: item.sessionId,
       mode: 'queue',
-      content: [{ type: 'text', text: item.text }],
+      content,
       ...(item.clientTimeZone === undefined ? {} : { clientTimeZone: item.clientTimeZone }),
-    }, AbortSignal.timeout(60_000))
+    }, signal)
   } catch (error) {
-    const code = (error as { code?: unknown } | null)?.code
-    if (typeof code === 'string' && PERMANENT_CODES.has(code)) {
-      throw new PermanentDeliveryError(error instanceof Error ? error.message : code)
-    }
-    throw error
+    throw permanentIfKnown(error)
   }
 }
 
@@ -81,11 +136,13 @@ export function apply(ctx: Context, config: Config | undefined): void {
     ? resolve(expandHome(config.queueFile.trim()))
     : defaultQueueFile()
   const store = new QueueStore(file, warn)
+  const blobs = new AttachmentStore(file)
   const loaded = store.load()
   let scheduler: Scheduler | undefined
 
   const deps: RouteDeps = {
     store,
+    blobs,
     changed: () => scheduler?.arm(),
     drain: () => { void scheduler?.drain() },
   }
@@ -103,7 +160,18 @@ export function apply(ctx: Context, config: Config | undefined): void {
   ctx.inject(['sessionController'], (ctx) => {
     const controller = ctx.get('sessionController') as unknown as PromptService
     ctx.effect(() => {
-      const instance = new Scheduler({ store, deliver: (item) => deliverVia(controller, item), log: warn })
+      const delivery: DeliveryDeps = {
+        controller,
+        // Optional: read at delivery time so a late-loading upload service still counts.
+        get uploads() { return ctx.get('fileUploads') as UploadService | undefined },
+        readBlob: (id, index) => blobs.read(id, index),
+      }
+      const instance = new Scheduler({
+        store,
+        deliver: (item) => deliverVia(delivery, item),
+        delivered: (item) => blobs.remove(item.id),
+        log: warn,
+      })
       scheduler = instance
       void loaded.then(() => instance.drain())
       return async () => {

@@ -5,7 +5,7 @@
  * item is due.
  * @module
  */
-import { API, type CreateRequest, type PendingSend } from '../shared/types.ts'
+import { API, type AttachmentUpload, type CreateRequest, type PendingSend } from '../shared/types.ts'
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>
 
@@ -30,7 +30,8 @@ export class ApiError extends Error {}
 export interface Api {
   list(sessionId: string): Promise<PendingSend[]>
   create(request: CreateRequest): Promise<PendingSend>
-  cancel(id: string): Promise<PendingSend>
+  /** Remove an item; returns it with its attachment bytes. */
+  cancel(id: string): Promise<{ item: PendingSend; attachments: AttachmentUpload[] }>
   sendNow(id: string): Promise<void>
   retry(id: string): Promise<void>
 }
@@ -45,7 +46,7 @@ export function createApi(fetchImpl: FetchLike = (i, init) => globalThis.fetch(i
   return {
     list: async (sessionId) => (await call<{ items: PendingSend[] }>(`${API.list}?sessionId=${encodeURIComponent(sessionId)}`)).items,
     create: async (request) => (await post<{ item: PendingSend }>(API.create, request)).item,
-    cancel: async (id) => (await post<{ item: PendingSend }>(API.cancel, { id })).item,
+    cancel: (id) => post<{ item: PendingSend; attachments: AttachmentUpload[] }>(API.cancel, { id }),
     sendNow: async (id) => { await post(API.sendNow, { id }) },
     retry: async (id) => { await post(API.retry, { id }) },
   }

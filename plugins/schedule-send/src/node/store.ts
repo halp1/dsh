@@ -5,7 +5,7 @@
  * serialized through {@link QueueStore.update}.
  * @module
  */
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { PendingSend, QueueFile } from '../shared/types.ts'
@@ -87,5 +87,38 @@ export class QueueStore {
     })
     this.queue = run.catch(() => {})
     return run
+  }
+}
+
+/**
+ * Attachment bytes for queued messages, one folder per item beside the queue
+ * file: `<dir>/attachments/<item id>/<index>`. Ids are host-minted UUIDs and
+ * indexes are integers, so no request-supplied string becomes a path.
+ */
+export class AttachmentStore {
+  readonly root: string
+
+  constructor(queueFile: string) {
+    this.root = join(dirname(queueFile), 'attachments')
+  }
+
+  private dir(id: string): string {
+    if (!/^[0-9a-f-]{36}$/.test(id)) throw new Error('invalid item id')
+    return join(this.root, id)
+  }
+
+  async write(id: string, blobs: readonly Uint8Array[]): Promise<void> {
+    const dir = this.dir(id)
+    await mkdir(dir, { recursive: true })
+    await Promise.all(blobs.map((blob, i) => writeFile(join(dir, String(i)), blob)))
+  }
+
+  read(id: string, index: number): Promise<Buffer> {
+    if (!Number.isInteger(index) || index < 0) throw new Error('invalid attachment index')
+    return readFile(join(this.dir(id), String(index)))
+  }
+
+  async remove(id: string): Promise<void> {
+    await rm(this.dir(id), { recursive: true, force: true })
   }
 }

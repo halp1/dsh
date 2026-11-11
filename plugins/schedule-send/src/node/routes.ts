@@ -5,11 +5,15 @@
  * @module
  */
 import { randomUUID } from 'node:crypto'
-import { MAX_AHEAD_MS, MAX_TEXT, PAST_GRACE_MS, type PendingSend } from '../shared/types.ts'
-import type { QueueStore } from './store.ts'
+import {
+  IMAGE_TYPES, MAX_AHEAD_MS, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, MAX_TEXT, PAST_GRACE_MS,
+  type AttachmentMeta, type PendingSend,
+} from '../shared/types.ts'
+import type { AttachmentStore, QueueStore } from './store.ts'
 
 export interface RouteDeps {
   store: QueueStore
+  blobs: AttachmentStore
   /** Called after any change so the scheduler re-arms. */
   changed: () => void
   /** Deliver due items now. */
@@ -54,14 +58,43 @@ export function handleList(request: Request, deps: RouteDeps): Response {
   return json({ items: sorted(deps.store.current.filter((item) => item.sessionId === sessionId)) })
 }
 
-/** `POST create` with `{ sessionId, text, sendAt, clientTimeZone? }` */
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/
+
+/** Validate and decode the request's attachments. */
+function parseAttachments(raw: unknown): { metas: AttachmentMeta[]; blobs: Buffer[] } | string {
+  if (raw === undefined) return { metas: [], blobs: [] }
+  if (!Array.isArray(raw)) return 'attachments must be a list'
+  if (raw.length > MAX_ATTACHMENTS) return `at most ${MAX_ATTACHMENTS} attachments`
+  const metas: AttachmentMeta[] = []
+  const blobs: Buffer[] = []
+  let total = 0
+  for (const entry of raw as unknown[]) {
+    const a = (typeof entry === 'object' && entry !== null ? entry : {}) as Record<string, unknown>
+    if (a.kind !== 'image' && a.kind !== 'file') return 'attachment kind must be image or file'
+    if (typeof a.data !== 'string' || a.data.length % 4 !== 0 || !BASE64.test(a.data)) return 'attachment data must be base64'
+    const name = typeof a.name === 'string' ? a.name.slice(0, 255) : ''
+    const mediaType = typeof a.mediaType === 'string' ? a.mediaType : ''
+    if (a.kind === 'image' && !IMAGE_TYPES.includes(mediaType)) return `unsupported image type ${mediaType || '(none)'}`
+    const blob = Buffer.from(a.data, 'base64')
+    total += blob.byteLength
+    if (total > MAX_ATTACHMENT_BYTES) return 'attachments are too large'
+    metas.push({ kind: a.kind, name, mediaType, size: blob.byteLength })
+    blobs.push(blob)
+  }
+  return { metas, blobs }
+}
+
+/** `POST create` with `{ sessionId, text, attachments?, sendAt, clientTimeZone? }` */
 export async function handleCreate(request: Request, deps: RouteDeps): Promise<Response> {
   const input = await body(request)
   if (input === null) return bad('expected a JSON object')
   const { sessionId, text, sendAt, clientTimeZone } = input
   if (typeof sessionId !== 'string' || sessionId === '') return bad('sessionId is required')
-  if (typeof text !== 'string' || text.trim() === '') return bad('message is empty')
+  if (typeof text !== 'string') return bad('text is required')
   if (text.length > MAX_TEXT) return bad('message is too long')
+  const attachments = parseAttachments(input.attachments)
+  if (typeof attachments === 'string') return bad(attachments)
+  if (text.trim() === '' && attachments.metas.length === 0) return bad('message is empty')
   if (typeof sendAt !== 'string') return bad('sendAt is required')
   const at = Date.parse(sendAt)
   if (Number.isNaN(at)) return bad('sendAt is not a valid time')
@@ -75,13 +108,21 @@ export async function handleCreate(request: Request, deps: RouteDeps): Promise<R
     id: randomUUID(),
     sessionId,
     text: text.trim(),
+    ...(attachments.metas.length === 0 ? {} : { attachments: attachments.metas }),
     sendAt: new Date(at).toISOString(),
     ...(clientTimeZone === undefined ? {} : { clientTimeZone }),
     createdAt: new Date(now).toISOString(),
     status: 'pending',
     attempts: 0,
   }
-  await deps.store.update((items) => [...items, item])
+  // Bytes land before the queue row, so the scheduler never sees an item without them.
+  if (attachments.blobs.length > 0) await deps.blobs.write(item.id, attachments.blobs)
+  try {
+    await deps.store.update((items) => [...items, item])
+  } catch (error) {
+    await deps.blobs.remove(item.id).catch(() => {})
+    throw error
+  }
   deps.changed()
   return json({ item })
 }
@@ -91,15 +132,21 @@ async function withId(request: Request): Promise<string | null> {
   return typeof input?.id === 'string' && input.id !== '' ? input.id : null
 }
 
-/** `POST cancel` with `{ id }`. Returns the removed item so the client can restore its text. */
+/**
+ * `POST cancel` with `{ id }`. Returns the removed item, with each attachment's
+ * base64 bytes, so the client can put the whole message back in the draft.
+ */
 export async function handleCancel(request: Request, deps: RouteDeps): Promise<Response> {
   const id = await withId(request)
   if (id === null) return bad('id is required')
   const item = deps.store.current.find((c) => c.id === id)
   if (item === undefined) return missing()
+  const data = await Promise.all((item.attachments ?? []).map((_, i) => deps.blobs.read(id, i).then((b) => b.toString('base64'), () => undefined)))
   await deps.store.update((items) => items.filter((c) => c.id !== id))
+  await deps.blobs.remove(id).catch(() => {})
   deps.changed()
-  return json({ item })
+  const attachments = (item.attachments ?? []).flatMap((meta, i) => data[i] === undefined ? [] : [{ ...meta, data: data[i] }])
+  return json({ item, attachments })
 }
 
 /**

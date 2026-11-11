@@ -8,12 +8,13 @@ import type { PendingSend } from '../shared/types.ts'
 import { formatAbsolute } from '../shared/when.ts'
 import type { QueueHub } from './api.ts'
 import { Popover } from './Popover.tsx'
+import { draftAccess, type InputActionsLike, type SessionsLike } from './draft.ts'
 import { bindSendHook } from './send-hook.ts'
 
 /** The input facts this plugin reads (a slice of the host's InputState). */
 interface InputSlice {
   readonly draft: string
-  readonly attachmentIds: readonly unknown[]
+  readonly attachmentIds: readonly string[]
   readonly phase: string
 }
 
@@ -21,11 +22,12 @@ interface InputSlice {
 export interface ComposerEntryProps {
   sessionId: string
   useInput: <S>(select: (state: InputSlice) => S, eq?: (a: S, b: S) => boolean) => S
-  inputActions: { setDraft(text: string): void }
+  inputActions: InputActionsLike
 }
 
 export interface Injected {
   hub: QueueHub
+  sessions: SessionsLike | undefined
 }
 
 const timeZone = (): string | undefined => {
@@ -36,48 +38,62 @@ const timeZone = (): string | undefined => {
   }
 }
 
+const sameIds = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((id, i) => id === b[i])
+
+/** Whether a draft has anything to send. */
+export const hasContent = (draft: string, attachments: number): boolean => draft.trim() !== '' || attachments > 0
+
 /** Why a draft cannot be scheduled, or undefined. */
-export function blockedReason(draft: string, attachments: number): string | undefined {
-  if (attachments > 0) return 'Attachments can’t be scheduled'
+export function blockedReason(draft: string): string | undefined {
   if (draft.trimStart().startsWith('/')) return 'Commands can’t be scheduled'
   return undefined
 }
 
-export function SendAnchor({ sessionId, useInput, inputActions, hub }: ComposerEntryProps & Injected) {
+export function SendAnchor({ sessionId, useInput, inputActions, hub, sessions }: ComposerEntryProps & Injected) {
   const anchor = useRef<HTMLSpanElement>(null)
   const draft = useInput((s) => s.draft)
-  const attachments = useInput((s) => s.attachmentIds.length)
+  const attachmentIds = useInput((s) => s.attachmentIds, sameIds)
   const phase = useInput((s) => s.phase)
   const [button, setButton] = useState<HTMLButtonElement | null>(null)
 
-  const live = useRef({ draft, phase })
-  live.current = { draft, phase }
+  const live = useRef({ draft, attachmentIds, phase })
+  live.current = { draft, attachmentIds, phase }
 
   useEffect(() => {
     const el = anchor.current
     if (el === null) return
     return bindSendHook(el, {
-      canOpen: () => live.current.draft.trim() !== '' && live.current.phase === 'plain',
+      canOpen: () => hasContent(live.current.draft, live.current.attachmentIds.length) && live.current.phase === 'plain',
       open: setButton,
     })
   }, [])
 
   // A draft that empties or starts sending closes the popover.
   useEffect(() => {
-    if (draft.trim() === '' || phase !== 'plain') setButton(null)
-  }, [draft, phase])
+    if (!hasContent(draft, attachmentIds.length) || phase !== 'plain') setButton(null)
+  }, [draft, attachmentIds, phase])
 
   const close = useCallback(() => setButton(null), [])
 
   const schedule = async (at: Date): Promise<string | undefined> => {
-    const text = live.current.draft
+    const { draft: text, attachmentIds: ids } = live.current
     try {
+      const access = draftAccess(sessions, sessionId, inputActions)
+      const attachments = await access.encode(ids)
       const zone = timeZone()
-      const item = await hub.api.create({ sessionId, text, sendAt: at.toISOString(), ...(zone === undefined ? {} : { clientTimeZone: zone }) })
+      const item = await hub.api.create({
+        sessionId,
+        text,
+        ...(attachments.length === 0 ? {} : { attachments }),
+        sendAt: at.toISOString(),
+        ...(zone === undefined ? {} : { clientTimeZone: zone }),
+      })
       const queue = hub.get(sessionId)
       queue.patch((items) => [...items, item].sort((a, b) => Date.parse(a.sendAt) - Date.parse(b.sendAt)))
       void queue.refresh()
+      // Clear only what was scheduled; anything typed or added meanwhile stays.
       if (live.current.draft === text) inputActions.setDraft('')
+      access.release(ids)
       return undefined
     } catch (error) {
       return error instanceof Error ? error.message : String(error)
@@ -88,7 +104,7 @@ export function SendAnchor({ sessionId, useInput, inputActions, hub }: ComposerE
     <>
       <span ref={anchor} className="dss-anchor" aria-hidden="true" />
       {button === null ? null : (
-        <Popover anchor={button} blocked={blockedReason(draft, attachments)} onSchedule={schedule} onClose={close} />
+        <Popover anchor={button} blocked={blockedReason(draft)} onSchedule={schedule} onClose={close} />
       )}
     </>
   )
@@ -103,7 +119,13 @@ const ClockIcon = () => (
 
 const EMPTY: readonly PendingSend[] = []
 
-export function PendingDock({ sessionId, useInput, inputActions, hub }: ComposerEntryProps & Injected) {
+/** One-line row preview: the text, then attachment names. */
+export function previewOf(item: PendingSend): string {
+  const names = (item.attachments ?? []).map((a) => a.name === '' ? (a.kind === 'image' ? 'image' : 'file') : a.name)
+  return [item.text.replace(/\s+/g, ' ').trim(), ...names].filter((part) => part !== '').join(' + ')
+}
+
+export function PendingDock({ sessionId, useInput, inputActions, hub, sessions }: ComposerEntryProps & Injected) {
   const queue = hub.get(sessionId)
   const items = useSyncExternalStore(queue.subscribe, queue.getSnapshot, () => EMPTY)
   const draft = useInput((s) => s.draft)
@@ -125,7 +147,10 @@ export function PendingDock({ sessionId, useInput, inputActions, hub }: Composer
       if (action === 'cancel') {
         const removed = await hub.api.cancel(item.id)
         queue.patch((all) => all.filter((c) => c.id !== item.id))
-        inputActions.setDraft(draft.trim() === '' ? removed.text : `${draft}\n\n${removed.text}`)
+        if (removed.item.text !== '') {
+          inputActions.setDraft(draft.trim() === '' ? removed.item.text : `${draft}\n\n${removed.item.text}`)
+        }
+        draftAccess(sessions, sessionId, inputActions).restore(removed.attachments)
       } else {
         await hub.api[action](item.id)
         queue.patch((all) => all.filter((c) => c.id !== item.id || action === 'retry'))
@@ -165,7 +190,7 @@ export function PendingDock({ sessionId, useInput, inputActions, hub }: Composer
                 <span className="dss-item-when" title={failed ? item.lastError : new Date(item.sendAt).toLocaleString()}>
                   {failed ? 'Failed' : formatAbsolute(new Date(item.sendAt), now)}
                 </span>
-                <span className="dss-item-text" title={item.text}>{item.text}</span>
+                <span className="dss-item-text" title={previewOf(item)}>{previewOf(item)}</span>
                 <span className="dss-item-actions">
                   {failed ? (
                     <>
