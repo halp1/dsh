@@ -16,6 +16,7 @@ Plugins for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness),
 | [mini-window](plugins/mini-window) | tsdown |
 | [open-in-editor](plugins/open-in-editor) | none |
 | [quickswitcher](plugins/quickswitcher) | tsdown |
+| [schedule-send](plugins/schedule-send) | tsdown |
 | [multi-search](plugins/multi-search) | tsdown |
 | [ui-patches](plugins/ui-patches) | none |
 | [usage-billing](plugins/usage-billing) | tsc and tsdown |
