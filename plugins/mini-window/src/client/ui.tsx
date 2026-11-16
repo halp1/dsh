@@ -6,6 +6,9 @@ import { message } from './session-controller.ts'
 import type { HostClient, NativeBridge } from './host-client.ts'
 import { ModelDefaults } from './model-defaults.tsx'
 
+/** The composer's model picker trigger. DSH hashes its class names, so match the slot and ARIA state. */
+const modelTrigger = '[data-slot="conversation.input.model"] button[aria-haspopup]'
+const modelMenuOpen = `${modelTrigger}[aria-expanded="true"]`
 export function Icon({ name }: { name: 'close' | 'plus' | 'history' | 'expand' | 'collapse' | 'settings' | 'chevron' | 'search' | 'arrow' }) {
   const paths = { close: 'M6 6l12 12M18 6L6 18', plus: 'M12 5v14M5 12h14', history: 'M3 11a9 9 0 1 1 2.7 7M3 4v7h7M12 7v5l3 2', expand: 'M8 3H3v5M16 3h5v5M21 16v5h-5M8 21H3v-5', collapse: 'M3 8h5V3M21 8h-5V3M16 21v-5h5M8 21v-5H3', settings: 'M9 3h6l1 4 4 1v8l-4 1-1 4H9l-1-4-4-1V8l4-1zM15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0', chevron: 'M7 10l5 5 5-5', search: 'M21 21l-6-6M17 10a7 7 0 1 1-14 0 7 7 0 0 1 14 0', arrow: 'M5 12h14M13 6l6 6-6 6' }
   return <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={paths[name]} /></svg>
@@ -101,7 +104,8 @@ export function MiniRoot({ controller, client, native, SessionProvider, renderSl
   const expandedRef = useRef(false)
   const pickerExpanded = useRef(false)
   const expand = (value: boolean) => { pickerExpanded.current = false; void native.setExpanded(value).catch(e => setBridgeError(message(e))) }
-  const focusComposer = () => requestAnimationFrame(() => root.current?.querySelector<HTMLElement>('[data-composer-input]')?.focus())
+  // Moving focus would blur the trigger, which closes an open model menu.
+  const focusComposer = () => requestAnimationFrame(() => { if (!root.current?.querySelector(modelMenuOpen)) root.current?.querySelector<HTMLElement>('[data-composer-input]')?.focus() })
   const newChat = async (workspace?: WorkspaceId | null) => { setPanel(null); if (await controller.newChat(workspace)) { expand(false); focusComposer() } }
   const openPanel = (value: 'sessions' | 'settings' | 'workspaces') => { expand(true); setPanel(value) }
   const closePanel = () => { setPanel(null); requestAnimationFrame(() => historyButton.current?.focus()) }
@@ -118,21 +122,23 @@ export function MiniRoot({ controller, client, native, SessionProvider, renderSl
   useEffect(() => {
     if (!expanded || !pickerExpanded.current) return
     let closed = false
+    // The menu is portaled out of the mini root, so watch the trigger's state.
     const observe = () => {
       if (closed || !pickerExpanded.current) return
-      if (!root.current?.querySelector('.codexModelSelectMenu')) {
+      if (!root.current?.querySelector(modelMenuOpen)) {
         pickerExpanded.current = false
         void native.setExpanded(false).catch(e => setBridgeError(message(e)))
       }
     }
     const observer = new MutationObserver(observe)
-    if (root.current) observer.observe(root.current, { childList: true, subtree: true })
+    if (root.current) observer.observe(root.current, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-expanded'] })
+    observe()
     return () => { closed = true; observer.disconnect() }
   }, [expanded, native])
   const current = selection.reference ? catalog.byId[selection.reference.sessionId] : undefined
   const workspace = workspaceState.items.find(w => w.workspaceId === selection.workspaceId)
   const onClickCapture = (event: React.MouseEvent<HTMLDivElement>) => {
-    if (expandedRef.current || !((event.target as HTMLElement).closest('.codexModelSelectTrigger'))) return
+    if (expandedRef.current || !((event.target as HTMLElement).closest(modelTrigger))) return
     pickerExpanded.current = true
     void native.setExpanded(true).catch(e => { pickerExpanded.current = false; setBridgeError(message(e)) })
   }
@@ -149,9 +155,11 @@ export function MiniRoot({ controller, client, native, SessionProvider, renderSl
   }
   const onDoubleClick = (event: React.MouseEvent<HTMLDivElement>) => {
     const el = event.target as HTMLElement
+    // Portaled menus bubble React events here though they sit outside the root.
+    if (!root.current?.contains(el)) return
     if (titleBar(el)) { expand(!expanded); return }
     // Compact mode has no selectable text; its padding keeps the old shortcut.
-    if (!expanded && !el.closest('button,input,select,textarea,[contenteditable="true"],a,.codexModelSelectMenu')) expand(true)
+    if (!expanded && !el.closest('button,input,select,textarea,[contenteditable="true"],a')) expand(true)
   }
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.nativeEvent.isComposing) return

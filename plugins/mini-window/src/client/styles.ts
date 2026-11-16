@@ -67,16 +67,16 @@ html[data-dsh-bg] .dshmini-panel { background:color-mix(in srgb,#101112 82%,tran
 .dshmini-root [data-composer-card] .uV2eYG_row > :last-child { min-width:0!important; flex:0 1 auto!important; gap:4px!important; }
 .dshmini-root [data-composer-card] .uV2eYG_row > :last-child > :first-child,
 .dshmini-root [data-composer-card] .uV2eYG_row [data-slot="conversation.input.model"] > div { min-width:0!important; max-width:100%; }
-.dshmini-root [data-composer-card] .uV2eYG_row [data-slot="conversation.input.model"] button:not(.codexModelSelectMenu *) { min-width:0!important; max-width:100%; }
-.dshmini-root [data-composer-card] .uV2eYG_row [data-slot="conversation.input.model"] button:not(.codexModelSelectMenu *) > span:first-child { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dshmini-root [data-composer-card] .uV2eYG_row [data-slot="conversation.input.model"] button { min-width:0!important; max-width:100%; }
+.dshmini-root [data-composer-card] .uV2eYG_row [data-slot="conversation.input.model"] button > span:first-child { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 @media (max-width:560px) {
   .dshmini-root[data-expanded="true"] [data-composer-card] .uV2eYG_row [aria-label^="Access mode"] > span:nth-child(2) { display:none; }
-  .dshmini-root[data-expanded="true"] [data-composer-card] .uV2eYG_row [data-slot="conversation.input.model"] button:not(.codexModelSelectMenu *) > span:nth-child(2) { display:none; }
+  .dshmini-root[data-expanded="true"] [data-composer-card] .uV2eYG_row [data-slot="conversation.input.model"] button > span:nth-child(2) { display:none; }
   .dshmini-root[data-expanded="true"] [data-composer-card] .uV2eYG_row .uV2eYG_modes { flex:0 0 44px!important; min-width:44px!important; }
   .dshmini-root[data-expanded="true"] [data-composer-card] .uV2eYG_row > :first-child { flex:0 0 auto!important; }
   .dshmini-root[data-expanded="true"] [data-composer-card] .uV2eYG_row > :last-child > :first-child { min-width:0!important; }
-  .dshmini-root[data-expanded="true"] [data-composer-card] .uV2eYG_row [data-slot="conversation.input.right"] button:not(.codexModelSelectMenu *),
-  .dshmini-root[data-expanded="true"] [data-composer-card] .uV2eYG_row [data-slot="conversation.input.model"] button:not(.codexModelSelectMenu *) { max-width:70px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .dshmini-root[data-expanded="true"] [data-composer-card] .uV2eYG_row [data-slot="conversation.input.right"] button,
+  .dshmini-root[data-expanded="true"] [data-composer-card] .uV2eYG_row [data-slot="conversation.input.model"] button { max-width:70px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 }
 .dshmini-root[data-expanded="true"] .dshmini-title strong { display:none; }
 .dshmini-root[data-expanded="true"] .dshmini-title span { font-size:12px; }
@@ -91,17 +91,6 @@ html[data-dsh-bg] .dshmini-panel { background:color-mix(in srgb,#101112 82%,tran
 .dshmini-root[data-expanded="false"] [data-composer-card] { height:112px; min-height:112px; justify-content:center; gap:6px; padding:16px 12px 12px; border:1px solid var(--mini-border); border-radius:24px; }
 .dshmini-root[data-expanded="false"] [data-composer-input] { min-height:32px; padding:4px 12px; line-height:24px; }
 .dshmini-root[data-expanded="false"] [data-composer-card] > div:last-child { padding:0 6px; }
-/* The shared composer anchors its flyout above the trigger and its submenu to
-   the left. The compact native window cannot show an upward menu, and the
-   expanded 440px window cannot show a side-by-side 420px submenu. */
-.dshmini-root .codexModelSelect { position:static; }
-.dshmini-root .codexModelSelectMenu { position:absolute; top:auto; bottom:62px; left:12px; right:12px; width:auto; min-width:0; max-width:none; max-height:min(360px,calc(100vh - 100px)); overflow-y:auto; overflow-x:hidden; z-index:40; }
-.dshmini-root .codexModelSelectSubmenu { position:relative; top:auto; bottom:auto; left:auto; right:auto; width:100%; min-width:0; max-width:none; height:auto; max-height:min(220px,calc(100vh - 200px)); margin-top:4px; }
-.dshmini-root .codexModelSelectMenu .codexModelSelectOption,.dshmini-root .codexModelSelectMenu .codexModelSelectCell { width:100%; min-width:100%; max-width:none; }
-.dshmini-root .codexModelSelectGroups { max-height:min(212px,calc(100vh - 208px)); }
-.dshmini-root[data-expanded="false"] .codexModelSelectMenu { bottom:8px; max-height:calc(100vh - 16px); }
-.dshmini-root[data-expanded="false"] .codexModelSelectSubmenu { max-height:calc(100vh - 125px); }
-.dshmini-root[data-expanded="false"] .codexModelSelectGroups { max-height:calc(100vh - 133px); }
 .dshmini-root[data-expanded="false"] [data-composer-placeholder] { font-size:14px; }
 .dshmini-root[data-expanded="false"] .dshmini-notice { position:absolute; z-index:4; top:8px; left:24px; right:24px; }
 /* The expanded conversation passes beneath the floating controls. The fade
