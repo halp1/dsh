@@ -4,9 +4,13 @@
  * The button has no slot of its own and hashed class names, so the hook
  * starts from an anchor element the plugin renders in
  * `conversation.input.right`, which sits in the same trailing toolbar group as
- * Send. The button is located at event time (it re-renders freely): the
- * group's `button[aria-busy]`, which only the primary action carries, with a
- * hashed `_primary` class as fallback.
+ * Send. The button is located at event time (it re-renders freely).
+ *
+ * Only buttons the composer renders itself count. Every slot entry (the
+ * model picker, other plugins' controls, this anchor) sits inside a
+ * `[data-slot]` wrapper below the group, and several of those buttons carry
+ * `aria-busy` too. Among the composer's own buttons, Send is the last one
+ * with `aria-busy`. Stop, which can sit beside it, has none.
  *
  * Listeners sit on the document in the capture phase, which runs before
  * React's root listeners, so stopping the event there keeps React's `onClick`
@@ -14,10 +18,18 @@
  * @module
  */
 
+/** Buttons rendered by the container itself, not by a slot entry inside it. */
+function ownButtons(container: Element): HTMLButtonElement[] {
+  return [...container.querySelectorAll<HTMLButtonElement>('button')].filter((button) => {
+    const slot = button.parentElement?.closest('[data-slot]')
+    return slot === null || slot === undefined || !container.contains(slot)
+  })
+}
+
 /** The toolbar group holding both the anchor and Send. */
 export function trailingGroup(anchor: Element): Element | null {
   let node: Element | null = anchor.parentElement
-  for (let depth = 0; node !== null && depth < 4; depth++, node = node.parentElement) {
+  for (let depth = 0; node !== null && depth < 6; depth++, node = node.parentElement) {
     if (findPrimary(node) !== null) return node
   }
   return null
@@ -25,8 +37,10 @@ export function trailingGroup(anchor: Element): Element | null {
 
 /** The primary Send button inside a toolbar group. */
 export function findPrimary(group: Element): HTMLButtonElement | null {
-  return group.querySelector<HTMLButtonElement>('button[aria-busy]')
-    ?? group.querySelector<HTMLButtonElement>('button[class*="_primary"]')
+  const own = ownButtons(group)
+  return own.findLast((b) => b.hasAttribute('aria-busy'))
+    ?? own.findLast((b) => /(^|\s)\S*_primary(\s|$)/.test(b.className))
+    ?? null
 }
 
 export interface SendHookOptions {
