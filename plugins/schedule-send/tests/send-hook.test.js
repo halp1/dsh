@@ -3,12 +3,24 @@ import assert from 'node:assert/strict'
 import { JSDOM } from 'jsdom'
 import { bindSendHook } from '../src/client/send-hook.ts'
 
-/** The composer's trailing group as InputBar renders it. */
+/**
+ * The composer's trailing group as InputBar renders it. Slot entries sit in
+ * `display: contents` `[data-slot]` wrappers, and the model picker's trigger
+ * carries `aria-busy="false"` while idle, just like Send.
+ */
 function composer() {
-  const dom = new JSDOM(`<body><div id="root"><div class="trailing">
-    <div class="standardControls"><span id="anchor"></span><button id="model">model</button></div>
+  const dom = new JSDOM(`<body><div id="root"><div data-slot="conversation.composer.bar"><div class="uV2eYG_trailing">
+    <div class="uV2eYG_standardControls">
+      <div data-slot="conversation.input.right">
+        <button id="quota" aria-busy="false">quota</button>
+        <span id="anchor"></span>
+      </div>
+      <div data-slot="conversation.input.model"><button id="model" aria-busy="false" aria-haspopup="menu">model</button></div>
+    </div>
+    <div class="uV2eYG_activity"><div data-slot="conversation.input.activity"></div></div>
+    <button id="stop" class="uV2eYG_primary">stop</button>
     <button id="send" class="uV2eYG_primary" aria-busy="false">send</button>
-  </div></div></body>`)
+  </div></div></div></body>`)
   const doc = dom.window.document
   const opened = []
   const reached = []
@@ -38,13 +50,14 @@ test('plain clicks, other buttons, a disabled Send, and an unschedulable draft p
   c.fire('send', 'click')
   c.fire('model', 'click', { shiftKey: true })
   c.fire('model', 'contextmenu')
+  c.fire('stop', 'contextmenu')
   c.setCanOpen(false)
   c.fire('send', 'contextmenu')
   c.setCanOpen(true)
   c.doc.getElementById('send').disabled = true
   c.fire('send', 'contextmenu')
   assert.deepEqual(c.opened, [])
-  assert.deepEqual(c.reached, ['click:send', 'click:model', 'contextmenu:model', 'contextmenu:send', 'contextmenu:send'])
+  assert.deepEqual(c.reached, ['click:send', 'click:model', 'contextmenu:model', 'contextmenu:stop', 'contextmenu:send', 'contextmenu:send'])
 })
 
 test('a re-rendered Send button is still found, and unbinding restores the default', () => {
