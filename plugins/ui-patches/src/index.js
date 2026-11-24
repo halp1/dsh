@@ -34,6 +34,27 @@ const FIRA_CODE_CSS = `
 }
 `;
 
+// The composer keymap submits on plain Enter everywhere, so a phone's return
+// key sends instead of breaking the line. On mobile, hide plain Enter from the
+// editor's keydown handlers but keep its default action: the browser then
+// fires `insertParagraph`, which the plain-text editor turns into a line
+// break, as it already does for Shift+Enter on iOS. The mobile test mirrors
+// the shell's own `isMobileDevice`. A highlighted trigger-menu candidate still
+// takes Enter, and IME composition and modified chords are left alone.
+export const MOBILE_ENTER_NEWLINE_SCRIPT = `(() => {
+  const { userAgent, platform, maxTouchPoints } = navigator;
+  if (!(/Android|iPhone|iPad|iPod/i.test(userAgent) || (platform === "MacIntel" && maxTouchPoints > 1))) return;
+  window.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.isComposing || event.keyCode === 229) return;
+    if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
+    const target = event.target;
+    const input = target instanceof Element ? target.closest("[data-composer-input][contenteditable=true]") : null;
+    if (input === null || input.hasAttribute("data-composer-composing")) return;
+    if (document.querySelector("[data-trigger-menu] [role=listbox][aria-activedescendant]") !== null) return;
+    event.stopImmediatePropagation();
+  }, true);
+})();`;
+
 function booleanOption(config, key) {
   const value = config[key] ?? true;
   if (typeof value !== 'boolean') {
@@ -65,6 +86,7 @@ function serveFiraCode(req, res) {
 export function apply(ctx, config = {}) {
   const hideComposerPricing = booleanOption(config, 'hideComposerPricing');
   const firaCode = booleanOption(config, 'firaCode');
+  const mobileEnterNewline = booleanOption(config, 'mobileEnterNewline');
 
   if (firaCode) {
     ctx.effect(
@@ -74,9 +96,13 @@ export function apply(ctx, config = {}) {
   }
 
   const css = [hideComposerPricing && COMPOSER_PRICING_CSS, firaCode && FIRA_CODE_CSS].filter(Boolean).join('');
-  if (css === '') return;
+  const rows = [
+    css !== '' && { kind: 'style', text: css },
+    mobileEnterNewline && { kind: 'script', placement: 'head', text: MOBILE_ENTER_NEWLINE_SCRIPT },
+  ].filter(Boolean);
+  if (rows.length === 0) return;
 
   ctx.on('webserver/index-inject', (table) => {
-    table.push({ kind: 'style', text: css });
+    table.push(...rows);
   });
 }

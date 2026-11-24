@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { apply, FIRA_CODE_PATH } from '../src/index.js';
+import { apply, FIRA_CODE_PATH, MOBILE_ENTER_NEWLINE_SCRIPT } from '../src/index.js';
 
 function load(config) {
   const table = [];
@@ -66,8 +66,7 @@ test('pricing stays hidden on local, remote, and mini shells without hiding othe
       assert.equal(dom.window.localStorage.length, 0);
       const display = (selector) => getComputedStyle(document.querySelector(selector)).display;
       assert.notEqual(display('[data-testid="billing-live-cost-bar"]'), 'none');
-      for (const row of indexRows()) {
-        assert.equal(row.kind, 'style');
+      for (const row of indexRows().filter((r) => r.kind === 'style')) {
         const style = document.createElement('style');
         style.textContent = row.text;
         document.head.append(style);
@@ -91,7 +90,7 @@ test('pricing stays hidden on local, remote, and mini shells without hiding othe
 
 test('Fira Code is served by the host and only replaces the default code stack', async () => {
   const { table, routes } = load();
-  const css = table.map((row) => row.text).join('');
+  const css = table.filter((row) => row.kind === 'style').map((row) => row.text).join('');
   assert.match(css, new RegExp(`url\\("${FIRA_CODE_PATH}"\\)`));
   // The user's Settings > Code font override must keep precedence.
   assert.match(css, /--dsh-font-family-code-default:\s*"Fira Code"/);
@@ -111,8 +110,56 @@ test('each patch can be disabled independently and rejects an invalid switch', (
   assert.equal(pricingOnly.routes.size, 0);
   assert.doesNotMatch(pricingOnly.table[0].text, /Fira Code/);
   assert.doesNotMatch(indexRows({ hideComposerPricing: false })[0].text, /billing-live-cost/);
-  assert.deepEqual(load({ hideComposerPricing: false, firaCode: false }), { table: [], routes: new Map() });
-  for (const config of [{ hideComposerPricing: 'false' }, { firaCode: 1 }]) {
+  assert.deepEqual(load({ hideComposerPricing: false, firaCode: false, mobileEnterNewline: false }), { table: [], routes: new Map() });
+  assert.ok(indexRows().some((row) => row.kind === 'script'));
+  assert.ok(!indexRows({ mobileEnterNewline: false }).some((row) => row.kind === 'script'));
+  for (const config of [{ hideComposerPricing: 'false' }, { firaCode: 1 }, { mobileEnterNewline: 'no' }]) {
     assert.throws(() => indexRows(config), TypeError);
+  }
+});
+
+const IPHONE = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1';
+const MAC = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15';
+
+test('mobile Enter reaches the browser as a line break instead of the submit keymap', () => {
+  const cases = [
+    // [name, userAgent, keydown init, setup, composer keymap expected to see the key]
+    ['plain Enter on a phone', IPHONE, {}, null, false],
+    ['plain Enter on desktop', MAC, {}, null, true],
+    ['Shift+Enter on a phone', IPHONE, { shiftKey: true }, null, true],
+    ['IME commit on a phone', IPHONE, { isComposing: true }, null, true],
+    ['highlighted slash candidate on a phone', IPHONE, {}, (doc) => {
+      doc.body.insertAdjacentHTML('beforeend', '<div data-trigger-menu><div role="listbox" aria-activedescendant="opt-0"></div></div>');
+    }, true],
+    ['Enter in another editable on a phone', IPHONE, {}, (doc) => {
+      doc.querySelector('[data-composer-input]').removeAttribute('data-composer-input');
+    }, true],
+  ];
+  for (const [name, userAgent, init, setup, expectKeymap] of cases) {
+    const dom = new JSDOM('<!doctype html><body><div contenteditable="true" role="textbox" data-composer-input><p>hi</p></div></body>', {
+      runScripts: 'outside-only',
+      beforeParse(window) {
+        Object.defineProperty(window.navigator, 'userAgent', { value: userAgent });
+      },
+    });
+    try {
+      const { window } = dom;
+      window.eval(MOBILE_ENTER_NEWLINE_SCRIPT);
+      setup?.(window.document);
+      const input = window.document.querySelector('[contenteditable]');
+      // Lexical's root keydown listener, which submits and prevents default.
+      let keymapSaw = false;
+      input.addEventListener('keydown', (event) => {
+        keymapSaw = true;
+        event.preventDefault();
+      });
+      const event = new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, ...init });
+      input.firstChild.dispatchEvent(event);
+      assert.equal(keymapSaw, expectKeymap, name);
+      // The browser must keep the default so it emits insertParagraph.
+      assert.equal(event.defaultPrevented, expectKeymap, name);
+    } finally {
+      dom.window.close();
+    }
   }
 });

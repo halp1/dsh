@@ -16,6 +16,12 @@ The patch only replaces the built-in default stack. A font entered under Setting
 
 Fira Code is licensed under the SIL Open Font License 1.1, see [assets/FiraCode-OFL.txt](assets/FiraCode-OFL.txt).
 
+## Mobile Enter
+
+On phones and tablets, the return key inserts a line break in the composer instead of sending. Send with the Send button. Desktop keeps Enter to send and Shift+Enter for a line break.
+
+The shell submits on plain Enter on every device. On mobile, a head script stops plain Enter from reaching the composer's keydown handlers but keeps the key's default action. The browser then emits `insertParagraph`, which the plain-text editor already turns into a line break. Enter still picks a highlighted slash or `@` suggestion, and IME composition and modified chords are left alone. The device test matches the shell's own mobile check.
+
 ## Install
 
 ```sh
@@ -24,13 +30,14 @@ dsh plugin --profile web add file:/Users/halp/code/dsh/plugins/ui-patches
 
 Refresh each open browser after installing or changing the patch. No build step is required.
 
-To turn either patch off, disable the plugin or set this profile override:
+To turn a patch off, disable the plugin or set this profile override:
 
 ```yaml
 - id: ui-patches
   config:
     hideComposerPricing: false
     firaCode: false
+    mobileEnterNewline: false
 ```
 
 ## Test
