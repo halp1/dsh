@@ -7,9 +7,9 @@
  *  - **Workspace groups** — the Workspace Controller's snapshot source is
  *    decorated so the sidebar walks workspaces newest-active first
  *    (`sorter.ts`).
- *  - **Sessions inside Ungrouped** — in the sidebar's Manual order mode, the
- *    ui-workspace view store's Ungrouped account is masked with a newest-first
- *    order (`ungrouped.ts`). "Last updated" mode already does this.
+ *  - **Sessions inside every folder** — the ui-workspace view store is masked
+ *    so the sidebar always uses its own "Last updated" order, even after a
+ *    drag switched it to Manual (`session-order.ts`).
  *  - **The Ungrouped folder itself** — placed at its activity rank among the
  *    workspaces with an injected stylesheet (`folder.ts`), because the sidebar
  *    always appends it last.
@@ -26,13 +26,12 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-api-session-controller/client'
 // Type-only: pulls the Workspace Controller's Context merge (ctx.workspaces).
 import type {} from '@deepseek-ai/dsh-api-workspace-controller/client'
-import { installFolderPlacement, type FolderPlacer, type StyleHost } from './folder.ts'
-import { installRecencySort, type RecencySorter, type SorterSources } from './sorter.ts'
+import { installFolderPlacement, type FolderPlacer, type PlacementSources, type StyleHost } from './folder.ts'
+import { installRecencySort, type PatchableSource, type RecencySorter, type SorterSources } from './sorter.ts'
 import { loadSettings, saveSettings, type RecencySettings } from './settings.ts'
-import { installUngroupedSessionOrder, type UngroupedOrderer, type UngroupedSources } from './ungrouped.ts'
+import { installSessionOrder, type SessionOrderer, type ViewStateLike } from './session-order.ts'
 
 export {
-  currentBlankSessionId,
   mainSessionId,
   placeUngrouped,
   sameOrder,
@@ -70,20 +69,15 @@ export type {
   Source,
   WorkspaceSnapshotLike,
 } from './sorter.ts'
-export {
-  UNGROUPED_ACCOUNT,
-  installUngroupedSessionOrder,
-  orderByRecency,
-  ungroupedRecencyOrder,
-} from './ungrouped.ts'
-export type { UngroupedOrderer, UngroupedSources, ViewStateLike } from './ungrouped.ts'
+export { RECENCY_ORDER, installSessionOrder } from './session-order.ts'
+export type { SessionOrderer, ViewStateLike } from './session-order.ts'
 
 /** Runtime face other plugins (and the devtools console) can use. */
 export interface WorkspaceRecencyService {
   /** Workspace ids in the order the sidebar currently renders them. */
   readonly order: readonly string[]
-  /** Ungrouped session ids as masked in Manual mode (undefined when the mask is off). */
-  readonly ungroupedOrder: readonly string[] | undefined
+  /** True while sessions are shown newest first over a saved Manual order. */
+  readonly maskingManualOrder: boolean
   /** Workspace ids rendered above the Ungrouped folder. */
   readonly ungroupedAfter: readonly string[]
   /** A copy of the live settings. */
@@ -135,7 +129,7 @@ interface SlotLedger {
  * @param slots - the slot ledger.
  * @returns the instance, or undefined while ui-workspace has not registered.
  */
-function findViewStore(slots: SlotLedger): UngroupedSources['view'] | undefined {
+function findViewStore(slots: SlotLedger): PatchableSource<ViewStateLike> | undefined {
   const entries = slots.entries(BROWSER_SLOT)
   // Prefer the stock registrant; otherwise take the first entry that carries a store.
   const ranked = [
@@ -145,7 +139,7 @@ function findViewStore(slots: SlotLedger): UngroupedSources['view'] | undefined 
   for (const entry of ranked) {
     const handle = entry.store as { create?: () => unknown } | undefined
     if (typeof handle?.create !== 'function') continue
-    const instance = handle.create() as UngroupedSources['view'] | undefined
+    const instance = handle.create() as PatchableSource<ViewStateLike> | undefined
     if (typeof instance?.getSnapshot === 'function' && typeof instance.subscribe === 'function') return instance
   }
   return undefined
@@ -159,12 +153,12 @@ export function apply(ctx: Context): void {
   const storage = typeof localStorage === 'undefined' ? undefined : localStorage
   let settings = loadSettings(storage)
 
-  const workspaces = ctx.workspaces.list as unknown as SorterSources['workspaces'] & UngroupedSources['workspaces']
+  const workspaces = ctx.workspaces.list as unknown as SorterSources['workspaces'] & PlacementSources['workspaces']
   const sessions = ctx.sessions.list as unknown as SorterSources['sessions']
   const slots = (ctx as unknown as { slots: SlotLedger }).slots
 
   let sorter: RecencySorter | undefined
-  let ungrouped: UngroupedOrderer | undefined
+  let sessionOrder: SessionOrderer | undefined
   let folder: FolderPlacer | undefined
 
   ctx.effect(() => {
@@ -187,16 +181,16 @@ export function apply(ctx: Context): void {
   ctx.effect(() => {
     // The browser entry may register before or after this plugin, and may be
     // re-registered on HMR, so the ledger is watched rather than read once.
-    let bound: UngroupedSources['view'] | undefined
+    let bound: PatchableSource<ViewStateLike> | undefined
     const bind = (): void => {
       const view = findViewStore(slots)
       if (view === bound) return
-      ungrouped?.dispose()
-      ungrouped = undefined
+      sessionOrder?.dispose()
+      sessionOrder = undefined
       bound = view
       if (view === undefined) return
       try {
-        ungrouped = installUngroupedSessionOrder({ view, workspaces, sessions }, () => settings)
+        sessionOrder = installSessionOrder(view, () => settings)
       } catch (error) {
         console.error('[workspace-recency] could not bind the sidebar view store:', error)
       }
@@ -205,21 +199,21 @@ export function apply(ctx: Context): void {
     bind()
     return () => {
       unsubscribe()
-      ungrouped?.dispose()
-      ungrouped = undefined
+      sessionOrder?.dispose()
+      sessionOrder = undefined
     }
-  }, 'workspace-recency: ungrouped session ordering')
+  }, 'workspace-recency: session ordering')
 
   const service: WorkspaceRecencyService = {
     get order() { return sorter?.order ?? [] },
-    get ungroupedOrder() { return ungrouped?.order },
+    get maskingManualOrder() { return sessionOrder?.masking ?? false },
     get ungroupedAfter() { return folder?.placement.before ?? [] },
     settings: () => ({ ...settings }),
     configure: (patch: Partial<RecencySettings>) => {
       settings = { ...settings, ...patch }
       saveSettings(storage, settings)
       sorter?.refresh()
-      ungrouped?.refresh()
+      sessionOrder?.refresh()
       folder?.refresh()
     },
   }

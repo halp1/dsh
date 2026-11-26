@@ -127,20 +127,6 @@ export function mainSessionId(list: SessionListLike): string | undefined {
 }
 
 /**
- * The open session, when it is a blank New Session placeholder.
- *
- * The sidebar pins this row first in its account; the ungrouped order mask
- * has to agree with that or the sidebar's own order sync never settles.
- * @param list - the session list snapshot.
- * @returns the blank open session id, or undefined.
- */
-export function currentBlankSessionId(list: SessionListLike): string | undefined {
-  const id = mainSessionId(list)
-  if (id === undefined) return undefined
-  return list.byId[id]?.blank === true ? id : undefined
-}
-
-/**
  * Sessions no workspace accounts for — the sidebar's Ungrouped bucket.
  * @param items - workspace rows.
  * @param list - the session list snapshot.

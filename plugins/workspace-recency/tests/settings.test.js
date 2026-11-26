@@ -26,7 +26,7 @@ test('defaults sort everything and do not pin', () => {
   assert.deepEqual(DEFAULT_SETTINGS, {
     enabled: true,
     pinCurrent: false,
-    sortUngroupedSessions: true,
+    sortSessions: true,
     moveUngroupedFolder: true,
   })
 })
@@ -41,7 +41,7 @@ test('an empty store yields the defaults', () => {
 
 test('a round trip preserves settings', () => {
   const store = storage()
-  const custom = { enabled: false, pinCurrent: true, sortUngroupedSessions: false, moveUngroupedFolder: false }
+  const custom = { enabled: false, pinCurrent: true, sortSessions: false, moveUngroupedFolder: false }
   saveSettings(store, custom)
   assert.deepEqual(loadSettings(store), custom)
 })

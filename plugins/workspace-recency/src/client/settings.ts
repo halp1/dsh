@@ -17,8 +17,8 @@ export interface RecencySettings {
   enabled: boolean
   /** Keep the folder holding the current session pinned to the top. */
   pinCurrent: boolean
-  /** Order sessions inside Ungrouped newest first, even in the sidebar's Manual mode. */
-  sortUngroupedSessions: boolean
+  /** Order sessions in every folder newest first, even when the sidebar is in Manual mode. */
+  sortSessions: boolean
   /** Move the Ungrouped folder to its activity rank instead of always last. */
   moveUngroupedFolder: boolean
 }
@@ -27,7 +27,7 @@ export interface RecencySettings {
 export const DEFAULT_SETTINGS: RecencySettings = {
   enabled: true,
   pinCurrent: false,
-  sortUngroupedSessions: true,
+  sortSessions: true,
   moveUngroupedFolder: true,
 }
 
@@ -51,7 +51,7 @@ export function normalizeSettings(value: unknown): RecencySettings {
   return {
     enabled: pick('enabled'),
     pinCurrent: pick('pinCurrent'),
-    sortUngroupedSessions: pick('sortUngroupedSessions'),
+    sortSessions: pick('sortSessions'),
     moveUngroupedFolder: pick('moveUngroupedFolder'),
   }
 }
