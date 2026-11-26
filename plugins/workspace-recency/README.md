@@ -25,7 +25,9 @@ Sorts the DeepSeek Harness sidebar by most recent activity:
 A session's activity time is `updatedAt`, which the host sets to the moment
 you last sent it a prompt (or its creation time before the first prompt). A
 workspace's activity time is the **newest `updatedAt` among the sessions you
-can actually see in that group**. Two kinds of rows are skipped, because
+can actually see in that group**. A workspace with a session that is running right now ranks
+above every idle workspace, and running workspaces order among themselves by
+that same time. Two kinds of rows are skipped, because
 neither represents work you did:
 
 | Row | Counted | Why |
