@@ -3,7 +3,17 @@ export const COMPACT_SIZE = { width: 640, height: 112 }
 export const EXPANDED_SIZE = { width: 640, height: 600 }
 export const MIN_EXPANDED_SIZE = { width: 440, height: 360 }
 /** @typedef {{provider: string, model: string, reasoningEffort?: string}} ModelSelection */
-export const defaultState = () => ({ schemaVersion: 1, revision: 0, enabled: true, shortcut: DEFAULT_SHORTCUT, bounds: null, expandedBounds: null, expanded: false, lastSessionId: null, lastWorkspaceId: null, defaultModel: /** @type {ModelSelection | null} */ (null) })
+/** A null workspaceId means uncategorized. A null WorkspaceDefault keeps the current chat's workspace. */
+/** @typedef {{workspaceId: string | null}} WorkspaceDefault */
+export const defaultState = () => ({ schemaVersion: 1, revision: 0, enabled: true, shortcut: DEFAULT_SHORTCUT, bounds: null, expandedBounds: null, expanded: false, lastSessionId: null, lastWorkspaceId: null, defaultModel: /** @type {ModelSelection | null} */ (null), defaultWorkspace: /** @type {WorkspaceDefault | null} */ (null) })
+/** @returns {WorkspaceDefault | null} */
+export function validateDefaultWorkspace(value) {
+  if (value === null) return null
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 1 || !('workspaceId' in value)) throw new Error('Expected a default workspace or null.')
+  const id = value.workspaceId
+  if (id !== null && (typeof id !== 'string' || !id || id.length > 256)) throw new Error('Choose an available workspace.')
+  return { workspaceId: id }
+}
 /** @returns {ModelSelection | null} */
 export function validateDefaultModel(value) {
   if (value === null) return null
@@ -36,17 +46,19 @@ export function normalizeState(value) {
   for (const key of ['bounds','expandedBounds']) result[key] = normalizeBounds(value[key])
   for (const key of ['lastSessionId','lastWorkspaceId']) if (typeof value[key] === 'string' && value[key].length <= 256 && value[key]) result[key] = value[key]
   try { if (value.defaultModel !== undefined) result.defaultModel = validateDefaultModel(value.defaultModel) } catch {}
+  try { if (value.defaultWorkspace !== undefined) result.defaultWorkspace = validateDefaultWorkspace(value.defaultWorkspace) } catch {}
   return result
 }
 export function validatePatch(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Expected a settings patch.')
-  const allowed = new Set(['enabled','shortcut','lastSessionId','lastWorkspaceId','defaultModel'])
+  const allowed = new Set(['enabled','shortcut','lastSessionId','lastWorkspaceId','defaultModel','defaultWorkspace'])
   const patch = {}
   for (const [key, item] of Object.entries(value)) {
     if (!allowed.has(key)) throw new Error(`Unknown setting: ${key}`)
     if (key === 'enabled') { if (typeof item !== 'boolean') throw new Error('Enabled must be a boolean.'); patch[key] = item }
     else if (key === 'shortcut') patch[key] = validateShortcut(item)
     else if (key === 'defaultModel') patch[key] = validateDefaultModel(item)
+    else if (key === 'defaultWorkspace') patch[key] = validateDefaultWorkspace(item)
     else { if (item !== null && (typeof item !== 'string' || !item || item.length > 256)) throw new Error('Invalid session or workspace identity.'); patch[key] = item }
   }
   return patch

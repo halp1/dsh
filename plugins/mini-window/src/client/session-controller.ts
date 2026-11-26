@@ -22,6 +22,13 @@ export class MiniSessions {
   subscribe = (fn: () => void) => { this.listeners.add(fn); return () => { this.listeners.delete(fn) } }
   private publish(patch: Partial<Selection>) { if (!this.disposed) { this.value = { ...this.value, ...patch }; this.listeners.forEach(fn => fn()) } }
   private workspaceFor(id: SessionId) { return this.workspaces.list.getSnapshot().items.find(w => w.sessionIds.includes(id))?.workspaceId ?? null }
+  /** The configured default: a workspace, null for uncategorized, or undefined when unset or no longer available. */
+  private preferredWorkspace(): WorkspaceId | null | undefined {
+    const preferred = this.host.getSnapshot().state.defaultWorkspace
+    if (!preferred) return undefined
+    if (preferred.workspaceId === null) return null
+    return this.workspaces.list.getSnapshot().items.find(w => w.workspaceId === preferred.workspaceId)?.workspaceId
+  }
   initialize = (): Promise<void> => {
     if (this.initializePromise) return this.initializePromise
     this.initializePromise = (async () => {
@@ -32,13 +39,16 @@ export class MiniSessions {
       await Promise.all([waitForReady(this.sessions.list, this.lifetime.signal), waitForReady(this.workspaces.list, this.lifetime.signal)])
       const stored = this.host.getSnapshot().state
       const workspaces = this.workspaces.list.getSnapshot().items
-      const workspaceId = workspaces.find(w => w.workspaceId === stored.lastWorkspaceId)?.workspaceId ?? workspaces[0]?.workspaceId ?? null
+      const preferred = this.preferredWorkspace()
+      const workspaceId = preferred !== undefined ? preferred : workspaces.find(w => w.workspaceId === stored.lastWorkspaceId)?.workspaceId ?? workspaces[0]?.workspaceId ?? null
       this.publish({ workspaceId })
+      // An uncategorized default starts a chat even when no workspace exists.
+      const canCreate = workspaceId !== null || preferred === null
       const lastId = stored.lastSessionId as SessionId | null
       if (lastId && this.sessions.list.getSnapshot().byId[lastId] && !this.workspaces.list.getSnapshot().archivedSessionIds.includes(lastId)) {
         const opened = await this.open(lastId)
-        if (!opened && workspaceId) await this.newChat(workspaceId, true)
-      } else if (workspaceId) await this.newChat(workspaceId, true)
+        if (!opened && canCreate) await this.newChat(workspaceId, true)
+      } else if (canCreate) await this.newChat(workspaceId, true)
       this.publish({ initialized: true, busy: false })
     })().catch(error => { this.publish({ initialized: true, busy: false, error: message(error) }); this.initializePromise = null })
     return this.initializePromise
@@ -65,7 +75,8 @@ export class MiniSessions {
       return false
     }
   }
-  newChat = async (workspaceId: WorkspaceId | null = this.value.workspaceId, reuseBlank = false): Promise<boolean> => {
+  /** An omitted workspace means the configured default, else the current chat's workspace. */
+  newChat = async (requested?: WorkspaceId | null, reuseBlank = false): Promise<boolean> => {
     if (this.disposed) return false
     const generation = ++this.generation
     this.publish({ busy: true, error: null })
@@ -76,6 +87,8 @@ export class MiniSessions {
       await this.host.refresh()
       if (this.host.getSnapshot().error) throw new Error(this.host.getSnapshot().error)
       if (this.disposed || generation !== this.generation) return false
+      const preferred = requested === undefined ? this.preferredWorkspace() : undefined
+      const workspaceId = requested !== undefined ? requested : preferred !== undefined ? preferred : this.value.workspaceId
       // Never reuse a main-window blank when mini defaults are configured. Seed a
       // distinct canonical session before the normal DSH agent is opened.
       const configured = this.host.getSnapshot().state.defaultModel != null

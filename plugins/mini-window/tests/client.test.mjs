@@ -112,3 +112,27 @@ test('shared state rejects unknown mutations and standard local shortcuts', () =
   assert.equal(normalizeState({ bounds: { x: NaN, y: 0, width: 600, height: 600 }, shortcut: 'bad' }).bounds, null)
   assert.deepEqual(validatePatch({ lastSessionId: null, enabled: false }), { lastSessionId: null, enabled: false })
 })
+test('default workspace setting routes new chats and survives a deleted workspace', async () => {
+  const cases = [
+    { stored: { workspaceId: 'other' }, expected: [{ workspaceId: 'other' }] },
+    { stored: { workspaceId: null }, expected: [{}] },
+    { stored: { workspaceId: 'deleted' }, expected: [{ workspaceId: 'ws' }] },
+    { stored: null, expected: [{ workspaceId: 'ws' }] },
+  ]
+  for (const { stored, expected } of cases) {
+    const f = fixture()
+    const items = [...f.workspaces.list.getSnapshot().items, { workspaceId: 'other', title: 'Other', path: '/other', sessionIds: [] }]
+    f.workspaces.list = source({ items, archivedSessionIds: [], phase: 'ready' })
+    const state = { ...defaultState(), lastSessionId: 'a', lastWorkspaceId: 'ws', defaultWorkspace: stored }
+    f.host.getSnapshot = () => ({ state })
+    await f.controller.initialize()
+    assert.equal(await f.controller.newChat(), true)
+    assert.deepEqual(f.creates, expected, JSON.stringify(stored))
+    // An explicit pick in the workspace panel still wins over the default.
+    if (stored) { await f.controller.newChat('ws'); assert.deepEqual(f.creates.at(-1), { workspaceId: 'ws' }) }
+    f.controller.dispose()
+  }
+  assert.deepEqual(validatePatch({ defaultWorkspace: { workspaceId: null } }), { defaultWorkspace: { workspaceId: null } })
+  assert.throws(() => validatePatch({ defaultWorkspace: { workspaceId: '' } }))
+  assert.equal(normalizeState({ defaultWorkspace: { workspaceId: 5 } }).defaultWorkspace, null)
+})

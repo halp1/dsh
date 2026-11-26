@@ -5,6 +5,8 @@ import type { MiniSessions } from './session-controller.ts'
 import { message } from './session-controller.ts'
 import type { HostClient, NativeBridge } from './host-client.ts'
 import { ModelDefaults } from './model-defaults.tsx'
+import { WorkspaceDefault } from './workspace-default.tsx'
+import type { IWorkspaces } from '@deepseek-ai/dsh-api-workspace-controller/client'
 
 /** The composer's model picker trigger. DSH hashes its class names, so match the slot and ARIA state. */
 const modelTrigger = '[data-slot="conversation.input.model"] button[aria-haspopup]'
@@ -16,7 +18,7 @@ export function Icon({ name }: { name: 'close' | 'plus' | 'history' | 'expand' |
 export function IconButton({ label, icon, onClick, disabled, children }: { label: string; icon: Parameters<typeof Icon>[0]['name']; onClick: () => void; disabled?: boolean; children?: ReactNode }) {
   return <button className="dshmini-icon" type="button" title={label} aria-label={label} disabled={disabled} onClick={onClick}><Icon name={icon} />{children}</button>
 }
-export function Settings({ client, close }: { client: HostClient; close?: () => void }) {
+export function Settings({ client, workspaces, close }: { client: HostClient; workspaces: IWorkspaces; close?: () => void }) {
   const snapshot = useSyncExternalStore(client.subscribe, client.getSnapshot)
   const [shortcut, setShortcut] = useState(snapshot.state.shortcut)
   const [busy, setBusy] = useState(false)
@@ -34,6 +36,7 @@ export function Settings({ client, close }: { client: HostClient; close?: () => 
       <p className="dshmini-muted">Use names such as Command, Shift, Option, and Space. Occupied shortcuts leave your previous binding unchanged.</p>
       <button className="dshmini-button dshmini-primary" type="submit" disabled={busy || shortcut.trim() === snapshot.state.shortcut}>Save shortcut</button>
     </form>
+    <WorkspaceDefault client={client} workspaces={workspaces} />
     <ModelDefaults client={client} />
     <div className="dshmini-runtime"><span className={`dshmini-dot ${snapshot.runtime.status === 'ready' && snapshot.runtime.shortcutRegistered ? 'is-ready' : ''}`} /><span role="status">{status}</span></div>
     {(error ?? snapshot.error ?? snapshot.runtime.error) && <p className="dshmini-error" role="alert">{error ?? snapshot.error ?? snapshot.runtime.error}</p>}
@@ -189,6 +192,6 @@ export function MiniRoot({ controller, client, native, SessionProvider, renderSl
     <main ref={content} className="dshmini-content" aria-label="DSH mini chat" aria-busy={selection.busy}>
       {selection.reference ? <SessionProvider session={selection.reference}>{renderSlot('mini.conversation', {})}</SessionProvider> : <div className="dshmini-setup"><p>{selection.initialized ? 'Start a chat in a workspace or uncategorized.' : 'Connecting to DSH…'}</p>{selection.initialized && <label>Location<select aria-label="New chat location" value="" disabled={selection.busy} onChange={e => void newChat(e.target.value === 'uncategorized' ? null : e.target.value as WorkspaceId)}><option value="">Choose a location</option><option value="uncategorized">Uncategorized</option>{workspaceState.items.map(w => <option value={w.workspaceId} key={w.workspaceId}>{w.title || w.path}</option>)}</select></label>}</div>}
     </main>
-    {panel && <section className="dshmini-panel" role="dialog" aria-modal="true" aria-label={panel === 'sessions' ? 'Choose an existing session' : panel === 'workspaces' ? 'Choose a workspace' : 'Mini window settings'}>{panel === 'sessions' ? <SessionPicker controller={controller} close={closePanel} onPick={id => { void controller.open(id).then(ok => { if (ok) { setPanel(null); expand(true); focusComposer() } }) }} /> : panel === 'settings' ? <Settings client={client} close={closePanel} /> : <div className="dshmini-picker"><div className="dshmini-picker-top"><h2>New chat in…</h2><IconButton label="Close workspace picker" icon="close" onClick={closePanel} /></div><p className="dshmini-muted">Choose a workspace, or leave the chat uncategorized.</p><div className="dshmini-results"><button type="button" className="dshmini-session" disabled={selection.busy} onClick={() => void newChat(null)}><span className="dshmini-session-title">Uncategorized</span><span className="dshmini-session-meta">No workspace · uses the DSH server’s working directory</span></button>{workspaceState.items.map(w => <button type="button" key={w.workspaceId} className="dshmini-session" disabled={selection.busy} onClick={() => void newChat(w.workspaceId)}><span className="dshmini-session-title">{w.title || w.path}</span><span className="dshmini-session-meta">{w.path}</span></button>)}</div></div>}</section>}
+    {panel && <section className="dshmini-panel" role="dialog" aria-modal="true" aria-label={panel === 'sessions' ? 'Choose an existing session' : panel === 'workspaces' ? 'Choose a workspace' : 'Mini window settings'}>{panel === 'sessions' ? <SessionPicker controller={controller} close={closePanel} onPick={id => { void controller.open(id).then(ok => { if (ok) { setPanel(null); expand(true); focusComposer() } }) }} /> : panel === 'settings' ? <Settings client={client} workspaces={controller.workspaces} close={closePanel} /> : <div className="dshmini-picker"><div className="dshmini-picker-top"><h2>New chat in…</h2><IconButton label="Close workspace picker" icon="close" onClick={closePanel} /></div><p className="dshmini-muted">Choose a workspace, or leave the chat uncategorized.</p><div className="dshmini-results"><button type="button" className="dshmini-session" disabled={selection.busy} onClick={() => void newChat(null)}><span className="dshmini-session-title">Uncategorized</span><span className="dshmini-session-meta">No workspace · uses the DSH server’s working directory</span></button>{workspaceState.items.map(w => <button type="button" key={w.workspaceId} className="dshmini-session" disabled={selection.busy} onClick={() => void newChat(w.workspaceId)}><span className="dshmini-session-title">{w.title || w.path}</span><span className="dshmini-session-meta">{w.path}</span></button>)}</div></div>}</section>}
   </div>
 }

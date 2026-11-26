@@ -5,7 +5,7 @@ A macOS floating mini chat for DeepSeek Harness. An installed DSH plugin starts 
 ## Controls
 
 - **Command+Shift+Space:** global show/hide toggle (configurable).
-- **Command+N:** new chat in the current mini workspace, only while the companion is focused.
+- **Command+N:** new chat in the default workspace (or the current mini workspace when none is set), only while the companion is focused.
 - **Command+W:** hide the window; **Command+,** opens mini settings.
 - **Escape:** dismiss the picker/settings first, otherwise hide. Existing composer menus keep first refusal.
 - Close button hides rather than destroying the window. Running agents continue.
@@ -40,6 +40,7 @@ The Mini Window settings section exists in both the normal DSH GUI and the compa
 
 - Enable/disable the companion.
 - Set an Electron accelerator such as `Command+Shift+Space` or `Command+Option+Space`.
+- **Default workspace** is a type-to-filter picker over every workspace, plus **Uncategorized** and **Last used workspace** (the previous behavior). It applies to Command+N, the New chat button, and startup. Picking a workspace from the title label still overrides it for that chat. A deleted default falls back to the last used workspace.
 - Under **New mini chats**, choose a mini-only **Default model** from the live provider/model catalog. **Use main DSH default** clears the override without saving or changing the main default.
 - Choose **Reasoning** only when the selected model advertises supported efforts; **Model default** leaves that effort unspecified. No unrelated global speed/verbosity settings are exposed.
 - **Save mini defaults**, then use **Command+N**. Existing sessions and history retain their current selections. Unavailable saved models/settings are labeled and cannot be saved as valid selections; **Refresh models** retries catalog loading.
@@ -80,7 +81,7 @@ The host prepares a new session through public SessionStorage and SessionPersist
 
 ## Storage and security
 
-Versioned private JSON state lives at `$DSH_HOME/plugins/mini-window/state.json` (or `~/.dsh/...`). It stores shortcut/enablement, window bounds, expanded size, last session/workspace IDs, and mini-only default provider/model/reasoning selection—not chat contents or authentication URLs. Writes are atomic and revision checked. The Electron user-data directory is private and profile isolated; Chromium keeps the companion's authenticated cookie there.
+Versioned private JSON state lives at `$DSH_HOME/plugins/mini-window/state.json` (or `~/.dsh/...`). It stores shortcut/enablement, window bounds, expanded size, last session/workspace IDs, the default workspace, and mini-only default provider/model/reasoning selection—not chat contents or authentication URLs. Writes are atomic and revision checked. The Electron user-data directory is private and profile isolated; Chromium keeps the companion's authenticated cookie there.
 
 The client receives a public catalog-loader callback through `HostClient` and the exact `remote.session` injection, using `ClientRemote` from `@deepseek-ai/dsh-api-remotes`. It does not select models or save global defaults through that callback. Host routes are registered through DSH's authenticated `connection.fetch` channel:
 

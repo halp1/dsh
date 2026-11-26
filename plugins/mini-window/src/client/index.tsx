@@ -68,7 +68,7 @@ export function apply(ctx: Context) {
   })
   ctx.effect(() => client.start(), 'mini-window: settings transport')
   ctx.effect(() => installStyles(document), 'mini-window: styles')
-  ctx.effect(() => slots.inject('settings.section', () => slots.register({ name: 'settings.section', id: 'mini-window', order: 55, label: 'Mini Window', inject: () => ({ client }) }, Settings)), 'mini-window: settings tab')
+  ctx.effect(() => slots.inject('settings.section', () => slots.register({ name: 'settings.section', id: 'mini-window', order: 55, label: 'Mini Window', inject: () => ({ client, workspaces: ctx.get('workspaces') as unknown as IWorkspaces }) }, Settings)), 'mini-window: settings tab')
   const native = window.dshMiniWindow?.version === 1 ? window.dshMiniWindow : location.hash === '#dsh-mini-preview' ? previewBridge() : undefined
   if (!native) {
     // The ordinary DSH window: clear unread dots for chats already read in the mini window.

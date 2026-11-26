@@ -131,6 +131,17 @@ html[data-dsh-bg] .dshmini-panel { background:color-mix(in srgb,#101112 82%,tran
 .dshmini-toggle small { display:block; color:var(--dsw-alias-label-secondary,#aeb2ba); font-size:12px; line-height:1.6; margin-top:4px; }
 .dshmini-toggle input { width:18px; height:18px; accent-color:#547cff; }
 .dshmini-field { display:grid; gap:8px; font-size:14px; font-weight:500; }
+.dshmini-workspace-default h3 { font-size:16px; font-weight:600; margin:28px 0 12px; }
+.dshmini-combo { position:relative; }
+.dshmini-combo input { width:100%; min-width:0; border:1px solid var(--dsw-alias-border-l3,#464b56); border-radius:9px; padding:10px 12px; background:var(--dsw-alias-bg-l1,#202228); color:inherit; font-size:14px; }
+.dshmini-combo input:not(:focus)::placeholder { color:inherit; }
+.dshmini-combo input::placeholder { color:var(--dsw-alias-label-caption,#a1a5ae); }
+.dshmini-combo-list { position:absolute; z-index:20; top:calc(100% + 4px); left:0; right:0; max-height:260px; overflow:auto; margin:0; padding:4px; list-style:none; background:var(--dsw-alias-bg-l2,#202226); border:1px solid var(--dsw-alias-border-l3,#30333a); border-radius:10px; box-shadow:0 8px 24px rgba(0,0,0,.35); }
+.dshmini-combo-list li { display:flex; flex-direction:column; gap:2px; padding:8px 10px; border-radius:7px; font-size:14px; cursor:pointer; }
+.dshmini-combo-list li small { font-size:11px; color:var(--dsw-alias-label-secondary,#aeb2ba); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dshmini-combo-list li[data-active] { background:var(--dsw-alias-interactive-bg-hover,#2a2d33); }
+.dshmini-combo-list li[aria-selected="true"] > span { font-weight:600; }
+.dshmini-combo-list li.dshmini-combo-empty { cursor:default; color:var(--dsw-alias-label-secondary,#aeb2ba); }
 .dshmini-model-defaults h3 { font-size:16px; font-weight:600; margin:28px 0 12px; }
 .dshmini-model-defaults .dshmini-field + .dshmini-field { margin-top:16px; }
 .dshmini-field input,.dshmini-field select { width:100%; min-width:0; border:1px solid var(--dsw-alias-border-l3,#464b56); border-radius:9px; padding:10px 12px; background:var(--dsw-alias-bg-l1,#202228); color:inherit; font-weight:400; }
