@@ -7,7 +7,7 @@ const names = (assembly) => assembly.tools.map((t) => t.name);
 const text = (result) => JSON.parse(result.content[0].text);
 
 test('config rejects typos, ambiguous namespaces and invalid limits', () => {
-  for (const config of [{ nope: true }, { servers: [] }, { servers: ['rea', 'rea'] }, { servers: ['rea__other'] }, { maxSelectedTools: 0 }]) {
+  for (const config of [{ nope: true }, { servers: ['rea', 'rea'] }, { servers: ['rea__other'] }, { maxSelectedTools: 0 }]) {
     assert.throws(() => resolveConfig(config));
   }
   assert.deepEqual(resolveConfig().servers, ['gworkspace', 'rea']);

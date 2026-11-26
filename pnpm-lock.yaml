@@ -580,7 +580,29 @@ importers:
         specifier: catalog:dsh
         version: 0.2.2-rc.1(@deepseek-ai/cordis@4.1.0)
 
-  plugins/mcp-discovery: {}
+  plugins/mcp-discovery:
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: 'catalog:'
+        version: 4.1.0(@deepseek-ai/cordis-plugin-include@1.1.0)(@deepseek-ai/cordis-plugin-loader@1.1.0)
+      '@deepseek-ai/dsh-client-ui-settings':
+        specifier: catalog:dsh
+        version: 0.2.2-rc.1(@deepseek-ai/cordis@4.1.0)
+      '@deepseek-ai/dsh-client-ui-slots':
+        specifier: catalog:dsh
+        version: 0.2.2-rc.1(@deepseek-ai/cordis@4.1.0)
+      '@types/react':
+        specifier: 'catalog:'
+        version: 18.3.31
+      react:
+        specifier: 'catalog:'
+        version: 18.3.1
+      tsdown:
+        specifier: 'catalog:'
+        version: 0.22.14(tsx@4.23.15)(typescript@6.0.3)
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
 
   plugins/mini-window:
     dependencies:
