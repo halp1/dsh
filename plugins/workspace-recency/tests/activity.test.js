@@ -96,6 +96,20 @@ test('workspaces sort newest-active first', () => {
   assert.deepEqual(ids(sorted), ['new', 'mid', 'old'])
 })
 
+test('a workspace with a running session outranks newer idle ones', () => {
+  const items = [
+    workspace('idle-new', ['s1']),
+    workspace('running-old', ['s2']),
+    workspace('running-older', ['s3']),
+  ]
+  const sorted = sortWorkspaces(items, context(sessions({
+    s1: 900,
+    s2: { updatedAt: 500, running: true },
+    s3: { updatedAt: 100, running: true },
+  })))
+  assert.deepEqual(ids(sorted), ['running-old', 'running-older', 'idle-new'])
+})
+
 test('sorting does not mutate the input array', () => {
   const items = [workspace('a', ['s1']), workspace('b', ['s2'])]
   const before = ids(items)

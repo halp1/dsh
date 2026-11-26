@@ -26,6 +26,8 @@ export interface SessionLike {
   readonly blank: boolean
   /** Epoch-ms last-change time — the same field the sidebar sorts sessions by. */
   readonly updatedAt: number
+  /** Whether the session's agent is working right now. */
+  readonly running?: boolean | undefined
   /** `'subagent'` rows fold into their parent's header and have no sidebar row. */
   readonly origin?: string | undefined
   /**
@@ -68,6 +70,13 @@ export interface SortOptions extends ActivityContext {
 const NEVER = Number.NEGATIVE_INFINITY
 
 /**
+ * Lifts a running session above every idle one while keeping running
+ * sessions ordered by their own `updatedAt`. Epoch-ms values stay far below
+ * 2^53 after the shift, so comparisons remain exact.
+ */
+const RUNNING_BOOST = 1e14
+
+/**
  * The instant a workspace was last active.
  *
  * Activity means "a session you can actually see in this group changed": blank
@@ -88,7 +97,8 @@ export function workspaceActivityAt(workspace: WorkspaceLike, context: ActivityC
 }
 
 /**
- * The newest activity among a set of sessions.
+ * The newest activity among a set of sessions. A running session outranks
+ * every idle one.
  *
  * Only rows the user did work in count: blank placeholders, archived rows,
  * and subagent rows (which have no sidebar row of their own) are skipped.
@@ -105,7 +115,8 @@ export function sessionsActivityAt(sessionIds: Iterable<string>, context: Activi
     if (session.blank) continue
     if (session.origin === 'subagent') continue
     if (context.archived.has(sessionId)) continue
-    if (session.updatedAt > latest) latest = session.updatedAt
+    const at = session.running === true ? session.updatedAt + RUNNING_BOOST : session.updatedAt
+    if (at > latest) latest = at
   }
   return latest
 }
