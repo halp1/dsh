@@ -30,6 +30,12 @@ On phones and tablets, the return key inserts a line break in the composer inste
 
 The shell submits on plain Enter on every device. On mobile, a head script stops plain Enter from reaching the composer's keydown handlers but keeps the key's default action. The browser then emits `insertParagraph`, which the plain-text editor already turns into a line break. Enter still picks a highlighted slash or `@` suggestion, and IME composition and modified chords are left alone. The device test matches the shell's own mobile check.
 
+## Portrait account menu
+
+On a phone in portrait, tapping More at the bottom of the sidebar opens the menu with Settings, Feedback, and sign in. Picking an item closes the sidebar.
+
+remote-web-ui's portrait layer closes the sidebar drawer on any tap in the sidebar's settings area, because that area used to hold a plain Settings button. It now holds the account menu, and closing the drawer removes the menu as it opens. For that one tap, a head script hides the event target from the layer's document click listener and restores it before the app's own handler runs. The drawer closes after a menu item is picked, which is what the layer intended.
+
 ## Install
 
 ```sh
@@ -48,6 +54,7 @@ To turn a patch off, disable the plugin or set this profile override:
     composerOneLine: false
     firaCode: false
     mobileEnterNewline: false
+    portraitAccountMenu: false
 ```
 
 ## Test

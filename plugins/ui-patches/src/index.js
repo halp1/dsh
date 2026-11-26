@@ -98,6 +98,39 @@ export const MOBILE_ENTER_NEWLINE_SCRIPT = `(() => {
   }, true);
 })();`;
 
+// remote-web-ui's portrait layer folds the sidebar drawer on any click in the
+// sidebar's settings area, so its Settings button would close into a clean
+// view. That area now holds the account menu ("More"), and folding the drawer
+// unmounts the menu as it opens, so Settings can't be reached on a phone.
+// For that one click, the layer's document capture listener sees no target
+// and leaves the drawer open. The real target comes back at the document
+// element, before React's root listener, so the menu still opens. Picking a
+// menu item folds the drawer afterwards, as the layer intended.
+export const PORTRAIT_ACCOUNT_MENU_SCRIPT = `(() => {
+  const OPEN_DRAWER = "[data-sidebar-drawer]:not([data-sidebar-collapsed])";
+  const TRIGGER = OPEN_DRAWER + ' [class$="_settingsArea"] button[aria-haspopup="menu"]';
+  const shadowed = new WeakSet();
+  let menuFromDrawer = false;
+  window.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element) || !document.body.classList.contains("dsh-remote-portrait")) return;
+    if (target.closest(TRIGGER) !== null) {
+      menuFromDrawer = true;
+      Object.defineProperty(event, "target", { configurable: true, get: () => null });
+      shadowed.add(event);
+      return;
+    }
+    if (!menuFromDrawer || target.closest('[role="menuitem"]') === null) return;
+    menuFromDrawer = false;
+    setTimeout(() => {
+      document.querySelector(OPEN_DRAWER + " [data-sidebar-toggle]")?.click();
+    });
+  }, true);
+  document.documentElement.addEventListener("click", (event) => {
+    if (shadowed.delete(event)) delete event.target;
+  }, true);
+})();`;
+
 function booleanOption(config, key) {
   const value = config[key] ?? true;
   if (typeof value !== 'boolean') {
@@ -132,6 +165,7 @@ export function apply(ctx, config = {}) {
   const composerOneLine = booleanOption(config, 'composerOneLine');
   const firaCode = booleanOption(config, 'firaCode');
   const mobileEnterNewline = booleanOption(config, 'mobileEnterNewline');
+  const portraitAccountMenu = booleanOption(config, 'portraitAccountMenu');
 
   if (firaCode) {
     ctx.effect(
@@ -144,6 +178,7 @@ export function apply(ctx, config = {}) {
   const rows = [
     css !== '' && { kind: 'style', text: css },
     mobileEnterNewline && { kind: 'script', placement: 'head', text: MOBILE_ENTER_NEWLINE_SCRIPT },
+    portraitAccountMenu && { kind: 'script', placement: 'head', text: PORTRAIT_ACCOUNT_MENU_SCRIPT },
   ].filter(Boolean);
   if (rows.length === 0) return;
 

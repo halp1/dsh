@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { apply, FIRA_CODE_PATH, MOBILE_ENTER_NEWLINE_SCRIPT } from '../src/index.js';
+import { apply, FIRA_CODE_PATH, MOBILE_ENTER_NEWLINE_SCRIPT, PORTRAIT_ACCOUNT_MENU_SCRIPT } from '../src/index.js';
 
 function load(config) {
   const table = [];
@@ -114,10 +114,10 @@ test('each patch can be disabled independently and rejects an invalid switch', (
   assert.doesNotMatch(indexRows({ hideComposerPricing: false })[0].text, /billing-live-cost/);
   assert.match(indexRows({ hideComposerPricing: false })[0].text, /\.cu-dock/);
   assert.doesNotMatch(indexRows({ hideCursorStats: false })[0].text, /\.cu-dock|dcp-cursor-context/);
-  assert.deepEqual(load({ hideComposerPricing: false, hideCursorStats: false, composerOneLine: false, firaCode: false, mobileEnterNewline: false }), { table: [], routes: new Map() });
+  assert.deepEqual(load({ hideComposerPricing: false, hideCursorStats: false, composerOneLine: false, firaCode: false, mobileEnterNewline: false, portraitAccountMenu: false }), { table: [], routes: new Map() });
   assert.ok(indexRows().some((row) => row.kind === 'script'));
-  assert.ok(!indexRows({ mobileEnterNewline: false }).some((row) => row.kind === 'script'));
-  for (const config of [{ hideComposerPricing: 'false' }, { hideCursorStats: 'off' }, { composerOneLine: 0 }, { firaCode: 1 }, { mobileEnterNewline: 'no' }]) {
+  assert.ok(!indexRows({ mobileEnterNewline: false, portraitAccountMenu: false }).some((row) => row.kind === 'script'));
+  for (const config of [{ hideComposerPricing: 'false' }, { hideCursorStats: 'off' }, { composerOneLine: 0 }, { firaCode: 1 }, { mobileEnterNewline: 'no' }, { portraitAccountMenu: 'yes' }]) {
     assert.throws(() => indexRows(config), TypeError);
   }
 });
@@ -209,4 +209,91 @@ test('portrait composer controls stay on one line only under the remote portrait
     }
   }
   assert.ok(!indexRows({ composerOneLine: false }).some((r) => r.kind === 'style' && r.text.includes('dsh-remote-portrait')));
+});
+
+test('the portrait sidebar account menu opens Settings instead of folding the drawer', () => {
+  const dom = new JSDOM(`<!doctype html><body class="dsh-remote-portrait"><div id="root">
+    <div class="pI_x6G_frame" data-sidebar-drawer>
+      <div class="pI_x6G_sidebarCol">
+        <button data-sidebar-toggle>Close</button>
+        <div class="hHd-Xa_sessionRow"><span>chat</span></div>
+        <div class="hHd-Xa_settingsArea"><button aria-label="Account menu" aria-haspopup="menu"><span>More</span></button></div>
+      </div>
+    </div>
+  </div></body>`, { runScripts: 'outside-only' });
+  try {
+    const { window } = dom;
+    const doc = window.document;
+    const frame = doc.querySelector('[data-sidebar-drawer]');
+    doc.querySelector('[data-sidebar-toggle]').addEventListener('click', () => frame.toggleAttribute('data-sidebar-collapsed'));
+    window.eval(PORTRAIT_ACCOUNT_MENU_SCRIPT);
+    // remote-web-ui 0.4.16-0.4.22 onClickCapture, reduced to the branches that matter here.
+    doc.addEventListener('click', (e) => {
+      if (frame.hasAttribute('data-sidebar-collapsed') || !(e.target instanceof window.Element)) return;
+      if (e.target.closest('[class*="_sidebarCol"]') !== null) {
+        if (e.target.closest('[class*="_sessionRow"], [class$="_settingsArea"]') !== null) doc.querySelector('[data-sidebar-toggle]').click();
+        return;
+      }
+      if (e.target.closest('[role="menu"]') === null) doc.querySelector('[data-sidebar-toggle]').click();
+    }, true);
+    // React delegates at the root; the account menu opens a body-portaled menu.
+    let settingsOpened = false;
+    doc.getElementById('root').addEventListener('click', (e) => {
+      if (e.target.closest('[aria-label="Account menu"]') === null) return;
+      doc.body.insertAdjacentHTML('beforeend', '<div role="menu"><div role="menuitem">Settings</div></div>');
+      doc.querySelector('[role="menuitem"]').addEventListener('click', () => { settingsOpened = true; });
+    });
+    const tap = (el) => el.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+
+    tap(doc.querySelector('[aria-label="Account menu"] span'));
+    assert.ok(!frame.hasAttribute('data-sidebar-collapsed'), 'drawer stays open while the menu opens');
+    assert.ok(doc.querySelector('[role="menu"]'), 'menu opened');
+    tap(doc.querySelector('[role="menuitem"]'));
+    assert.ok(settingsOpened);
+  } finally {
+    dom.window.close();
+  }
+});
+
+test('the drawer folds after a portrait account-menu pick and the script stays scoped', async () => {
+  const dom = new JSDOM(`<!doctype html><body class="dsh-remote-portrait"><div id="root">
+    <div class="pI_x6G_frame" data-sidebar-drawer>
+      <div class="pI_x6G_sidebarCol">
+        <button data-sidebar-toggle>Close</button>
+        <div class="hHd-Xa_sessionRow"><span>chat</span></div>
+        <div class="hHd-Xa_settingsArea"><button aria-label="Account menu" aria-haspopup="menu">More</button></div>
+      </div>
+    </div>
+    <div role="menu"><div role="menuitem">Settings</div></div>
+  </div></body>`, { runScripts: 'outside-only' });
+  try {
+    const { window } = dom;
+    const doc = window.document;
+    const frame = doc.querySelector('[data-sidebar-drawer]');
+    doc.querySelector('[data-sidebar-toggle]').addEventListener('click', () => frame.toggleAttribute('data-sidebar-collapsed'));
+    window.eval(PORTRAIT_ACCOUNT_MENU_SCRIPT);
+    const tap = (el) => el.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+    const tick = () => new Promise((resolve) => window.setTimeout(resolve));
+
+    tap(doc.querySelector('[aria-label="Account menu"]'));
+    tap(doc.querySelector('[role="menuitem"]'));
+    await tick();
+    assert.ok(frame.hasAttribute('data-sidebar-collapsed'), 'drawer folds after the pick');
+
+    // A menu item from anywhere else never touches the drawer.
+    frame.removeAttribute('data-sidebar-collapsed');
+    tap(doc.querySelector('[role="menuitem"]'));
+    await tick();
+    assert.ok(!frame.hasAttribute('data-sidebar-collapsed'));
+
+    // Off the portrait layer, the script does nothing.
+    doc.body.classList.remove('dsh-remote-portrait');
+    const event = new window.MouseEvent('click', { bubbles: true, cancelable: true });
+    let seen;
+    doc.addEventListener('click', (e) => { seen = e.target; }, { capture: true, once: true });
+    doc.querySelector('[aria-label="Account menu"]').dispatchEvent(event);
+    assert.equal(seen, doc.querySelector('[aria-label="Account menu"]'));
+  } finally {
+    dom.window.close();
+  }
 });
