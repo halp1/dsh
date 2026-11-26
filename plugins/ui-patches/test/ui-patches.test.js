@@ -114,10 +114,10 @@ test('each patch can be disabled independently and rejects an invalid switch', (
   assert.doesNotMatch(indexRows({ hideComposerPricing: false })[0].text, /billing-live-cost/);
   assert.match(indexRows({ hideComposerPricing: false })[0].text, /\.cu-dock/);
   assert.doesNotMatch(indexRows({ hideCursorStats: false })[0].text, /\.cu-dock|dcp-cursor-context/);
-  assert.deepEqual(load({ hideComposerPricing: false, hideCursorStats: false, firaCode: false, mobileEnterNewline: false }), { table: [], routes: new Map() });
+  assert.deepEqual(load({ hideComposerPricing: false, hideCursorStats: false, composerOneLine: false, firaCode: false, mobileEnterNewline: false }), { table: [], routes: new Map() });
   assert.ok(indexRows().some((row) => row.kind === 'script'));
   assert.ok(!indexRows({ mobileEnterNewline: false }).some((row) => row.kind === 'script'));
-  for (const config of [{ hideComposerPricing: 'false' }, { hideCursorStats: 'off' }, { firaCode: 1 }, { mobileEnterNewline: 'no' }]) {
+  for (const config of [{ hideComposerPricing: 'false' }, { hideCursorStats: 'off' }, { composerOneLine: 0 }, { firaCode: 1 }, { mobileEnterNewline: 'no' }]) {
     assert.throws(() => indexRows(config), TypeError);
   }
 });
@@ -166,4 +166,40 @@ test('mobile Enter reaches the browser as a line break instead of the submit key
       dom.window.close();
     }
   }
+});
+
+// remote-web-ui 0.4.16's portrait rules that split the composer toolbar.
+const REMOTE_PORTRAIT_CSS = `
+[class$="_composerSeat"] [class$="_row"]{flex-wrap:wrap;row-gap:0;padding:2px 8px 1px;position:relative}
+[class$="_composerSeat"] [class$="_trailing"]{box-sizing:border-box;flex-basis:100%;min-height:32px;justify-content:flex-start;padding-left:38px;padding-right:78px}
+`;
+
+test('portrait composer controls stay on one line only under the remote portrait layer', () => {
+  for (const [bodyClass, meter, expected] of [
+    ['dsh-remote-portrait', false, { wrap: 'nowrap', basis: 'auto', reserve: '52px' }],
+    ['dsh-remote-portrait', true, { wrap: 'nowrap', basis: 'auto', reserve: '78px' }],
+    ['', false, { wrap: 'wrap', basis: '100%', reserve: '8px' }],
+  ]) {
+    const dom = new JSDOM(`<!doctype html><body class="${bodyClass}"><div class="x_composerSeat">
+      <div class="x_row"><div class="x_tools"><button class="x_add"></button></div>
+        <div class="x_trailing"><div class="x_standardControls"></div>${meter ? '<div class="x_root"><i class="x_track"></i></div>' : ''}<button class="x_primary"></button></div>
+      </div></div></body>`);
+    try {
+      const { document, getComputedStyle } = dom.window;
+      for (const text of [REMOTE_PORTRAIT_CSS, ...indexRows().filter((r) => r.kind === 'style').map((r) => r.text)]) {
+        const style = document.createElement('style');
+        style.textContent = text;
+        document.head.append(style);
+      }
+      const row = getComputedStyle(document.querySelector('.x_row'));
+      const trailing = getComputedStyle(document.querySelector('.x_trailing'));
+      const label = `${bodyClass || 'desktop'} meter=${meter}`;
+      assert.equal(row.flexWrap, expected.wrap, label);
+      assert.equal(trailing.flexBasis, expected.basis, label);
+      assert.equal(row.paddingRight, expected.reserve, label);
+    } finally {
+      dom.window.close();
+    }
+  }
+  assert.ok(!indexRows({ composerOneLine: false }).some((r) => r.kind === 'style' && r.text.includes('dsh-remote-portrait')));
 });

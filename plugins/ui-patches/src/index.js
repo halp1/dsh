@@ -23,6 +23,32 @@ const CURSOR_STATS_CSS = `
 }
 `;
 
+// remote-web-ui's portrait layer forces the composer's trailing controls onto a
+// second line (flex-basis:100%), splitting four small controls across two rows
+// even though they fit in one. Keep that row on one line and reserve room on
+// the right for the send button, plus the context meter when it is mounted,
+// both of which that layer positions absolutely. The body class is the layer's
+// own portrait marker, so desktop and landscape keep the official layout.
+const PORTRAIT_ROW = 'body.dsh-remote-portrait [class$="_composerSeat"] [class$="_row"]:has(> [class$="_trailing"])';
+const COMPOSER_ONE_LINE_CSS = `
+${PORTRAIT_ROW} {
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  gap: 8px;
+  padding-right: 52px;
+}
+${PORTRAIT_ROW}:has([class$="_track"]) {
+  padding-right: 78px;
+}
+${PORTRAIT_ROW} > [class$="_trailing"] {
+  flex-basis: auto;
+  min-height: 0;
+  margin-left: 0;
+  padding-left: 0;
+  padding-right: 0;
+}
+`;
+
 // Served by this host so remote and mobile browsers get the same face
 // without having Fira Code installed. The version keeps the URL immutable.
 export const FIRA_CODE_PATH = '/ui-patches/fonts/fira-code-6.2.woff2';
@@ -96,6 +122,7 @@ function serveFiraCode(req, res) {
 export function apply(ctx, config = {}) {
   const hideComposerPricing = booleanOption(config, 'hideComposerPricing');
   const hideCursorStats = booleanOption(config, 'hideCursorStats');
+  const composerOneLine = booleanOption(config, 'composerOneLine');
   const firaCode = booleanOption(config, 'firaCode');
   const mobileEnterNewline = booleanOption(config, 'mobileEnterNewline');
 
@@ -106,7 +133,7 @@ export function apply(ctx, config = {}) {
     );
   }
 
-  const css = [hideComposerPricing && COMPOSER_PRICING_CSS, hideCursorStats && CURSOR_STATS_CSS, firaCode && FIRA_CODE_CSS].filter(Boolean).join('');
+  const css = [hideComposerPricing && COMPOSER_PRICING_CSS, hideCursorStats && CURSOR_STATS_CSS, composerOneLine && COMPOSER_ONE_LINE_CSS, firaCode && FIRA_CODE_CSS].filter(Boolean).join('');
   const rows = [
     css !== '' && { kind: 'style', text: css },
     mobileEnterNewline && { kind: 'script', placement: 'head', text: MOBILE_ENTER_NEWLINE_SCRIPT },

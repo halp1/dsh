@@ -12,6 +12,10 @@ The mini-window plugin already hides its own composer footer, but that rule is s
 
 Hides the Cursor integration plugin's composer dock rows: the checkpoint and compaction status, the routing and quota pills, and the local context estimate. The plugin offers no setting for these. The Cursor usage page under Settings is unchanged.
 
+## One-line portrait composer
+
+On a portrait phone, remote-web-ui moves the composer's trailing controls (voice input, model picker) onto their own line under the permission and skill controls. This patch puts them back on the same line, reserving room for the send button and context meter that remote-web-ui pins to the right edge. It applies only under remote-web-ui's `dsh-remote-portrait` body class, so desktop and landscape layouts are unchanged.
+
 ## Fira Code
 
 Makes [Fira Code](https://github.com/tonsky/FiraCode) the code font for inline code, fenced code blocks, and every other surface that uses the shell's code font. The font file ships with the plugin and the host serves it at `/ui-patches/fonts/fira-code-6.2.woff2`, so remote and mobile browsers render it without a local install.
@@ -41,6 +45,7 @@ To turn a patch off, disable the plugin or set this profile override:
   config:
     hideComposerPricing: false
     hideCursorStats: false
+    composerOneLine: false
     firaCode: false
     mobileEnterNewline: false
 ```
