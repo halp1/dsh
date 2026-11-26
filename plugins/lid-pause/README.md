@@ -1,9 +1,9 @@
 # dsh-plugin-lid-pause
 
-Hold every running DeepSeek Harness agent while the MacBook lid is closed or
-the Mac sleeps. Top-level turns, subagents, and agent-team teammates are all
-covered. When the lid opens, the plugin waits until the network carries real
-traffic, then the same turns continue on their own.
+Hold every running DeepSeek Harness agent while the MacBook lid is closed on
+battery or the Mac sleeps. Top-level turns, subagents, and agent-team teammates
+are all covered. When the lid opens or AC power returns, the same turns continue
+once the Mac is awake and the network carries real traffic.
 
 Nothing is cancelled and nothing needs re-prompting.
 
@@ -11,8 +11,9 @@ Nothing is cancelled and nothing needs re-prompting.
 
 | Moment | Effect |
 | --- | --- |
-| Lid closes, or the system starts to sleep | New model calls and new tool dispatches are held. Agent streams already in flight are cut off and recorded as a hidden failed attempt. |
-| Lid opens, network still down | Still held. The log says it is waiting for the network. |
+| Lid closes on AC and the Mac stays awake | Model streams and tool dispatches continue uninterrupted. |
+| Lid closes on battery, AC is removed with the lid shut, or the system starts to sleep | New model calls and new tool dispatches are held. Agent streams already in flight are cut off and recorded as a hidden failed attempt. |
+| Mac is awake and the lid opens or AC returns, but the network is still down | Calls are still held while waiting for the network. |
 | Network reports up | A TCP connection to `cloudflare.com:443` is tried every 2 s until it succeeds, then a 2 s settle delay. |
 | Resume | Held calls proceed. Interrupted steps re-run inside the same open turn. |
 
@@ -27,9 +28,9 @@ Tool bodies that are already running (a long `bash` command, a background job)
 keep running, and the OS freezes them if the Mac sleeps. A running `subagent`
 tool simply waits while its child's model calls are held.
 
-The lid triggers a pause even when the Mac stays awake with the lid shut, for
-example in clamshell mode with an external display. Turn `pauseOnLidClose` off
-if you want work to continue in that setup.
+This plugin does not prevent macOS from sleeping. Closing the lid on AC does
+not interrupt work on its own, but a real system sleep still pauses work by
+default. Set `pauseOnLidCloseOnAC` to `true` to pause on lid close even on AC.
 
 ## How it detects things
 
@@ -37,6 +38,8 @@ if you want work to continue in that setup.
 
 - lid state from `AppleClamshellState` on `IOPMrootDomain` (clamshell
   notification plus a one-second poll)
+- power source from IOKit, sampled with the lid state so plugging or unplugging
+  can change the pause state even while the lid stays shut
 - sleep and wake from `IORegisterForSystemPower`. The helper delays sleep by
   `sleepDelayMs` so streams can be cut off cleanly first.
 - network reachability from `NWPathMonitor`
@@ -75,8 +78,9 @@ Override from the profile `cordis.patch.yml`:
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `true` | Load without gating anything when `false`. |
-| `pauseOnLidClose` | `true` | Pause when the lid closes, whether or not the Mac sleeps. |
-| `pauseOnSleep` | `true` | Pause on system sleep (idle sleep, Apple menu sleep). |
+| `pauseOnLidClose` | `true` | Pause while the lid is closed and the Mac is on battery or the power source is unknown. |
+| `pauseOnLidCloseOnAC` | `false` | Also pause on a closed lid while on AC. Only applies if `pauseOnLidClose` is enabled. |
+| `pauseOnSleep` | `true` | Pause on actual system sleep regardless of power source. |
 | `pauseOnNetworkLoss` | `false` | Also pause whenever the network drops with the lid open. |
 | `interruptInFlight` | `true` | Cut off agent model streams that are mid-response when the pause starts. |
 | `holdTools` | `true` | Hold new tool dispatches while paused. |

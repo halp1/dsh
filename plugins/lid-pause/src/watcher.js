@@ -48,11 +48,14 @@ export function parseEvent(line) {
       return {
         type: 'snapshot',
         lidClosed: value.lidClosed === true,
+        onAC: typeof value.onAC === 'boolean' ? value.onAC : null,
         networkUp: value.networkUp !== false,
         interfaces: Array.isArray(value.interfaces) ? value.interfaces : [],
       };
     case 'lid':
-      return typeof value.closed === 'boolean' ? { type: 'lid', closed: value.closed } : undefined;
+      return typeof value.closed === 'boolean'
+        ? { type: 'lid', closed: value.closed, onAC: typeof value.onAC === 'boolean' ? value.onAC : null }
+        : undefined;
     case 'power':
       return value.state === 'will-sleep' || value.state === 'did-wake'
         ? { type: 'power', state: value.state }
@@ -161,7 +164,7 @@ export class LidWatcher {
     if (this.stopped) return;
     let child;
     try {
-      child = this.spawn(this.binary, ['--sleep-delay-ms', String(this.sleepDelayMs)], {
+      child = this.spawn(this.binary, ['--sleep-delay-ms', String(this.sleepDelayMs), '--report-physical-lid'], {
         stdio: ['pipe', 'pipe', 'pipe'],
       });
     } catch (error) {

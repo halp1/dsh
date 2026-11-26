@@ -19,6 +19,43 @@ function harness(overrides = {}, probeResults = [true]) {
 
 const cases = [
   {
+    name: 'closing the lid on AC leaves in-flight work alone',
+    steps: [['lid', true, true]],
+    open: true,
+    events: [],
+  },
+  {
+    name: 'unplugging with the lid closed pauses and reconnecting resumes without opening it',
+    steps: [['lid', true, true], ['lid', true, false], ['lid', true, true]],
+    open: true,
+    events: ['paused', 'probing', 'settling', 'resumed'],
+  },
+  {
+    name: 'reconnecting while closed still waits for the network',
+    steps: [['lid', true, false], ['net', false], ['lid', true, true]],
+    open: false,
+    events: ['paused', 'waiting-network'],
+  },
+  {
+    name: 'actual sleep pauses even if the lid is closed on AC',
+    steps: [['lid', true, true], ['power', 'will-sleep'], ['power', 'did-wake']],
+    open: true,
+    events: ['paused', 'probing', 'settling', 'resumed'],
+  },
+  {
+    name: 'unknown adapter state with a closed lid falls back to pausing',
+    steps: [['lid', true, true], ['lid', true, null]],
+    open: false,
+    events: ['paused'],
+  },
+  {
+    name: 'the opt-in policy also pauses when the lid closes on AC',
+    config: { pauseOnLidCloseOnAC: true },
+    steps: [['lid', true, true]],
+    open: false,
+    events: ['paused'],
+  },
+  {
     name: 'lid close then open with network up resumes after the probe',
     steps: [['lid', true], ['lid', false]],
     open: true,
@@ -73,8 +110,8 @@ const cases = [
 for (const c of cases) {
   test(`state: ${c.name}`, async () => {
     const { gate, events } = harness(c.config);
-    for (const [kind, value] of c.steps) {
-      if (kind === 'lid') gate.setLid(value);
+    for (const [kind, value, onAC] of c.steps) {
+      if (kind === 'lid') gate.setLid(value, onAC);
       if (kind === 'net') gate.setNetwork(value);
       if (kind === 'power') gate.setPower(value);
       await tick(20);

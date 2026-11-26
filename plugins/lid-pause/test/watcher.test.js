@@ -17,21 +17,23 @@ function fakeChild() {
 test('lineSplitter and parseEvent handle split, malformed, and unknown lines', () => {
   const split = lineSplitter();
   assert.deepEqual(split('{"type":"lid","clo'), []);
-  const lines = split('sed":true}\nnot json\n{"type":"weird"}\n{"type":"power","state":"did-wake"}\n{"type":"net');
+  const lines = split('sed":true,"onAC":true}\nnot json\n{"type":"weird"}\n{"type":"power","state":"did-wake"}\n{"type":"net');
   assert.deepEqual(lines.map(parseEvent), [
-    { type: 'lid', closed: true },
+    { type: 'lid', closed: true, onAC: true },
     undefined,
     undefined,
     { type: 'power', state: 'did-wake' },
   ]);
   assert.deepEqual(parseEvent('{"type":"lid","closed":"yes"}'), undefined);
   assert.deepEqual(parseEvent('{"type":"power","state":"nap"}'), undefined);
-  assert.deepEqual(parseEvent('{"type":"snapshot","lidClosed":true,"networkUp":false,"interfaces":["wifi"]}'), {
+  assert.deepEqual(parseEvent('{"type":"snapshot","lidClosed":true,"onAC":false,"networkUp":false,"interfaces":["wifi"]}'), {
     type: 'snapshot',
     lidClosed: true,
+    onAC: false,
     networkUp: false,
     interfaces: ['wifi'],
   });
+  assert.equal(parseEvent('{"type":"lid","closed":true,"onAC":"true"}').onAC, null);
 });
 
 test('watcher restarts the helper with backoff after it exits and stops cleanly', async () => {
@@ -56,8 +58,8 @@ test('watcher restarts the helper with backoff after it exits and stops cleanly'
   assert.equal(children.length, 2);
   children[1].stdout.emit('data', '{"type":"lid","closed":false}\n');
   assert.deepEqual(events, [
-    { type: 'lid', closed: true },
-    { type: 'lid', closed: false },
+    { type: 'lid', closed: true, onAC: null },
+    { type: 'lid', closed: false, onAC: null },
   ]);
   watcher.stop();
   children[1].emit('exit', null, 'SIGTERM');

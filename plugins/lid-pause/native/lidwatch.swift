@@ -2,8 +2,8 @@
 // changes as JSON lines on stdout.
 //
 // Events:
-//   {"type":"snapshot","lidClosed":false,"networkUp":true,"interfaces":["wifi"]}
-//   {"type":"lid","closed":true}
+//   {"type":"snapshot","lidClosed":false,"onAC":true,"networkUp":true,"interfaces":["wifi"]}
+//   {"type":"lid","closed":true,"onAC":false}  (either lid or power source changed)
 //   {"type":"power","state":"will-sleep"}   (sleep is delayed by --sleep-delay-ms)
 //   {"type":"power","state":"did-wake"}
 //   {"type":"network","up":true,"interfaces":["wifi"]}
@@ -13,6 +13,7 @@
 import Foundation
 import IOKit
 import IOKit.pwr_mgt
+import IOKit.ps
 import Network
 
 // IOKit message constants. The C macros are not importable into Swift.
@@ -23,10 +24,13 @@ let kMsgSystemHasPoweredOn: UInt32 = 0xE000_0300
 let kMsgClamshellStateChange: UInt32 = 0xE003_4100
 
 var sleepDelayMs = 1000
+var reportPhysicalLid = false
 var args = CommandLine.arguments.dropFirst()
 while let arg = args.popFirst() {
     if arg == "--sleep-delay-ms", let value = args.popFirst(), let ms = Int(value) {
         sleepDelayMs = max(0, min(ms, 25_000))
+    } else if arg == "--report-physical-lid" {
+        reportPhysicalLid = true
     }
 }
 
@@ -48,13 +52,28 @@ func readLidClosed() -> Bool? {
     return (value as? Bool) ?? ((value as? NSNumber)?.boolValue)
 }
 
-var lastLid: Bool? = readLidClosed()
+func readOnAC() -> Bool? {
+    guard let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+          let source = IOPSGetProvidingPowerSourceType(snapshot)?.takeUnretainedValue() else { return nil }
+    return (source as String) == kIOPSACPowerValue
+}
 
-func checkLid() {
-    let now = readLidClosed()
-    guard let now, now != lastLid else { return }
-    lastLid = now
-    emit(["type": "lid", "closed": now])
+var lastLid = readLidClosed()
+var lastOnAC = readOnAC()
+
+// Older DSH processes may restart a helper after an on-disk upgrade. They
+// interpret `closed` as a pause command, so only new callers opt into raw lid state.
+func reportedLidClosed() -> Bool {
+    return lastLid == true && (reportPhysicalLid || lastOnAC != true)
+}
+
+func checkLidAndPowerSource() {
+    let closed = readLidClosed() ?? lastLid
+    let onAC = readOnAC()
+    guard closed != lastLid || onAC != lastOnAC else { return }
+    lastLid = closed
+    lastOnAC = onAC
+    emit(["type": "lid", "closed": reportedLidClosed(), "onAC": onAC.map { $0 as Any } ?? NSNull()])
 }
 
 let notifyPort = IONotificationPortCreate(kIOMainPortDefault)
@@ -63,15 +82,15 @@ IONotificationPortSetDispatchQueue(notifyPort, DispatchQueue.main)
 var interestNotifier: io_object_t = 0
 if rootDomain != 0 {
     IOServiceAddInterestNotification(notifyPort, rootDomain, kIOGeneralInterest, { _, _, messageType, _ in
-        if messageType == kMsgClamshellStateChange { checkLid() }
+        if messageType == kMsgClamshellStateChange { checkLidAndPowerSource() }
     }, nil, &interestNotifier)
 }
 
-// Backstop: the interest notification is not delivered on every model, so the
-// property is also polled. Reading it is a cheap registry lookup.
+// Watch adapter changes even when the lid does not move. Polling also backs
+// up the clamshell notification, which is not delivered on every model.
 let lidTimer = DispatchSource.makeTimerSource(queue: .main)
 lidTimer.schedule(deadline: .now() + 1, repeating: 1.0)
-lidTimer.setEventHandler { checkLid() }
+lidTimer.setEventHandler { checkLidAndPowerSource() }
 lidTimer.resume()
 
 // MARK: Power
@@ -94,8 +113,8 @@ rootPort = IORegisterForSystemPower(nil, &powerPort, { _, _, messageType, argume
     case kMsgSystemWillNotSleep:
         emit(["type": "power", "state": "did-wake"])
     case kMsgSystemHasPoweredOn:
+        checkLidAndPowerSource()
         emit(["type": "power", "state": "did-wake"])
-        checkLid()
     default:
         break
     }
@@ -126,13 +145,17 @@ monitor.pathUpdateHandler = { path in
     if firstPath {
         firstPath = false
         lastNetwork = (up, names)
-        emit([
+        lastLid = readLidClosed() ?? lastLid
+        lastOnAC = readOnAC()
+        let snapshot: [String: Any] = [
             "type": "snapshot",
-            "lidClosed": lastLid ?? false,
+            "lidClosed": reportedLidClosed(),
             "lidKnown": lastLid != nil,
+            "onAC": lastOnAC.map { $0 as Any } ?? NSNull(),
             "networkUp": up,
             "interfaces": names,
-        ])
+        ]
+        emit(snapshot)
         return
     }
     if let last = lastNetwork, last.0 == up, last.1 == names { return }

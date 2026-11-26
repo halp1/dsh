@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-lid-pause",
   "version": "0.1.0",
-  "description": "Hold DeepSeek Harness agents, subagents included, while the MacBook lid is closed or the Mac sleeps, and continue the same turns once the lid is open and the network is back",
+  "description": "Pause DeepSeek Harness agents while the MacBook lid is closed on battery or the Mac sleeps, and resume the same turns when the Mac is awake and connected",
   "license": "MIT",
   "keywords": [
     "deepseek-harness",

@@ -1,8 +1,8 @@
 /**
  * dsh-plugin-lid-pause: hold every running agent (top-level turns,
- * subagents, and agent-team teammates) while the MacBook lid is closed or the
- * system sleeps, and continue the same turns once the lid is open and the
- * network actually works again.
+ * subagents, and agent-team teammates) while the MacBook lid is closed on
+ * battery or the system sleeps. Continue the same turns once the pause
+ * conditions clear and the network actually works again.
  *
  * ## How the pause works
  *
@@ -44,6 +44,7 @@ const TOOL_ABORTED_BEFORE_DISPATCH = 'ABORTED_BEFORE_DISPATCH';
 const DEFAULTS = {
   enabled: true,
   pauseOnLidClose: true,
+  pauseOnLidCloseOnAC: false,
   pauseOnSleep: true,
   pauseOnNetworkLoss: false,
   interruptInFlight: true,
@@ -91,6 +92,7 @@ export function resolveConfig(raw = {}) {
   const config = {
     enabled: bool(pick('enabled'), 'enabled'),
     pauseOnLidClose: bool(pick('pauseOnLidClose'), 'pauseOnLidClose'),
+    pauseOnLidCloseOnAC: bool(pick('pauseOnLidCloseOnAC'), 'pauseOnLidCloseOnAC'),
     pauseOnSleep: bool(pick('pauseOnSleep'), 'pauseOnSleep'),
     pauseOnNetworkLoss: bool(pick('pauseOnNetworkLoss'), 'pauseOnNetworkLoss'),
     interruptInFlight: bool(pick('interruptInFlight'), 'interruptInFlight'),
@@ -298,7 +300,7 @@ export async function apply(ctx, rawConfig = {}) {
           logger.warn(`lid-pause: paused (${status.reasons.join(', ')}), holding model and tool calls`);
           break;
         case 'waiting-network':
-          logger.info('lid-pause: lid open, waiting for the network');
+          logger.info('lid-pause: waiting for the network before resuming');
           break;
         case 'probing':
           logger.info('lid-pause: network up, checking connectivity');
@@ -340,10 +342,10 @@ export async function apply(ctx, rawConfig = {}) {
       switch (event.type) {
         case 'snapshot':
           gate.setNetwork(event.networkUp);
-          gate.setLid(event.lidClosed);
+          gate.setLid(event.lidClosed, event.onAC);
           break;
         case 'lid':
-          gate.setLid(event.closed);
+          gate.setLid(event.closed, event.onAC);
           break;
         case 'power':
           gate.setPower(event.state);

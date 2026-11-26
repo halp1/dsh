@@ -3,7 +3,7 @@
  *
  * Inputs arrive from the native watcher (lid, power, network) and from the
  * reachability probe. The gate closes immediately on any hard reason (lid
- * closed, system going to sleep, and optionally network loss). It reopens
+ * closed on battery, system going to sleep, and optionally network loss). It reopens
  * only when every hard reason is gone AND the network is up AND a real TCP
  * connection succeeded AND a short settle delay elapsed. Interface-level
  * reachability alone is not trusted, because Wi-Fi reports "satisfied" well
@@ -35,6 +35,7 @@ export class PauseController {
     this.now = now;
 
     this.lidClosed = false;
+    this.onAC = null;
     this.asleep = false;
     this.networkUp = true;
     this.probeOk = true;
@@ -54,11 +55,16 @@ export class PauseController {
 
   // Inputs
 
-  setLid(closed) {
-    if (this.lidClosed === closed) return;
+  setLid(closed, onAC = this.onAC) {
+    if (this.lidClosed === closed && this.onAC === onAC) return;
     this.lidClosed = closed;
-    if (closed) this.probeOk = false;
+    this.onAC = onAC;
+    if (this.lidBlocksResume()) this.probeOk = false;
     this.evaluate();
+  }
+
+  lidBlocksResume() {
+    return this.config.pauseOnLidClose && this.lidClosed && (this.onAC !== true || this.config.pauseOnLidCloseOnAC);
   }
 
   setPower(state) {
@@ -97,7 +103,7 @@ export class PauseController {
   /** Hard reasons the gate must stay closed, in a stable order. */
   hardReasons() {
     const reasons = [];
-    if (this.config.pauseOnLidClose && this.lidClosed) reasons.push('lid closed');
+    if (this.lidBlocksResume()) reasons.push('lid closed');
     if (this.config.pauseOnSleep && this.asleep) reasons.push('sleep');
     if (this.config.pauseOnNetworkLoss && !this.networkUp) reasons.push('network down');
     return reasons;
@@ -119,6 +125,7 @@ export class PauseController {
       phase: this.phase,
       reasons: this.hardReasons(),
       lidClosed: this.lidClosed,
+      onAC: this.onAC ?? null,
       asleep: this.asleep,
       networkUp: this.networkUp,
       pausedAt: this.pausedAt,
@@ -159,6 +166,7 @@ export class PauseController {
       this.clearResumeTimers();
       if (this.open) {
         this.open = false;
+        this.probeOk = false;
         this.pausedAt = this.now();
         this.phase = 'paused';
         this.pauseAbort.abort(new PausedError(reasons));
