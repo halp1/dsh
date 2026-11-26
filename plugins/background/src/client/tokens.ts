@@ -26,6 +26,12 @@ export const TINT_TOKEN = '--dsh-background-tint'
  */
 export const DRAWER_FILL_TOKEN = '--dsh-background-drawer-fill'
 
+/**
+ * The theme's own base fill, kept for the right panel when the narrow layout
+ * shows it fullscreen over the conversation.
+ */
+export const PANEL_FILL_TOKEN = '--dsh-background-panel-fill'
+
 /** Surfaces that fill the app window: transparent, replaced by the tint. */
 export const SURFACE_TOKENS: readonly string[] = [
   '--dsw-alias-bg-base',
@@ -108,6 +114,7 @@ export function buildOverrides(base: BaseValues, opacity: number): Record<string
   out[TINT_TOKEN] = { light: translucent(raw('light', base0), opacity), dark: translucent(raw('dark', base0), opacity) }
   const sidebar = '--dsw-specific-sidebar-fill'
   out[DRAWER_FILL_TOKEN] = { light: raw('light', sidebar), dark: raw('dark', sidebar) }
+  out[PANEL_FILL_TOKEN] = { light: raw('light', base0), dark: raw('dark', base0) }
   return out
 }
 

@@ -5,7 +5,7 @@
  * translucent through the official `ctx.theme.overrideTokens` API.
  * @module
  */
-import { DRAWER_FILL_TOKEN, buildOverrides, readBaseFromRules, type BaseValues, type RuleLike } from './tokens.ts'
+import { DRAWER_FILL_TOKEN, PANEL_FILL_TOKEN, buildOverrides, readBaseFromRules, type BaseValues, type RuleLike } from './tokens.ts'
 
 export const OVERRIDE_SOURCE = 'dsh-plugin-background'
 const STYLE_ID = 'dsh-background-css'
@@ -20,12 +20,17 @@ const ATTR = 'data-dsh-bg'
 // Below 768px the layout turns the sidebar into a drawer over the
 // conversation (`data-sidebar-drawer` on the frame). The tint sits behind
 // the whole app, so a transparent drawer would show the conversation
-// through it. The drawer gets the theme's sidebar fill back. The docked
-// desktop column stays transparent.
+// through it. The drawer gets the theme's sidebar fill back. The same
+// layout shows the right panel fullscreen over the conversation, so its
+// docked panes get the theme's base fill back. The docked desktop columns
+// stay transparent.
+const NARROW = `html[${ATTR}] #root [data-sidebar-drawer]`
+const RIGHT_PANEL = `${NARROW} [data-sidebar-right-panel="fullscreen"]`
 const CSS = `
 html[${ATTR}], html[${ATTR}] body { background: transparent !important; }
 html[${ATTR}] #root { position: relative; z-index: 1; background: transparent !important; }
-html[${ATTR}] #root [data-sidebar-drawer] > [class*="_sidebarCol"] { background: var(${DRAWER_FILL_TOKEN}) !important; }
+${NARROW} > [class*="_sidebarCol"] { background: var(${DRAWER_FILL_TOKEN}) !important; }
+${RIGHT_PANEL} [data-dockkit-host="dock"] [data-dockkit-pane], ${RIGHT_PANEL} [data-dockkit-empty] { background: var(${PANEL_FILL_TOKEN}) !important; }
 html[${ATTR}] #root [class*="_fade "], html[${ATTR}] #root [class$="_fade"] { display: none !important; }
 html[${ATTR}] #root [class*="_fadeTop"], html[${ATTR}] #root [class*="_fadeBottom"] { mask-image: none !important; }
 `

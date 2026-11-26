@@ -28,27 +28,43 @@ test('hides overlay fades but never a scroll container carrying a mask fade clas
   assert.notEqual(style('faded').display, 'none')
 })
 
-test('the narrow-layout drawer is opaque while the docked desktop sidebar stays see-through', () => {
+test('panels covering the narrow-layout conversation are opaque while docked desktop columns stay see-through', () => {
+  // Shapes measured from the live 0.2.2 shell at 390px and at desktop width.
+  const rightPanel = (mode) => `<div class="P3OORG_panel" data-sidebar-right-panel="${mode}">
+      <div class="_tabCell_3oazc_144" data-dockkit-host="dock"><div class="_tabHost_3oazc_164 _pane_3oazc_211" data-dockkit-pane="pane1"></div></div>
+    </div>`
   const dom = new JSDOM(`<body><div id="root">
-    <div class="pI_x6G_frame" id="desktop"><div class="pI_x6G_sidebarCol"></div></div>
-    <div class="pI_x6G_frame" id="mobile" data-sidebar-drawer data-sidebar-collapsed><div class="pI_x6G_sidebarCol"></div></div>
+    <div class="pI_x6G_frame" id="desktop">
+      <div class="pI_x6G_sidebarCol"></div>
+      <div class="pI_x6G_rightbarCol">${rightPanel('push')}</div>
+    </div>
+    <div class="pI_x6G_frame" id="desktop-fullscreen"><div class="pI_x6G_rightbarCol">${rightPanel('fullscreen')}</div></div>
+    <div class="pI_x6G_frame" id="mobile" data-sidebar-drawer data-sidebar-collapsed>
+      <div class="pI_x6G_sidebarCol"></div>
+      <div class="pI_x6G_rightbarCol">${rightPanel('fullscreen')}</div>
+    </div>
   </div></body>`)
   const doc = dom.window.document
   const transparency = new Transparency(doc, { overrideTokens: () => () => {} })
-  // jsdom does not resolve var(), so find the rules that paint each column.
-  const fills = (id) => {
-    const column = doc.querySelector(`#${id} > div`)
-    return [...doc.styleSheets].flatMap((sheet) => [...sheet.cssRules])
-      .filter((rule) => column.matches(rule.selectorText) && rule.style.getPropertyValue('background').includes('--dsh-background-drawer-fill'))
+  // jsdom does not resolve var(), so find the rule that paints each surface.
+  const fill = (selector) => {
+    const element = doc.querySelector(selector)
+    const rule = [...doc.styleSheets].flatMap((sheet) => [...sheet.cssRules])
+      .find((r) => element.matches(r.selectorText) && /--dsh-background-(drawer|panel)-fill/.test(r.style.getPropertyValue('background')))
+    return rule?.style.getPropertyValue('background').match(/--dsh-background-\w+-fill/)[0]
   }
 
   transparency.enable(0.5)
-  assert.equal(fills('mobile').length, 1)
-  assert.equal(fills('desktop').length, 0)
+  assert.equal(fill('#mobile > [class*="_sidebarCol"]'), '--dsh-background-drawer-fill')
+  assert.equal(fill('#mobile [data-dockkit-pane]'), '--dsh-background-panel-fill')
+  for (const selector of ['#desktop > [class*="_sidebarCol"]', '#desktop [data-dockkit-pane]', '#desktop-fullscreen [data-dockkit-pane]']) {
+    assert.equal(fill(selector), undefined, selector)
+  }
   // Opening the drawer only removes the collapsed flag.
   doc.getElementById('mobile').removeAttribute('data-sidebar-collapsed')
-  assert.equal(fills('mobile').length, 1)
+  assert.equal(fill('#mobile > [class*="_sidebarCol"]'), '--dsh-background-drawer-fill')
 
   transparency.disable()
-  assert.equal(fills('mobile').length, 0)
+  assert.equal(fill('#mobile > [class*="_sidebarCol"]'), undefined)
+  assert.equal(fill('#mobile [data-dockkit-pane]'), undefined)
 })
