@@ -1,80 +1,89 @@
-# On-demand MCP tools for DSH
+# On-demand MCP and plugin tools for DSH
 
-Keeps configured MCP catalogs in the existing host registry, but sends a model only the native tool schemas selected for its own chat. Fresh chats get two small discovery tools instead of the REA and Google Workspace catalogs.
+Keeps native tool registrations in the host, but exposes on-demand schemas only after a chat selects them. MCP namespaces, plugin tool-name prefixes, and individual tools can be configured in **Settings > Tool Discovery**.
 
-No MCP server, connection, credential, provider adapter, or installed DSH package is replaced. Schema visibility is not a permission grant: original restrictions, approvals, plan-mode checks, cancellation, output contracts, native images, and tool identities remain in the original execution pipeline.
+## Tool policies
 
-## Install / configuration
+- **Visible** exposes a tool normally.
+- **On-demand** hides its schema until selected through `search_mcp_tools` and `select_mcp_tools`.
+- **Blocked** removes it from discovery and declarations, and denies execution even if it was previously selected.
 
-Tested with DSH `0.2.2-rc.1` and its native tool executor. Legacy runtimes exposing `ToolRuntime.modeFor()` are also recognized.
+Browser tools matching `dsh_browser_` default to On-demand. Other plugin tools remain Visible unless configured. The bundled MCP namespaces are `rea` and `gworkspace`. Existing profile overrides remain supported.
+
+Exact tool overrides win over the longest matching prefix rule. Prefix rules win over the MCP namespace list. Unmatched tools are Visible. The discovery controls themselves cannot be targeted by policy rules, preventing accidental settings lockout.
+
+These policies do not replace native permissions, approvals, scope restrictions, read-only checks, cancellation, or output validation. Turning off this plugin removes its filtering and execution guard, so this is not an independent security sandbox.
+
+## Install and build
+
+Tested with DSH `0.2.2-rc.1` and its native executor.
 
 ```sh
+pnpm --filter dsh-plugin-mcp-discovery build
 dsh plugin --profile web add file:/Users/halp/code/dsh/plugins/mcp-discovery
 ```
 
-The included bundle enables discovery for `rea` and `gworkspace`. Override the `mcp-discovery` row in your profile's `cordis.patch.yml`:
+The package ships built node and browser artifacts. Reinstall an already installed local package through DSH's plugin manager to deploy updated artifacts, then refresh the existing GUI. No replacement web server is needed.
+
+## Settings panel
+
+Open **Settings > Tool Discovery** after refreshing DSH. Configure MCP namespace modes, prefix rules, exact tool overrides, and the maximum selected tools per chat. Changes apply after **Save settings** without restarting DSH. **Discard changes** restores the last loaded snapshot. Conflicting saves are rejected and can be reloaded instead of overwriting another editor's changes.
+
+Settings are stored in `DSH_HOME/plugins/mcp-discovery/settings.json`, defaulting to `~/.dsh/plugins/mcp-discovery/settings.json`. The authenticated settings route uses `connection.fetch`. Saved policies take precedence over profile defaults. Headless profiles load this file only when an explicit `settingsFile` is configured.
+
+Profile configuration is also supported:
 
 ```yaml
 - id: mcp-discovery
   config:
     servers: [rea, gworkspace]
     maxSelectedTools: 16
+    prefixes:
+      - prefix: dsh_browser_
+        mode: on-demand
+      - prefix: widget_
+        mode: on-demand
+    tools:
+      - name: widget_delete
+        mode: blocked
 ```
 
-Other servers, including n8n and Google Tasks, are unchanged. Servers are local `serverName` values, not URLs. Namespaces with double underscores are not accepted because their public prefixes are ambiguous. Catalog fetch/connection startup is still eager; **model context exposure** is on demand.
-
-A live profile patch/plugin reload or restarting your existing DSH host applies host changes. No frontend rebuild or separate web server is necessary for this server-only plugin. If package installation does not remount a live plugin, explicitly add/reload its profile row or restart that host.
+An empty `servers` or `prefixes` array disables that default group. Rules match literal case-sensitive prefixes, not regular expressions or globs.
 
 ## How the agent uses it
 
-1. `search_mcp_tools({query: "gmail search messages"})` returns at most 5 short summaries by default, no schemas. Maximum page size 10; use `offset` to page. Omit query to summarize servers, or specify `server` to browse one catalog.
-2. `select_mcp_tools({action: "add", names: ["mcp__gworkspace__search_gmail_messages"]})` selects the exact native tool. Its full schema appears in the **next** model request; the selection result does not duplicate it.
-3. Call the selected MCP tool normally. It still needs the user's authorization for any actual action, and original policy still applies.
-4. Use `remove`, `replace`, or `status` to manage the working set. `replace` with `names: []` clears it. Overflow/unknown-name requests make no partial changes. No tools are automatically evicted.
+1. `search_mcp_tools({query: "gmail search messages"})` returns short schema-free summaries. Omit query to list catalogs, use `server` to browse MCP tools, or use `prefix: "dsh_browser_"` to browse browser tools. The default page size is 5 and maximum is 10. Use `offset` to page.
+2. `select_mcp_tools({action: "add", names: ["dsh_browser_snapshot"]})` selects an exact on-demand name. Its original native schema appears in the next model request.
+3. Call selected tools normally. Selection neither runs the underlying tool nor approves an action.
+4. Use `remove`, `replace`, or `status` to manage the chat's working set. `replace` with `names: []` clears it. Invalid or overflowing requests make no partial changes and do not automatically evict tools.
 
-Search uses deterministic local name/description matching. It makes no LLM, embedding, or MCP operation calls. Server descriptions remain untrusted data, not executable instructions. A selected tool's original server guidance is included while that server is active; unrelated server guidance stays hidden.
+Search performs local deterministic matching. Catalog descriptions are untrusted data. Blocked and scope-restricted tools do not appear in search results. Visible tools do not need selection.
 
-## Sessions, persistence and updates
+## Sessions and lifecycle
 
-Selections are isolated per session, including independently scoped child agents. Fresh forks do not inherit a parent's activation state. Existing eager request headers are never interpreted as a selection.
+Selections are isolated per session, including independent child agents. Fresh forks do not inherit activation. Successful selection snapshots persist through the normal tool result's non-model metadata. Restoration verifies the original owned call and ignores compaction replacement copies.
 
-Selected names are persisted in the normal successful selection tool result's **non-model presentation metadata**. This avoids adding unknown event types, changing the session format, or writing a separate state file. Restoration verifies the original owned call and ignores compaction replacement copies. The in-memory selection is committed only when the native pipeline accepts the original candidate, not after cancellation, blocking, or a substituted result.
+Current schemas come from the live restricted registry. Removed or revoked tools cannot be called through a stale executable closure. Policy changes are checked again during assembly and execution, including for saved selections. Lowering `maxSelectedTools` below a saved working set fails explicitly. Raise the limit before resuming and clearing that set.
 
-Plugin restart / same-session resume restores the latest accepted snapshot, even after result compaction. Current schemas always come from the live restricted registry; there are no cached executor closures. Previously selected removed tools are reported unavailable. Revoked capabilities remain hidden and cannot be reselected. Lowering `maxSelectedTools` below the latest saved working set fails explicitly; restore the previous limit before resuming and clearing that set.
+The plugin wraps the public `systemPrompt.assemble()` result with a lifecycle-owned filter. It preserves scoped executors and step admission, restores the method on disposal, and does not replace registrations or transport connections. Original MCP guidance is shown only while a tool from that server is exposed.
 
-The plugin supports **native** presentation only. PTC / hybrid scopes with managed tools fail clearly rather than silently sending a full generated SDK.
-
-DSH now owns tool declarations outside the prompt presentation waterfall. The plugin installs a lifecycle-owned wrapper around the public `systemPrompt.assemble()` method to filter its completed result. It preserves the original receiver, scoped executor and step admission, restores the method on disposal, and does not replace executors or modify the tool registry.
-
-## Context savings and limitations
-
-Only selected declarations plus the two small discovery definitions are sent. Byte counters use serialized UTF-8 schema bytes, **not exact tokens**. Prompt caching can reduce repeated processing costs but does not remove eager schemas from the context window; this plugin removes their declarations before provider request projection.
-
-Existing messages/results already in a conversation are not erased. Start a fresh chat for the cleanest reduction. Turning this plugin off restores eager behavior; it does not remove the servers.
-
-There is no new UI panel in this release. The agent gets concise instructions and uses the discovery controls automatically. Tool selection is not an independent security sandbox or a replacement for the user's permissions.
+Only native tool presentation is supported. PTC or hybrid scopes with managed tools fail rather than exposing a generated SDK. Existing messages and tool results are not erased, so use a fresh chat for the cleanest context reduction. Schema byte counts are serialized UTF-8 sizes, not exact token counts.
 
 ## Tests
 
 ```sh
-npm test
+pnpm --filter dsh-plugin-mcp-discovery test
 ```
 
-Tests import the installed DSH runtime under the active Node installation and use synthetic native tools, not live Google operations or REA targets. For a different runtime location:
-
-```sh
-DSH_TEST_RUNTIME=/path/to/dsh/package.json npm test
-```
-
-Coverage includes cold request assembly and provider history projection, exact schema selection, permissions and approval denial, cancellation, session/fork isolation, resume, post-policy replacement, compaction, catalog refresh, image projection, limits, reload/disposal, and serialized-byte accounting.
+Tests use synthetic native registrations against the installed DSH runtime. Set `DSH_TEST_RUNTIME=/path/to/dsh/package.json` to test another installation. Coverage includes policy precedence, browser and plugin discovery, blocked execution, native restrictions and approvals, cancellation, selection isolation and restoration, compaction, registry refresh, lifecycle disposal, schema projection, private atomic persistence, stale saves, malformed settings, and authenticated-route integration.
 
 ## Rollback
 
-Disable the row in the profile patch:
+Disable the discovery row in the profile patch, or disable the bundle in DSH's plugin manager:
 
 ```yaml
 - id: mcp-discovery
   disabled: true
 ```
 
-Reload the profile / restart the existing host. Removing the plugin package is optional; disabling it removes both controls, filtering, and its guard while leaving all original MCP registrations intact.
+Disabling restores eager exposure and removes this plugin's block guard while leaving original registrations intact. Saved settings remain on disk.

@@ -1,5 +1,25 @@
 # Verification
 
+## Release check 2026-11-25
+
+Rebuilt `0.2.0`. All 29 tests passed and strict client TypeScript checking passed. The installed `lib/index.js` and `lib/client.js` in the web profile match the fresh build byte for byte. A live `search_mcp_tools({prefix: "dsh_browser_"})` call and a `select_mcp_tools` add both went through the installed plugin, with the saved settings file (revision 5) applied. The rendered settings panel still needs a manual look in the GUI.
+
+## Plugin discovery and settings verified 2026-11-12
+
+Installed version `0.2.0` into the existing DSH web profile through the supported plugin manager. The manager reported the bundle applied live. No replacement server or installed runtime source patch was used.
+
+- All 29 installed-runtime integration tests passed.
+- Node and browser artifact builds passed.
+- Strict client TypeScript checking passed against existing workspace declarations.
+- Whitespace checks passed.
+- Live `search_mcp_tools({prefix: "dsh_browser_", limit: 2})` reported 48 browser tools with schema-free summaries and zero selected results.
+- Live selection of only `dsh_browser_a11y` succeeded and exposed its native schema on the next request. Selection was subsequently cleared.
+- Browser defaults, arbitrary plugin prefixes, exact override precedence, blocked selection and execution, session restoration, restrictions, private atomic settings writes, stale editor revisions, corrupt files, and route lifecycle are regression-tested.
+
+The settings panel inherits native settings layout and tokens from the existing Multi-Search panel. Rendered GUI verification remains a manual handoff to the user because the task browser stayed blank and could not open the authenticated DSH session. Refresh DSH and open Settings > Tool Discovery to verify the panel and Save/Discard behavior.
+
+An initial offline dependency resolution failed because cached registry metadata lacked the workspace Cordis version. The normal build subsequently resolved existing workspace dependencies, updated the lockfile, and passed.
+
 ## Compatibility fix verified 2026-11-05
 
 Installed local version `0.1.1` into the existing web profile running DSH `0.2.2-rc.1`, then disabled and re-enabled only the discovery row to reload it. No host restart or frontend rebuild was needed. No commit was made.
