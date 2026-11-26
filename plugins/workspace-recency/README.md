@@ -5,8 +5,9 @@ Sorts the DeepSeek Harness sidebar by most recent activity:
 - **Workspace folders**: the project you touched last sits on top.
 - **The Ungrouped folder**: ranked among the workspaces by its newest
   session, instead of always sitting last.
-- **Sessions inside Ungrouped**: newest first, even when the sidebar is in
-  its *Manual* order mode.
+- **Sessions inside every folder**: newest first by the last prompt you
+  sent, even after a drag switched the sidebar into *Manual* order. Pinned
+  sessions and the open New Session still lead.
 
 ```
   host manual order            with this plugin
@@ -21,7 +22,9 @@ Sorts the DeepSeek Harness sidebar by most recent activity:
 
 ## What counts as activity
 
-A workspace's activity time is the **newest `updatedAt` among the sessions you
+A session's activity time is `updatedAt`, which the host sets to the moment
+you last sent it a prompt (or its creation time before the first prompt). A
+workspace's activity time is the **newest `updatedAt` among the sessions you
 can actually see in that group**. Two kinds of rows are skipped, because
 neither represents work you did:
 
@@ -40,7 +43,7 @@ cannot separate two workspaces, the order you arranged by hand survives.
 
 ## Ungrouped
 
-**The folder.** Ungrouped is ranked like one more workspace whose activity is
+Ungrouped is ranked like one more workspace whose activity is
 its newest visible session (blank, archived, and subagent rows are skipped).
 Ties go to the workspace. The sidebar always builds Ungrouped after every
 workspace, so the plugin moves it with an injected stylesheet (CSS `order` on
@@ -48,21 +51,17 @@ the folder sections). React's DOM is not touched, so drag-and-drop, row
 animations, and keyboard focus keep working. Screen readers still announce
 Ungrouped last, since visual order is the only thing that changes.
 
-**The sessions inside it.** The sidebar's *Order by* menu has two modes:
+## Sessions inside folders
 
-- *Last updated*: every folder, Ungrouped included, is already newest
-  first, so the plugin does nothing.
-- *Manual*: every folder follows a saved browser-local order. Dragging any
-  session switches the sidebar into this mode, which is the usual reason
-  Ungrouped looks stale (a 13-day-old row stuck at the top). The plugin shows
-  Ungrouped newest first anyway and leaves workspace folders in their manual
-  order.
+The sidebar's *Order by* menu has two modes. *Last updated* sorts every
+folder newest first. *Manual* follows a saved browser-local order, and
+dragging any session switches the sidebar into it, which is how new tasks end
+up stuck below week-old rows.
 
-The plugin does not write the saved manual order itself. Turn the setting off
-and your arrangement comes back. One caveat: when you open a New Session, the
-sidebar re-saves the orders it is displaying, which can store the newest-first
-Ungrouped order. Dragging a row inside Ungrouped has no lasting effect while
-the setting is on, since recency decides the position.
+While `sortSessions` is on, the plugin makes the sidebar read its mode as
+*Last updated* without changing the saved mode or the saved arrangement. Turn
+the setting off and your *Manual* order comes back. Dragging rows has no
+visible effect while it is on.
 
 ## Your manual order is never overwritten
 
@@ -104,7 +103,7 @@ __dshWorkspaceRecency__.configure({ pinCurrent: true })// keep the open one on t
 | --- | --- | --- |
 | `enabled` | `true` | Master switch; `false` turns every part off |
 | `pinCurrent` | `false` | Keeps the folder holding the open session first, regardless of activity |
-| `sortUngroupedSessions` | `true` | Newest-first sessions inside Ungrouped in *Manual* mode |
+| `sortSessions` | `true` | Newest-first sessions in every folder, even in *Manual* mode |
 | `moveUngroupedFolder` | `true` | Rank the Ungrouped folder by activity instead of always last |
 
 Other plugins can read the same face through the `workspaceRecency` cordis
@@ -147,15 +146,15 @@ Two details that keep this safe:
 
 ```bash
 pnpm install
-pnpm test     # 78 unit tests, no DOM required
+pnpm test     # unit tests, no DOM required
 pnpm build    # tsc -b + tsdown, emits lib/index.js and lib/client.js
 ```
 
 The ordering rules live in `src/client/activity.ts` as pure functions, so they
 are tested without a browser. The live wiring is split by surface:
-`sorter.ts` (workspace order), `ungrouped.ts` (sessions inside Ungrouped, via
-the ui-workspace view store), and `folder.ts` (the Ungrouped folder's
-position). Requires DSH 0.2; the open session is read from
+`sorter.ts` (workspace order), `session-order.ts` (session order inside
+folders, via the ui-workspace view store), and `folder.ts` (the Ungrouped
+folder's position). Requires DSH 0.2; the open session is read from
 `retainedBy.mainView`, with a fallback to 0.1's `list.current`.
 
 ## License

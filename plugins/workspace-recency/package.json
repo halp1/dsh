@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-workspace-recency",
-  "version": "0.2.0",
-  "description": "Sort the DeepSeek Harness sidebar's workspace groups by most recent session activity, newest first, without touching the host's stored manual order",
+  "version": "0.3.0",
+  "description": "Sort the DeepSeek Harness sidebar's workspaces and sessions by most recent task start, newest first, without touching the stored manual order",
   "license": "MIT",
   "keywords": [
     "deepseek-harness",
