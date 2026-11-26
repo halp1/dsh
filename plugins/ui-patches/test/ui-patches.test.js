@@ -197,6 +197,13 @@ test('portrait composer controls stay on one line only under the remote portrait
       assert.equal(row.flexWrap, expected.wrap, label);
       assert.equal(trailing.flexBasis, expected.basis, label);
       assert.equal(row.paddingRight, expected.reserve, label);
+      if (expected.wrap === 'nowrap') {
+        // The send button (34px) centers on this row, so a single 24px line
+        // must not shrink the row's content box below it (it spilled out of
+        // the card on a phone).
+        const content = parseFloat(row.minHeight) - parseFloat(row.paddingTop) - parseFloat(row.paddingBottom);
+        assert.ok(row.boxSizing === 'border-box' && content >= 34, label);
+      }
     } finally {
       dom.window.close();
     }

@@ -27,14 +27,21 @@ const CURSOR_STATS_CSS = `
 // second line (flex-basis:100%), splitting four small controls across two rows
 // even though they fit in one. Keep that row on one line and reserve room on
 // the right for the send button, plus the context meter when it is mounted,
-// both of which that layer positions absolutely. The body class is the layer's
-// own portrait marker, so desktop and landscape keep the official layout.
+// both of which that layer positions absolutely. Those buttons center on the
+// row, and a single line of 24px controls is shorter than the 34px send
+// button, so the row keeps a floor that holds it inside the card. The body
+// class is the layer's own portrait marker, so desktop and landscape keep the
+// official layout.
 const PORTRAIT_ROW = 'body.dsh-remote-portrait [class$="_composerSeat"] [class$="_row"]:has(> [class$="_trailing"])';
 const COMPOSER_ONE_LINE_CSS = `
 ${PORTRAIT_ROW} {
+  box-sizing: border-box;
+  min-height: 46px;
   flex-wrap: nowrap;
   justify-content: flex-start;
   gap: 8px;
+  padding-top: 4px;
+  padding-bottom: 6px;
   padding-right: 52px;
 }
 ${PORTRAIT_ROW}:has([class$="_track"]) {
