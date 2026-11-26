@@ -5,7 +5,7 @@
  * translucent through the official `ctx.theme.overrideTokens` API.
  * @module
  */
-import { buildOverrides, readBaseFromRules, type BaseValues, type RuleLike } from './tokens.ts'
+import { DRAWER_FILL_TOKEN, buildOverrides, readBaseFromRules, type BaseValues, type RuleLike } from './tokens.ts'
 
 export const OVERRIDE_SOURCE = 'dsh-plugin-background'
 const STYLE_ID = 'dsh-background-css'
@@ -16,9 +16,16 @@ const ATTR = 'data-dsh-bg'
 // classes such as `_fadeBottom` on the scroll container itself, toggled as
 // its content overflows. Hiding those would collapse the container, drop the
 // class, and show it again on the next frame, so only their mask is removed.
+//
+// Below 768px the layout turns the sidebar into a drawer over the
+// conversation (`data-sidebar-drawer` on the frame). The tint sits behind
+// the whole app, so a transparent drawer would show the conversation
+// through it. The drawer gets the theme's sidebar fill back. The docked
+// desktop column stays transparent.
 const CSS = `
 html[${ATTR}], html[${ATTR}] body { background: transparent !important; }
 html[${ATTR}] #root { position: relative; z-index: 1; background: transparent !important; }
+html[${ATTR}] #root [data-sidebar-drawer] > [class*="_sidebarCol"] { background: var(${DRAWER_FILL_TOKEN}) !important; }
 html[${ATTR}] #root [class*="_fade "], html[${ATTR}] #root [class$="_fade"] { display: none !important; }
 html[${ATTR}] #root [class*="_fadeTop"], html[${ATTR}] #root [class*="_fadeBottom"] { mask-image: none !important; }
 `

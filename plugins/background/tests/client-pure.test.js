@@ -115,6 +115,8 @@ test('buildOverrides: surfaces go transparent, one tint carries the opacity, flo
   assert.equal(o['--dsw-alias-bg-layer-2'].dark, 'color-mix(in srgb, var(--dsw-static-neutral-bluish-850) 90%, transparent)')
   const high = buildOverrides(FALLBACK_VALUES, 0.95)
   assert.match(high['--dsw-alias-bg-overlay'].light, / 95%/)
+  // The mobile drawer floats over content, so it keeps the opaque sidebar fill.
+  assert.deepEqual(o['--dsh-background-drawer-fill'], { light: 'var(--dsw-static-neutral-bluish-50)', dark: 'var(--dsw-static-neutral-bluish-900)' })
 })
 
 test('buildOverrides at full opacity restores the raw surfaces', () => {

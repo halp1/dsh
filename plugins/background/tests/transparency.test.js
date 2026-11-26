@@ -27,3 +27,28 @@ test('hides overlay fades but never a scroll container carrying a mask fade clas
   assert.notEqual(style('nav').display, 'none')
   assert.notEqual(style('faded').display, 'none')
 })
+
+test('the narrow-layout drawer is opaque while the docked desktop sidebar stays see-through', () => {
+  const dom = new JSDOM(`<body><div id="root">
+    <div class="pI_x6G_frame" id="desktop"><div class="pI_x6G_sidebarCol"></div></div>
+    <div class="pI_x6G_frame" id="mobile" data-sidebar-drawer data-sidebar-collapsed><div class="pI_x6G_sidebarCol"></div></div>
+  </div></body>`)
+  const doc = dom.window.document
+  const transparency = new Transparency(doc, { overrideTokens: () => () => {} })
+  // jsdom does not resolve var(), so find the rules that paint each column.
+  const fills = (id) => {
+    const column = doc.querySelector(`#${id} > div`)
+    return [...doc.styleSheets].flatMap((sheet) => [...sheet.cssRules])
+      .filter((rule) => column.matches(rule.selectorText) && rule.style.getPropertyValue('background').includes('--dsh-background-drawer-fill'))
+  }
+
+  transparency.enable(0.5)
+  assert.equal(fills('mobile').length, 1)
+  assert.equal(fills('desktop').length, 0)
+  // Opening the drawer only removes the collapsed flag.
+  doc.getElementById('mobile').removeAttribute('data-sidebar-collapsed')
+  assert.equal(fills('mobile').length, 1)
+
+  transparency.disable()
+  assert.equal(fills('mobile').length, 0)
+})
