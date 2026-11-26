@@ -39,7 +39,7 @@ async function request(route, method) {
   return { headers, body };
 }
 
-test('pricing stays hidden on local, remote, and mini shells without hiding other dock controls', () => {
+test('pricing and Cursor stats stay hidden on local, remote, and mini shells without hiding other dock controls', () => {
   for (const [url, className] of [
     ['http://127.0.0.1:3080', ''],
     ['https://dsh.example.test', ''],
@@ -52,6 +52,8 @@ test('pricing stays hidden on local, remote, and mini shells without hiding othe
         <textarea aria-label="Message"></textarea>
         <div data-slot="conversation.composer.dock">
           <div data-testid="billing-live-cost-bar">Off-peak Turn $0 Session $0</div>
+          <div class="dcp-cursor-context">Context 16%</div>
+          <span class="cu-dock"><span class="cu-status-row">Checkpoint</span><button class="cu-pill">Cursor 0%</button></span>
           <button data-testid="other-dock-control">Other plugin</button>
         </div>
         <div data-slot="conversation.input.right">
@@ -75,7 +77,7 @@ test('pricing stays hidden on local, remote, and mini shells without hiding othe
       const lateBar = document.createElement('div');
       lateBar.dataset.testid = 'billing-live-cost-bar';
       document.body.append(lateBar);
-      for (const capsule of document.querySelectorAll('[data-testid="billing-live-cost-bar"], [data-testid="billing-live-cost-chip"]')) {
+      for (const capsule of document.querySelectorAll('[data-testid="billing-live-cost-bar"], [data-testid="billing-live-cost-chip"], .cu-dock, .dcp-cursor-context')) {
         assert.equal(getComputedStyle(capsule).display, 'none', url + ' ' + className);
       }
       for (const selector of ['textarea', '[data-testid="billing-dashboard-trigger"]', '[data-testid="other-dock-control"]', '[data-testid="send"]', '[data-slot="conversation.composer.dock"]']) {
@@ -110,10 +112,12 @@ test('each patch can be disabled independently and rejects an invalid switch', (
   assert.equal(pricingOnly.routes.size, 0);
   assert.doesNotMatch(pricingOnly.table[0].text, /Fira Code/);
   assert.doesNotMatch(indexRows({ hideComposerPricing: false })[0].text, /billing-live-cost/);
-  assert.deepEqual(load({ hideComposerPricing: false, firaCode: false, mobileEnterNewline: false }), { table: [], routes: new Map() });
+  assert.match(indexRows({ hideComposerPricing: false })[0].text, /\.cu-dock/);
+  assert.doesNotMatch(indexRows({ hideCursorStats: false })[0].text, /\.cu-dock|dcp-cursor-context/);
+  assert.deepEqual(load({ hideComposerPricing: false, hideCursorStats: false, firaCode: false, mobileEnterNewline: false }), { table: [], routes: new Map() });
   assert.ok(indexRows().some((row) => row.kind === 'script'));
   assert.ok(!indexRows({ mobileEnterNewline: false }).some((row) => row.kind === 'script'));
-  for (const config of [{ hideComposerPricing: 'false' }, { firaCode: 1 }, { mobileEnterNewline: 'no' }]) {
+  for (const config of [{ hideComposerPricing: 'false' }, { hideCursorStats: 'off' }, { firaCode: 1 }, { mobileEnterNewline: 'no' }]) {
     assert.throws(() => indexRows(config), TypeError);
   }
 });

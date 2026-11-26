@@ -13,6 +13,16 @@ const COMPOSER_PRICING_CSS = `
 }
 `;
 
+// The Cursor integration plugin mounts two dock rows with no setting to turn
+// them off: checkpoint, compaction, routing and quota pills, plus its local
+// context estimate. Hide only those plugin-owned roots.
+const CURSOR_STATS_CSS = `
+.cu-dock,
+.dcp-cursor-context {
+  display: none !important;
+}
+`;
+
 // Served by this host so remote and mobile browsers get the same face
 // without having Fira Code installed. The version keeps the URL immutable.
 export const FIRA_CODE_PATH = '/ui-patches/fonts/fira-code-6.2.woff2';
@@ -85,6 +95,7 @@ function serveFiraCode(req, res) {
 /** Apply the same stylesheet to every shell served by this profile. */
 export function apply(ctx, config = {}) {
   const hideComposerPricing = booleanOption(config, 'hideComposerPricing');
+  const hideCursorStats = booleanOption(config, 'hideCursorStats');
   const firaCode = booleanOption(config, 'firaCode');
   const mobileEnterNewline = booleanOption(config, 'mobileEnterNewline');
 
@@ -95,7 +106,7 @@ export function apply(ctx, config = {}) {
     );
   }
 
-  const css = [hideComposerPricing && COMPOSER_PRICING_CSS, firaCode && FIRA_CODE_CSS].filter(Boolean).join('');
+  const css = [hideComposerPricing && COMPOSER_PRICING_CSS, hideCursorStats && CURSOR_STATS_CSS, firaCode && FIRA_CODE_CSS].filter(Boolean).join('');
   const rows = [
     css !== '' && { kind: 'style', text: css },
     mobileEnterNewline && { kind: 'script', placement: 'head', text: MOBILE_ENTER_NEWLINE_SCRIPT },

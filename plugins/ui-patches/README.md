@@ -8,6 +8,10 @@ Hides the billing plugin's peak/off-peak and turn/session pricing capsule, inclu
 
 The mini-window plugin already hides its own composer footer, but that rule is scoped to the mini window. Billing also stores its display preference separately for each browser origin. This plugin instead injects a stylesheet into the shared web shell, so the patch applies before client rendering without changing anyone's local storage or requiring a client bundle rebuild.
 
+## Cursor stats
+
+Hides the Cursor integration plugin's composer dock rows: the checkpoint and compaction status, the routing and quota pills, and the local context estimate. The plugin offers no setting for these. The Cursor usage page under Settings is unchanged.
+
 ## Fira Code
 
 Makes [Fira Code](https://github.com/tonsky/FiraCode) the code font for inline code, fenced code blocks, and every other surface that uses the shell's code font. The font file ships with the plugin and the host serves it at `/ui-patches/fonts/fira-code-6.2.woff2`, so remote and mobile browsers render it without a local install.
@@ -36,6 +40,7 @@ To turn a patch off, disable the plugin or set this profile override:
 - id: ui-patches
   config:
     hideComposerPricing: false
+    hideCursorStats: false
     firaCode: false
     mobileEnterNewline: false
 ```
