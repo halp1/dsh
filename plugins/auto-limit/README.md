@@ -47,7 +47,20 @@ from 98% to 100% with the gate wide open.
 
 **The provider's own refusal is a backstop.** Polling can be starved; model
 traffic cannot. A `RATE_LIMIT` / `QUOTA_EXCEEDED` / 429 on the actual stream
-closes the gate immediately, regardless of what polling knows.
+closes the gate immediately, regardless of what polling knows. That pause
+lapses when the provider's disclosed retry time passes, so a blind poller
+cannot hold later turns behind a refusal that is over.
+
+**A pause lasts until the last full window resets.** With both the 5-hour and
+weekly windows full, the 5-hour reset reopens nothing, so the pause reports and
+polls for the weekly one.
+
+**Forecasts catch a fast burn between polls.** Each window's readings since its
+last reset are fitted to a pace (percent per hour, with older readings weighted
+less). When every subscription of a provider is on pace to cross the threshold
+before its window resets, the plugin logs when and polls at that moment rather
+than up to five minutes later. A forecast never brings a poll closer than two
+minutes, and it needs readings covering a tenth of the window first.
 
 **The usage endpoints are polled sparingly, because they rate-limit
 *themselves*.** Measured against the live Claude endpoint: it serves roughly one
@@ -109,7 +122,8 @@ from the profile's `cordis.patch.yml`:
 ## What gets logged
 
 ```
-auto-limit: watching claude, codex at 98% (poll 120s, 30s while paused)
+auto-limit: watching claude, codex at 98% (poll 300s, 120s while paused)
+auto-limit: claude is on pace to reach 98% at 11/27/2026, 3:16:00 AM (in 1h 16m) (5-hour window at 60.0%, +30.0%/h, resets 11/27/2026, 5:00:00 AM (in 3h 0m)).
 auto-limit: pausing claude — weekly window at 98.4% (threshold 98%). Requests are held until 9/14/2026, 7:00:00 AM (in 5h 12m).
 auto-limit: holding a claude request — weekly window at 98.4%; waiting for reset at ...
 auto-limit: resuming claude — quota available again; released 1 held request(s)
@@ -136,12 +150,14 @@ auto-limit: released a held claude request; continuing the turn.
 ## Tests
 
 ```bash
-npm test
+pnpm --filter dsh-plugin-auto-limit run test
 ```
 
-72 tests cover the threshold decisions, both providers' payload shapes (modern
-and legacy), the pooled-account and failure-handling rules, cancellation, and
-the held-then-released turn.
+105 tests cover the threshold decisions, both providers' payload shapes (modern
+and legacy), the pooled-account and failure-handling rules, cancellation, the
+held-then-released turn, and the burn-rate forecasts. `test/setup.js` points
+`HOME` at a temporary directory and fails any unstubbed `fetch`, so the tests
+never read the real token file or call a usage endpoint.
 
 `test/regression.test.js` pins the specific failure that let a real weekly
 window run from 98% through 100%: two logins of one subscription burning two
