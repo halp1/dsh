@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { PauseGate, earliestReset, offendingWindow } from '../src/gate.js';
+import { PauseGate, governingWindow, offendingWindow } from '../src/gate.js';
 
 describe('offendingWindow', () => {
   it('returns undefined when every window is below the threshold', () => {
@@ -43,7 +43,7 @@ describe('offendingWindow', () => {
   it('still pauses when the provider disclosed no reset instant', () => {
     const usage = { supported: true, windows: [{ kind: 'weekly', usedPercent: 99 }] };
     assert.notEqual(offendingWindow(usage, 98), undefined);
-    assert.equal(earliestReset(usage, 98), undefined);
+    assert.equal(governingWindow(usage, 98)?.resetsAt, undefined);
   });
 
   it('ignores unusable percentages rather than treating them as zero', () => {
@@ -64,18 +64,48 @@ describe('offendingWindow', () => {
   });
 });
 
-describe('earliestReset', () => {
-  it('picks the soonest reset among offending windows only', () => {
-    const usage = {
-      supported: true,
+describe('governingWindow', () => {
+  // An account reopens only once every full window has reset.
+  const cases = [
+    {
+      name: 'the latest reset among full windows governs',
       windows: [
         { kind: 'session', usedPercent: 99, resetsAt: 5_000 },
-        { kind: 'weekly', usedPercent: 98.5, resetsAt: 3_000 },
-        // Below threshold: its earlier reset must not win.
-        { kind: 'monthly', usedPercent: 10, resetsAt: 1_000 },
+        { kind: 'weekly', usedPercent: 98.5, resetsAt: 300_000 },
+        { kind: 'monthly', usedPercent: 10, resetsAt: 900_000 },
       ],
-    };
-    assert.equal(earliestReset(usage, 98), 3_000);
+      kind: 'weekly',
+      resetsAt: 300_000,
+    },
+    {
+      name: 'a full window with no disclosed reset makes the reopening unknown',
+      windows: [
+        { kind: 'session', usedPercent: 99, resetsAt: 5_000 },
+        { kind: 'weekly', usedPercent: 99 },
+      ],
+      kind: 'weekly',
+      resetsAt: undefined,
+    },
+    {
+      name: 'a below-threshold window never governs',
+      windows: [
+        { kind: 'session', usedPercent: 99, resetsAt: 5_000 },
+        { kind: 'weekly', usedPercent: 50, resetsAt: 300_000 },
+      ],
+      kind: 'session',
+      resetsAt: 5_000,
+    },
+  ];
+  for (const c of cases) {
+    it(c.name, () => {
+      const result = governingWindow({ supported: true, windows: c.windows }, 98);
+      assert.equal(result?.window.kind, c.kind);
+      assert.equal(result?.resetsAt, c.resetsAt);
+    });
+  }
+
+  it('returns undefined when nothing is full', () => {
+    assert.equal(governingWindow({ supported: true, windows: [{ kind: 'session', usedPercent: 3 }] }, 98), undefined);
   });
 });
 
@@ -163,6 +193,25 @@ describe('PauseGate', () => {
     const controller = new AbortController();
     controller.abort(new Error('already gone'));
     await assert.rejects(gate.wait('claude', controller.signal), /already gone/);
+  });
+
+  it('reopens an expiring pause by itself, releasing its waiters', async () => {
+    const events = [];
+    const gate = new PauseGate({ onResume: (_p, detail) => events.push(detail.cause) });
+    gate.pause('claude', { window: 'provider-reported limit', usedPercent: 100 }, { expiresInMs: 20 });
+    await gate.wait('claude');
+    assert.equal(gate.blockReason('claude'), undefined);
+    assert.deepEqual(events, ['expired']);
+  });
+
+  it('keeps a pause that replaced an expiring one', async () => {
+    const gate = new PauseGate();
+    gate.pause('claude', { window: 'provider-reported limit', usedPercent: 100 }, { expiresInMs: 20 });
+    // A real reading confirms the window is full; that pause has no expiry.
+    gate.pause('claude', { window: 'weekly', usedPercent: 99, resetsAt: Date.now() + 3_600_000 });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(gate.blockReason('claude')?.window, 'weekly');
+    gate.dispose();
   });
 
   it('releases every waiter on dispose so no turn is stranded', async () => {

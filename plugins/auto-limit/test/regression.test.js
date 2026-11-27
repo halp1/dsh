@@ -439,3 +439,83 @@ describe('regression: stream-level rate-limit backstop', () => {
     assert.notEqual(gate.blockReason('claude'), undefined);
   });
 });
+
+describe('regression: a full window behind a shorter one', () => {
+  it('pauses until the LAST full window resets, not the first', async () => {
+    // 5-hour and weekly both full. Polling at the 5-hour reset releases
+    // nothing, but the old soonest-reset choice made the gate announce and
+    // poll for a reopening that could not happen.
+    const inHour = Date.now() + 3_600_000;
+    const inDays = Date.now() + 3 * 86_400_000;
+    const { gate, poller } = makePoller({
+      store: { claude: { accounts: { a: { accessToken: 'a' } } } },
+      usage: async () => ({
+        supported: true,
+        windows: [
+          { kind: 'session', usedPercent: 99.5, resetsAt: inHour },
+          { kind: 'weekly', usedPercent: 98.2, resetsAt: inDays },
+        ],
+      }),
+      config: { providers: ['claude'] },
+    });
+    await poller.refreshAll();
+    assert.equal(gate.blockReason('claude')?.resetsAt, inDays);
+    assert.equal(gate.blockReason('claude')?.window, 'weekly');
+  });
+});
+
+describe('regression: the stream backstop must not strand later turns', () => {
+  /** apply() with the poller's network tick neutralized, exposing listeners. */
+  async function applied(config) {
+    const { apply } = await import('../src/index.js');
+    const listeners = {};
+    const ctx = {
+      on: (event, handler) => (listeners[event] ??= []).push(handler),
+      logger: () => quietLogger,
+    };
+    const realSetTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = () => ({ unref() {} });
+    try {
+      apply(ctx, { providers: ['claude'], ...config });
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+    }
+    // Let the initial poll (no logins in the test HOME) finish first.
+    await new Promise((resolve) => realSetTimeout(resolve, 50));
+    const stream = async (produce, signal) => {
+      const chunks = [];
+      for await (const chunk of listeners['llm/stream'][0]({ provider: 'claude', signal }, produce)) chunks.push(chunk);
+      return chunks;
+    };
+    return { stream, dispose: () => listeners.dispose.forEach((h) => h()) };
+  }
+
+  const refusal = (retryAfterMs) =>
+    async function* () {
+      yield {
+        type: 'finish',
+        reason: { kind: 'error', failure: { code: 'RATE_LIMIT', message: 'limit', providerRetryAfterMs: retryAfterMs } },
+      };
+    };
+  const ok = async function* () {
+    yield { type: 'text', text: 'ok' };
+  };
+
+  it('reopens when the disclosed refusal lapses even with polling blind', async () => {
+    // Before the fix, a refusal paused the gate until a poll succeeded. With
+    // the usage endpoint throttled, that is never, and every later turn hung.
+    const { stream, dispose } = await applied({});
+    await stream(refusal(30));
+    assert.deepEqual(await stream(ok), [{ type: 'text', text: 'ok' }]);
+    dispose();
+  });
+
+  it('gives up on a held turn once maxHoldMs passes', async () => {
+    // The deadline was only checked when the gate woke the waiter, which a
+    // closed gate never does, so maxHoldMs never fired.
+    const { stream, dispose } = await applied({ maxHoldMs: 30 });
+    await stream(refusal(3_600_000));
+    await assert.rejects(stream(ok), /giving up on this turn/);
+    dispose();
+  });
+});

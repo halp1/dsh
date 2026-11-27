@@ -28,6 +28,13 @@ class ProviderGate {
     this.blocked = undefined;
     /** Resolvers of every request parked on this gate. */
     this.waiters = new Set();
+    /** Timer that reopens an expiring pause. */
+    this.expiry = undefined;
+  }
+
+  clearExpiry() {
+    if (this.expiry !== undefined) clearTimeout(this.expiry);
+    this.expiry = undefined;
   }
 
   get isBlocked() {
@@ -81,12 +88,24 @@ export class PauseGate {
    * window is still closed, so waiters must keep waiting.
    * @param provider - provider id.
    * @param reason - `{ window, usedPercent, resetsAt }` describing the block.
+   * @param options.expiresInMs - reopen after this long unless another pause
+   *   replaces this one first. For blocks no usage reading backs, such as the
+   *   provider's own refusal, which would otherwise hold forever while polling
+   *   is blind.
    */
-  pause(provider, reason) {
+  pause(provider, reason, { expiresInMs } = {}) {
     if (this.disposed) return;
     const gate = this.gateFor(provider);
     const wasBlocked = gate.isBlocked;
     gate.blocked = reason;
+    gate.clearExpiry();
+    if (expiresInMs !== undefined) {
+      gate.expiry = setTimeout(() => {
+        gate.expiry = undefined;
+        if (gate.blocked === reason) this.resume(provider, { cause: 'expired' });
+      }, expiresInMs);
+      gate.expiry.unref?.();
+    }
     if (!wasBlocked) this.onPause(provider, reason);
   }
 
@@ -100,6 +119,7 @@ export class PauseGate {
     if (gate === undefined || !gate.isBlocked) return;
     const previous = gate.blocked;
     gate.blocked = undefined;
+    gate.clearExpiry();
     const released = gate.waiters.size;
     for (const release of gate.waiters) release();
     gate.waiters.clear();
@@ -152,6 +172,7 @@ export class PauseGate {
     this.disposed = true;
     for (const gate of this.gates.values()) {
       gate.blocked = undefined;
+      gate.clearExpiry();
       for (const release of gate.waiters) release();
       gate.waiters.clear();
     }
@@ -183,18 +204,35 @@ export function offendingWindow(usage, threshold) {
 }
 
 /**
- * The soonest instant any offending window is expected to reopen.
+ * The window that keeps an account closed longest, and when it reopens.
+ *
+ * An account is usable only once EVERY offending window has reset, so a full
+ * 5-hour window resetting in an hour does not reopen an account whose weekly
+ * window is also full for three more days. A full window with no disclosed
+ * reset makes the reopening time unknown.
  * @param usage - normalized provider usage.
  * @param threshold - the pause threshold.
- * @returns epoch ms, or undefined when nothing disclosed a reset.
+ * @returns `{ window, resetsAt }`, or undefined when no window is over the
+ *   threshold. `resetsAt` is undefined when any offending window has none.
  */
-export function earliestReset(usage, threshold) {
+export function governingWindow(usage, threshold) {
   if (usage?.supported !== true || !Array.isArray(usage.windows)) return undefined;
-  let soonest;
+  let governing;
+  let unknown = false;
   for (const window of usage.windows) {
-    if (typeof window.usedPercent !== 'number' || window.usedPercent < threshold) continue;
-    if (typeof window.resetsAt !== 'number' || !Number.isFinite(window.resetsAt)) continue;
-    if (soonest === undefined || window.resetsAt < soonest) soonest = window.resetsAt;
+    if (typeof window.usedPercent !== 'number' || !Number.isFinite(window.usedPercent)) continue;
+    if (window.usedPercent < threshold) continue;
+    const resetsAt =
+      typeof window.resetsAt === 'number' && Number.isFinite(window.resetsAt)
+        ? window.resetsAt
+        : undefined;
+    if (resetsAt === undefined) {
+      if (!unknown) governing = window;
+      unknown = true;
+      continue;
+    }
+    if (!unknown && (governing === undefined || resetsAt > governing.resetsAt)) governing = window;
   }
-  return soonest;
+  if (governing === undefined) return undefined;
+  return { window: governing, resetsAt: unknown ? undefined : governing.resetsAt };
 }

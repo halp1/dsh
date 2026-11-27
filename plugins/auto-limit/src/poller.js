@@ -28,7 +28,7 @@ import {
   fetchUsage,
   loadAuthStore,
 } from './usage.js';
-import { earliestReset, offendingWindow } from './gate.js';
+import { governingWindow, offendingWindow } from './gate.js';
 
 /** Bound on one usage lookup, so a hung endpoint cannot stall the poll loop. */
 const USAGE_TIMEOUT_MS = 10_000;
@@ -412,20 +412,20 @@ export class UsagePoller {
     // Every account is over threshold; pause on the one that reopens soonest.
     let best;
     for (const entry of offenders) {
-      const resetsAt = earliestReset(entry.usage, this.config.threshold);
+      const governing = governingWindow(entry.usage, this.config.threshold);
       if (
         best === undefined ||
-        (resetsAt !== undefined &&
-          (best.resetsAt === undefined || resetsAt < best.resetsAt))
+        (governing.resetsAt !== undefined &&
+          (best.governing.resetsAt === undefined || governing.resetsAt < best.governing.resetsAt))
       ) {
-        best = { entry, resetsAt };
+        best = { entry, governing };
       }
     }
 
     this.gate.pause(provider, {
-      window: describeWindow(best.entry.window),
-      usedPercent: best.entry.window.usedPercent,
-      resetsAt: best.resetsAt,
+      window: describeWindow(best.governing.window),
+      usedPercent: best.governing.window.usedPercent,
+      resetsAt: best.governing.resetsAt,
       account: best.entry.key,
     });
   }

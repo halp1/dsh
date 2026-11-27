@@ -149,7 +149,7 @@ export function rateLimitSignal(chunk) {
 }
 
 /** Format an epoch instant for a human-readable log line. */
-function formatReset(resetsAt) {
+function formatInstant(resetsAt) {
   if (typeof resetsAt !== 'number' || !Number.isFinite(resetsAt)) return 'an unknown time';
   const delta = resetsAt - Date.now();
   const when = new Date(resetsAt).toLocaleString();
@@ -179,7 +179,7 @@ export function apply(ctx, rawConfig = {}) {
       logger.warn(
         `auto-limit: pausing ${provider} — ${reason.window} window at ` +
           `${reason.usedPercent.toFixed(1)}% (threshold ${config.threshold}%). ` +
-          `Requests are held until ${formatReset(reason.resetsAt)}.`,
+          `Requests are held until ${formatInstant(reason.resetsAt)}.`,
       );
     },
     onResume: (provider, detail) => {
@@ -202,21 +202,32 @@ export function apply(ctx, rawConfig = {}) {
    * a turn fail than hang for hours can bound it.
    */
   async function holdUntilOpen(provider, signal) {
-    const deadline = config.maxHoldMs > 0 ? Date.now() + config.maxHoldMs : undefined;
+    const gaveUp = () => {
+      const reason = gate.blockReason(provider);
+      return new Error(
+        `auto-limit: ${provider} still paused (${reason?.window} window at ` +
+          `${reason?.usedPercent?.toFixed?.(1)}%) after waiting ` +
+          `${Math.round(config.maxHoldMs / 1000)}s; giving up on this turn.`,
+      );
+    };
+    // The deadline has to wake the waiter itself: the gate only wakes it on a
+    // resume, which is exactly what has not happened.
+    let timer;
+    const deadline = new AbortController();
+    if (config.maxHoldMs > 0) {
+      timer = setTimeout(() => deadline.abort(gaveUp()), config.maxHoldMs);
+      timer.unref?.();
+    }
+    const wake = signal === undefined ? deadline.signal : AbortSignal.any([signal, deadline.signal]);
     let waited = false;
-
-    // Loop because a release is not a guarantee the next window is open: a
-    // fresh poll can find the following window already full.
-    while (gate.blockReason(provider) !== undefined) {
-      if (deadline !== undefined && Date.now() >= deadline) {
-        const reason = gate.blockReason(provider);
-        throw new Error(
-          `auto-limit: ${provider} still paused (${reason?.window} window at ` +
-            `${reason?.usedPercent?.toFixed?.(1)}%) after waiting ` +
-            `${Math.round(config.maxHoldMs / 1000)}s; giving up on this turn.`,
-        );
+    try {
+      // Loop because a release is not a guarantee the next window is open: a
+      // fresh poll can find the following window already full.
+      while (gate.blockReason(provider) !== undefined) {
+        waited = (await gate.wait(provider, wake)) || waited;
       }
-      waited = (await gate.wait(provider, signal)) || waited;
+    } finally {
+      clearTimeout(timer);
     }
     return waited;
   }
@@ -234,7 +245,7 @@ export function apply(ctx, rawConfig = {}) {
       const reason = gate.blockReason(provider);
       logger.info(
         `auto-limit: holding a ${provider} request — ${reason.window} window at ` +
-          `${reason.usedPercent.toFixed(1)}%; waiting for reset at ${formatReset(reason.resetsAt)}.`,
+          `${reason.usedPercent.toFixed(1)}%; waiting for reset at ${formatInstant(reason.resetsAt)}.`,
       );
       await holdUntilOpen(provider, options.signal);
       logger.info(`auto-limit: released a held ${provider} request; continuing the turn.`);
@@ -249,13 +260,23 @@ export function apply(ctx, rawConfig = {}) {
     // gate closes on it regardless of what polling knows.
     for await (const chunk of next()) {
       const retryAfterMs = rateLimitSignal(chunk);
-      if (retryAfterMs !== undefined) {
-        gate.pause(provider, {
-          window: 'provider-reported limit',
-          usedPercent: 100,
-          resetsAt: Date.now() + retryAfterMs,
-          source: 'stream',
-        });
+      // A pause from a real reading already knows its reset; a refusal must
+      // not shorten it.
+      const current = gate.blockReason(provider);
+      if (retryAfterMs !== undefined && (current === undefined || current.source === 'stream')) {
+        // The provider named how long it refuses, so the block lapses then
+        // even if polling stays blind. Holding it until a reading arrives would
+        // strand every later turn behind a refusal that has passed.
+        gate.pause(
+          provider,
+          {
+            window: 'provider-reported limit',
+            usedPercent: 100,
+            resetsAt: Date.now() + retryAfterMs,
+            source: 'stream',
+          },
+          { expiresInMs: retryAfterMs },
+        );
         // Ask the poller to confirm with a real reading once the budget allows.
         poller.schedule(Math.min(retryAfterMs, 60_000));
       }
