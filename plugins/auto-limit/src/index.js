@@ -34,6 +34,7 @@
  * @module dsh-plugin-auto-limit
  */
 
+import { formatInstant } from './forecast.js';
 import { PauseGate } from './gate.js';
 import { UsagePoller } from './poller.js';
 import { METERED_PROVIDERS } from './usage.js';
@@ -146,18 +147,6 @@ export function rateLimitSignal(chunk) {
   // No disclosed reset: hold briefly and let the poller establish the truth,
   // rather than guessing a long window the provider never named.
   return 60_000;
-}
-
-/** Format an epoch instant for a human-readable log line. */
-function formatInstant(resetsAt) {
-  if (typeof resetsAt !== 'number' || !Number.isFinite(resetsAt)) return 'an unknown time';
-  const delta = resetsAt - Date.now();
-  const when = new Date(resetsAt).toLocaleString();
-  if (delta <= 0) return `${when} (due now)`;
-  const minutes = Math.round(delta / 60_000);
-  if (minutes < 60) return `${when} (in ${minutes}m)`;
-  const hours = Math.floor(minutes / 60);
-  return `${when} (in ${hours}h ${minutes % 60}m)`;
 }
 
 /**

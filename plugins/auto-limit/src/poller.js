@@ -29,6 +29,7 @@ import {
   loadAuthStore,
 } from './usage.js';
 import { governingWindow, offendingWindow } from './gate.js';
+import { AccountHistory, formatInstant, poolClosesAt } from './forecast.js';
 
 /** Bound on one usage lookup, so a hung endpoint cannot stall the poll loop. */
 const USAGE_TIMEOUT_MS = 10_000;
@@ -83,6 +84,15 @@ const STALE_AFTER_MS = 15 * 60_000;
  */
 const UNREAD_GRACE_MS = 10 * 60_000;
 
+/**
+ * Floor on a poll brought forward by a forecast. Twice the endpoint's budget,
+ * so a forecast that keeps landing just ahead cannot pin polling at the limit.
+ */
+const FORECAST_MIN_POLL_MS = 120_000;
+
+/** A forecast that moves by less than this is not logged again. */
+const FORECAST_LOG_SHIFT_MS = 15 * 60_000;
+
 export class UsagePoller {
   /**
    * @param options.gate - the pause gate to drive.
@@ -112,6 +122,10 @@ export class UsagePoller {
     this.deferredSince = new Map();
     /** Guards against overlapping runs when a poll outlives its interval. */
     this.running = false;
+    /** `provider/account` → {@link AccountHistory} of fresh readings. */
+    this.histories = new Map();
+    /** provider → when the open gate is on pace to close, `{ at, window, forecast }`. */
+    this.forecasts = new Map();
   }
 
   /**
@@ -173,11 +187,15 @@ export class UsagePoller {
    * revised (earlier) reset is still noticed.
    */
   nextDelayMs() {
-    const paused = this.gate.snapshot();
-    if (paused.length === 0) return this.config.pollIntervalMs;
-
     const now = Date.now();
-    let soonest = this.config.pausedPollIntervalMs;
+    const paused = this.gate.snapshot();
+    let soonest = paused.length === 0 ? this.config.pollIntervalMs : this.config.pausedPollIntervalMs;
+    // Poll when a forecast says the threshold will be crossed, so a fast burn
+    // is caught there rather than up to a full interval later.
+    for (const closing of this.forecasts.values()) {
+      soonest = Math.min(soonest, Math.max(FORECAST_MIN_POLL_MS, closing.at - now));
+    }
+
     for (const entry of paused) {
       if (typeof entry.resetsAt !== 'number') continue;
       // Poll a beat after the disclosed reset, to let the provider's own
@@ -276,6 +294,7 @@ export class UsagePoller {
       // Logged out: nothing to meter, and any stale pause must not outlive the
       // login it was based on.
       this.gate.resume(provider, { cause: 'logged-out' });
+      this.forecasts.delete(provider);
       return;
     }
 
@@ -318,7 +337,7 @@ export class UsagePoller {
           if (cached !== undefined) {
             const dup = readings.find((entry) => sameSubscription(entry.usage, cached));
             if (dup !== undefined) dup.keys.push(key);
-            else readings.push({ key, keys: [key], usage: cached });
+            else readings.push({ key, keys: [key], usage: cached, fresh: false });
           } else {
             unread += 1;
           }
@@ -345,7 +364,7 @@ export class UsagePoller {
           }
           const dup = readings.find((entry) => sameSubscription(entry.usage, cached));
           if (dup !== undefined) dup.keys.push(pending.key);
-          else readings.push({ key: pending.key, keys: [pending.key], usage: cached });
+          else readings.push({ key: pending.key, keys: [pending.key], usage: cached, fresh: false });
         }
         break;
       }
@@ -354,9 +373,10 @@ export class UsagePoller {
       const duplicate = readings.find((entry) => sameSubscription(entry.usage, usage));
       if (duplicate !== undefined) {
         duplicate.keys.push(key);
+        duplicate.fresh = true;
         continue;
       }
-      readings.push({ key, keys: [key], usage });
+      readings.push({ key, keys: [key], usage, fresh: true });
     }
 
     if (readings.length === 0) {
@@ -368,6 +388,7 @@ export class UsagePoller {
     this.cooldownUntil.delete(provider);
     this.lastGoodAt.set(provider, Date.now());
     this.staleWarned.delete(provider);
+    this.recordHistory(provider, readings);
 
     const offenders = readings.map(({ key, usage }) => ({
       key,
@@ -378,8 +399,10 @@ export class UsagePoller {
     const usable = offenders.filter((entry) => entry.window === undefined);
     if (usable.length > 0) {
       this.gate.resume(provider, { cause: 'quota-available', account: usable[0].key });
+      this.updateForecast(provider, unread > 0 ? undefined : this.poolClosing(provider, offenders));
       return;
     }
+    this.updateForecast(provider, undefined);
 
     if (unread > 0 && !this.everyAccountSeen(provider, accounts)) {
       // An account of this provider has never been read, so "every
@@ -428,6 +451,64 @@ export class UsagePoller {
       resetsAt: best.governing.resetsAt,
       account: best.entry.key,
     });
+  }
+
+  historyFor(provider, key) {
+    const id = `${provider}/${key}`;
+    let history = this.histories.get(id);
+    if (history === undefined) {
+      history = new AccountHistory();
+      this.histories.set(id, history);
+    }
+    return history;
+  }
+
+  /**
+   * Record this cycle's fresh readings under the login that was read. Logins
+   * of one subscription read in turn each keep every other reading, which is
+   * still enough to fit a pace.
+   */
+  recordHistory(provider, readings) {
+    for (const entry of readings) {
+      if (entry.fresh) this.historyFor(provider, entry.key).record(entry.usage, Date.now());
+    }
+  }
+
+  /** When every subscription of a provider is on pace to be over threshold. */
+  poolClosing(provider, offenders) {
+    const now = Date.now();
+    return poolClosesAt(
+      offenders.map(({ key, usage, window }) =>
+        window !== undefined
+          ? { at: now, window }
+          : this.historyFor(provider, key).closesAt(usage, this.config.threshold, now),
+      ),
+    );
+  }
+
+  /** Keep a provider's forecast and log when it appears, moves, or clears. */
+  updateForecast(provider, closing) {
+    const previous = this.forecasts.get(provider);
+    if (closing === undefined) {
+      if (previous === undefined) return;
+      this.forecasts.delete(provider);
+      if (this.gate.blockReason(provider) === undefined) {
+        this.logger.info(`auto-limit: ${provider} is no longer on pace to reach ${this.config.threshold}% before reset.`);
+      }
+      return;
+    }
+    this.forecasts.set(provider, closing);
+    if (previous !== undefined && Math.abs(previous.at - closing.at) < FORECAST_LOG_SHIFT_MS) return;
+    const { window, forecast } = closing;
+    this.logger.info(
+      `auto-limit: ${provider} is on pace to reach ${this.config.threshold}% at ` +
+        `${formatInstant(closing.at)}` +
+        (forecast === undefined
+          ? ''
+          : ` (${describeWindow(window)} window at ${forecast.usedPercent.toFixed(1)}%, ` +
+            `+${forecast.ratePerHour.toFixed(1)}%/h, resets ${formatInstant(forecast.resetsAt)})`) +
+        '.',
+    );
   }
 
   /**
